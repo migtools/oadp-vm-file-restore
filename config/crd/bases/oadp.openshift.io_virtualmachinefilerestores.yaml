@@ -40,10 +40,50 @@ spec:
           spec:
             description: spec defines the desired state of VirtualMachineFileRestore
             properties:
-              foo:
-                description: foo is an example field of VirtualMachineFileRestore.
-                  Edit virtualmachinefilerestore_types.go to remove/update
+              endTime:
+                description: EndTime is an optional field to filter backups created
+                  before this time.
+                format: date-time
                 type: string
+              requestedBackups:
+                description: |-
+                  RequestedBackups lists specific backups to restore.
+                  Used only when SelectionMode is "ExplicitList".
+                items:
+                  type: string
+                type: array
+              selectionMode:
+                allOf:
+                - enum:
+                  - AllInRange
+                  - ExplicitList
+                - enum:
+                  - AllInRange
+                  - ExplicitList
+                default: AllInRange
+                description: |-
+                  SelectionMode defines how backups are chosen for file restore.
+                  Valid values: "AllInRange", "ExplicitList".
+                type: string
+              startTime:
+                description: StartTime is an optional field to filter backups created
+                  after this time.
+                format: date-time
+                type: string
+              virtualMachineName:
+                description: VirtualMachineName specifies the name of the VirtualMachine
+                  whose backups are to be listed or restored.
+                minLength: 1
+                type: string
+              virtualMachineNamespace:
+                description: VirtualMachineNamespace specifies the namespace of the
+                  VirtualMachine.
+                minLength: 1
+                type: string
+            required:
+            - selectionMode
+            - virtualMachineName
+            - virtualMachineNamespace
             type: object
           status:
             description: status defines the observed state of VirtualMachineFileRestore
@@ -117,6 +157,35 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              discoveredBackups:
+                description: DiscoveredBackups lists all backups found matching the
+                  selection criteria
+                items:
+                  description: VeleroBackupInfo contains information about a discovered
+                    backup
+                  properties:
+                    createdAt:
+                      format: date-time
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                  required:
+                  - createdAt
+                  - name
+                  - namespace
+                  type: object
+                type: array
+              phase:
+                description: Phase indicates the overall phase of the file-serving
+                  operation
+                enum:
+                - New
+                - BackingOff
+                - Created
+                - Deleting
+                type: string
             type: object
         required:
         - spec
