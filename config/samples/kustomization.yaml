@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- oadp_v1alpha1_virtualmachinefilerestore.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

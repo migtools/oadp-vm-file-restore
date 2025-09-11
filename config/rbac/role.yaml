@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - oadp.openshift.io
+  resources:
+  - virtualmachinefilerestores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - oadp.openshift.io
+  resources:
+  - virtualmachinefilerestores/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - oadp.openshift.io
+  resources:
+  - virtualmachinefilerestores/status
+  verbs:
+  - get
+  - patch
+  - update
