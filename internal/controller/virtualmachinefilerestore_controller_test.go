@@ -51,7 +51,9 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

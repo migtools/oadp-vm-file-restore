@@ -22,6 +22,9 @@ resources:
 # default, aiding admins in cluster management. Those roles are
 # not used by the oadp-vm-file-restore itself. You can comment the following lines
 # if you do not want those helpers be installed with your Project.
+- virtualmachinebackupsdiscovery_admin_role.yaml
+- virtualmachinebackupsdiscovery_editor_role.yaml
+- virtualmachinebackupsdiscovery_viewer_role.yaml
 - virtualmachinefilerestore_admin_role.yaml
 - virtualmachinefilerestore_editor_role.yaml
 - virtualmachinefilerestore_viewer_role.yaml

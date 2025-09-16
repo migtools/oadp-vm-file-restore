@@ -1,0 +1,117 @@
+/*
+Copyright 2025.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package constant contains all common constants used in the VM File Restore project
+package constant
+
+// Common labels for objects manipulated by the VM File Restore Controller
+const (
+	OadpLabel           = "oadp.openshift.io/oadp-vm-file-restore"
+	OadpLabelValue      = TrueString
+	ManagedByLabel      = "app.kubernetes.io/managed-by"
+	ManagedByLabelValue = "oadp-vm-file-restore-controller"
+	VMFROriginUUIDLabel = "oadp.openshift.io/vmfr-origin-uuid"
+	VMFRFinalizerName   = "virtualmachinefilerestore.oadp.openshift.io/finalizer"
+)
+
+// Common annotations for tracking ownership and origin
+const (
+	VMFROriginNameAnnotation          = "oadp.openshift.io/vmfr-origin-name"
+	VMFROriginNamespaceAnnotation     = "oadp.openshift.io/vmfr-origin-namespace"
+	BackupNameAnnotation              = "oadp.openshift.io/backup-name"
+	VirtualMachineNameAnnotation      = "oadp.openshift.io/vm-name"
+	VirtualMachineNamespaceAnnotation = "oadp.openshift.io/vm-namespace"
+)
+
+// Common environment variables for the VM File Restore Controller
+const (
+	WatchNamespaceEnvVar = "WATCH_NAMESPACE"
+	// LogLevelEnvVar: Numeric log level corresponding to logrus levels (matching velero).
+	// 0 = panic, 1 = fatal, 2 = error, 3 = warn, 4 = info, 5 = debug, 6 = trace
+	LogLevelEnvVar = "LOG_LEVEL"
+	// LogFormatEnvVar: Log format, either "json" for structured logging or "text" for human-readable
+	LogFormatEnvVar = "LOG_FORMAT"
+)
+
+// Common string constants
+const (
+	EmptyString     = ""
+	TrueString      = "True"
+	FalseString     = "False"
+	NameDelimiter   = "-"
+	NamespaceString = "Namespace"
+	NameString      = "name"
+	JSONTagString   = "json"
+	CommaString     = ","
+)
+
+// Log level constants (corresponding to logrus levels)
+const (
+	LogLevelPanic = "0"
+	LogLevelFatal = "1"
+	LogLevelError = "2"
+	LogLevelWarn  = "3"
+	LogLevelInfo  = "4"
+	LogLevelDebug = "5"
+	LogLevelTrace = "6"
+)
+
+// Log format constants
+const (
+	LogFormatJSON = "json"
+	LogFormatText = "text"
+)
+
+// Discovery and restore constants
+const (
+	DefaultDiscoveryTimeoutMinutes = 30
+	DefaultRetryIntervalSeconds    = 30
+	DiscoveryBatchRequeueSeconds   = 2
+	MaxBackupDiscoveryParallel     = 10
+	BackupDiscoveryBatchSize       = 3
+	MaxRetryAttempts               = 5
+)
+
+// Backup discovery phases and reasons
+const (
+	DiscoveryPhaseInitializing = "Initializing"
+	DiscoveryPhaseDiscovering  = "Discovering"
+	DiscoveryPhaseCompleted    = "Completed"
+	DiscoveryPhaseFailed       = "Failed"
+
+	ReasonBackupsFound          = "BackupsFound"
+	ReasonNoValidBackupsFound   = "NoValidBackupsFound"
+	ReasonBackupSelectionFailed = "BackupSelectionFailed"
+	ReasonDeletionInProgress    = "DeletionInProgress"
+	ReasonDiscoveryTimeout      = "DiscoveryTimeout"
+)
+
+// File serving constants
+const (
+	DefaultFileServerPort    = 8080
+	DefaultFileServerTimeout = "10m"
+	FileServerPodPrefix      = "vmfr-fileserver"
+	FileServerServicePrefix  = "vmfr-service"
+)
+
+// Magic numbers
+const (
+	Base10                  = 10
+	Bits32                  = 32
+	DefaultRequeueMinutes   = 10
+	ErrorRequeueMinutes     = 5
+	DiscoveryRequeueMinutes = 2
+)

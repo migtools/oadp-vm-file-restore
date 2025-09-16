@@ -47,58 +47,15 @@ const (
 	VirtualMachineFileRestorePhaseDeleting VirtualMachineFileRestorePhase = "Deleting"
 )
 
-// VirtualMachineFileRestoreCondition represents detailed, granular states
-// of a VirtualMachineFileRestore. A single object may have multiple conditions
-// simultaneously, providing more insight than the high-level Phase alone.
-// +kubebuilder:validation:Enum=Accepted;BackupsDiscovered;FileRestoreRequested;FilesReady;Queued;Deleting
+// VirtualMachineFileRestoreCondition represents the state of a VirtualMachineFileRestore.
+// +kubebuilder:validation:Enum=Ready
 type VirtualMachineFileRestoreCondition string
 
 const (
-	// VirtualMachineFileRestoreConditionAccepted indicates the controller has acknowledged
-	// the request and it is valid for processing. This is typically the first condition set.
-	VirtualMachineFileRestoreConditionAccepted VirtualMachineFileRestoreCondition = "Accepted"
-
-	// VirtualMachineFileRestoreConditionBackupsDiscovered indicates that the controller
-	// has successfully discovered one or more Velero backups matching the selection criteria
-	// (time range or explicit list).
-	VirtualMachineFileRestoreConditionBackupsDiscovered VirtualMachineFileRestoreCondition = "BackupsDiscovered"
-
-	// VirtualMachineFileRestoreConditionFileRestoreRequested indicates that the user
-	// or system has requested access to files from the discovered backups.
-	VirtualMachineFileRestoreConditionFileRestoreRequested VirtualMachineFileRestoreCondition = "FileRestoreRequested"
-
-	// VirtualMachineFileRestoreConditionFilesReady indicates that the required files
-	// have been prepared and are now accessible to the user via the serving pod.
-	VirtualMachineFileRestoreConditionFilesReady VirtualMachineFileRestoreCondition = "FilesReady"
-
-	// VirtualMachineFileRestoreConditionQueued indicates that the request is waiting
-	// in a queue before processing, e.g., due to concurrency limits or other resources constraints.
-	VirtualMachineFileRestoreConditionQueued VirtualMachineFileRestoreCondition = "Queued"
-
-	// VirtualMachineFileRestoreConditionDeleting indicates that the object is being deleted
-	// and the controller is cleaning up associated resources.
-	VirtualMachineFileRestoreConditionDeleting VirtualMachineFileRestoreCondition = "Deleting"
+	// VirtualMachineFileRestoreConditionReady indicates that file serving resources
+	// have been created and files are accessible to the user.
+	VirtualMachineFileRestoreConditionReady VirtualMachineFileRestoreCondition = "Ready"
 )
-
-// SelectionMode defines how backups should be selected for file restore.
-// +kubebuilder:validation:Enum=AllInRange;ExplicitList
-type SelectionMode string
-
-const (
-	// SelectionModeAllInRange means all backups discovered between StartTime and EndTime
-	// are to be restored.
-	SelectionModeAllInRange SelectionMode = "AllInRange"
-
-	// SelectionModeExplicitList means exactly the backups in RequestedBackups should be restored.
-	SelectionModeExplicitList SelectionMode = "ExplicitList"
-)
-
-// VeleroBackupInfo contains information about a discovered backup
-type VeleroBackupInfo struct {
-	Name      string      `json:"name"`
-	Namespace string      `json:"namespace"`
-	CreatedAt metav1.Time `json:"createdAt"`
-}
 
 // VirtualMachineFileRestoreSpec defines the desired state of VirtualMachineFileRestore
 type VirtualMachineFileRestoreSpec struct {
@@ -106,35 +63,17 @@ type VirtualMachineFileRestoreSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
 
-	// VirtualMachineName specifies the name of the VirtualMachine whose backups are to be listed or restored.
+	// Reference to the VirtualMachineBackupsDiscovery resource in the same namespace
+	// that contains the discovered backups to serve files from.
 	// +kubebuilder:validation:MinLength=1
 	// +required
-	VirtualMachineName string `json:"virtualMachineName"`
+	BackupsDiscoveryRef string `json:"backupsDiscoveryRef"`
 
-	// VirtualMachineNamespace specifies the namespace of the VirtualMachine.
-	// +kubebuilder:validation:MinLength=1
-	// +required
-	VirtualMachineNamespace string `json:"virtualMachineNamespace"`
-
-	// SelectionMode defines how backups are chosen for file restore.
-	// Valid values: "AllInRange", "ExplicitList".
-	// +kubebuilder:validation:Enum=AllInRange;ExplicitList
-	// +kubebuilder:default=AllInRange
-	// +required
-	SelectionMode SelectionMode `json:"selectionMode"`
-
-	// StartTime is an optional field to filter backups created after this time.
+	// Specific backup names to serve files from, selected from the discovery results.
+	// If not specified, all valid backups from the discovery will be used for file serving.
+	// All specified backup names must exist in the ValidBackups list of the referenced discovery.
 	// +optional
-	StartTime *metav1.Time `json:"startTime,omitempty"`
-
-	// EndTime is an optional field to filter backups created before this time.
-	// +optional
-	EndTime *metav1.Time `json:"endTime,omitempty"`
-
-	// RequestedBackups lists specific backups to restore.
-	// Used only when SelectionMode is "ExplicitList".
-	// +optional
-	RequestedBackups []string `json:"requestedBackups,omitempty"`
+	SelectedBackups []string `json:"selectedBackups,omitempty"`
 }
 
 // VirtualMachineFileRestoreStatus defines the observed state of VirtualMachineFileRestore.
@@ -162,13 +101,29 @@ type VirtualMachineFileRestoreStatus struct {
 	// +optional
 	Phase VirtualMachineFileRestorePhase `json:"phase,omitempty"`
 
-	// DiscoveredBackups lists all backups found matching the selection criteria
+	// Information about the file serving resources that have been created.
 	// +optional
-	DiscoveredBackups []VeleroBackupInfo `json:"discoveredBackups,omitempty"`
+	FileServingInfo *FileServingInfo `json:"fileServingInfo,omitempty"`
+}
+
+// FileServingInfo contains information about file serving resources
+// TODO: Define file serving information structure based on chosen implementation
+// Structure will be determined when file serving mechanism is implemented
+type FileServingInfo struct {
+	// TODO: Add fields based on file serving implementation
+	// Potential fields may include:
+	// - Resource names (pods, services, jobs, etc.)
+	// - Access endpoints and credentials
+	// - Service ports and network configuration
+	// - User instructions for file access
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=vmfr,scope=Namespaced
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Discovery",type=string,JSONPath=`.spec.backupsDiscoveryRef`
+// +kubebuilder:printcolumn:name="Pod",type=string,JSONPath=`.status.fileServingInfo.podName`
 
 // VirtualMachineFileRestore is the Schema for the virtualmachinefilerestores API
 type VirtualMachineFileRestore struct {
@@ -176,7 +131,7 @@ type VirtualMachineFileRestore struct {
 
 	// metadata is a standard object metadata
 	// +optional
-	metav1.ObjectMeta `json:"metadata,omitempty,omitzero"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// spec defines the desired state of VirtualMachineFileRestore
 	// +required
@@ -184,7 +139,7 @@ type VirtualMachineFileRestore struct {
 
 	// status defines the observed state of VirtualMachineFileRestore
 	// +optional
-	Status VirtualMachineFileRestoreStatus `json:"status,omitempty,omitzero"`
+	Status VirtualMachineFileRestoreStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -1,0 +1,37 @@
+apiVersion: oadp.openshift.io/v1alpha1
+kind: VirtualMachineFileRestore
+metadata:
+  name: discovery-only-example
+  namespace: default
+spec:
+  # Action: DiscoverOnly or RequestFiles
+  action: DiscoverOnly
+
+  # The name of the VirtualMachine to discover backups for
+  virtualMachineName: my-vm
+
+  # The namespace where the VirtualMachine exists
+  virtualMachineNamespace: vm-namespace
+
+  # Selection mode: AllInRange or ExplicitList
+  selectionMode: AllInRange
+
+  # Optional: Time range for AllInRange mode
+  startTime: "2024-01-01T00:00:00Z"
+  endTime: "2024-12-31T23:59:59Z"
+---
+apiVersion: oadp.openshift.io/v1alpha1
+kind: VirtualMachineFileRestore
+metadata:
+  name: explicit-backup-restore
+  namespace: default
+spec:
+  # Action: RequestFiles will discover backups and create file serving pods
+  action: RequestFiles
+
+  virtualMachineName: my-vm
+  virtualMachineNamespace: vm-namespace
+  selectionMode: ExplicitList
+  requestedBackups:
+    - vm-backup-20241201
+    - vm-backup-20241215

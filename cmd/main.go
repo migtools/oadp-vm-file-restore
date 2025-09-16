@@ -19,12 +19,18 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"strconv"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/sirupsen/logrus"
+	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	uberzap "go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -36,19 +42,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
+	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
 	"github.com/migtools/oadp-vm-file-restore/internal/controller"
+	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 	// +kubebuilder:scaffold:imports
 )
 
 var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
+	scheme = runtime.NewScheme()
 )
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(oadpv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(velerov1api.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -79,13 +87,46 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
-	opts := zap.Options{
-		Development: true,
+
+	logLevel := zapcore.InfoLevel
+	// read loglevel string coming from DPA which is a logrus level
+	logLevelEnvInvalid := false
+	found := false
+	var logLevelEnv string
+	if logLevelEnv, found = os.LookupEnv(constant.LogLevelEnvVar); found && len(logLevelEnv) > 0 {
+		uint64LogLevel, err := strconv.ParseUint(logLevelEnv, constant.Base10, constant.Bits32)
+		if err == nil {
+			// only change from default if level can be parsed
+			level := logrus.Level(uint64LogLevel)
+			logLevel, logLevelEnvInvalid = translateLogrusToZapLevel(level)
+		} else {
+			logLevelEnvInvalid = true
+		}
 	}
+
+	logFormat := "text"
+	if logFormatEnv, found := os.LookupEnv(constant.LogFormatEnvVar); found && len(logFormatEnv) > 0 {
+		logFormat = logFormatEnv
+	}
+
+	opts := zap.Options{
+		Level:       logLevel,
+		Development: true,
+		Encoder:     encoderForFormat(logFormat),
+	}
+
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Initialize setup logger after configuring the global logger
+	setupLog := ctrl.Log.WithName("setup")
+
+	if logLevelEnvInvalid {
+		setupLog.Info(fmt.Sprintf("LogLevelEnv: %v is invalid, using default level: %v", logLevelEnv, logLevel.String()))
+	}
+	setupLog.Info(fmt.Sprintf("LogLevel: %v", logLevel.String()))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -154,6 +195,16 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// Get OADP namespace where Velero backups are located
+	oadpNamespace := os.Getenv(constant.WatchNamespaceEnvVar)
+	if len(oadpNamespace) == 0 {
+		setupLog.Error(
+			fmt.Errorf("%s environment variable is empty", constant.WatchNamespaceEnvVar),
+			"environment variable must be set")
+		os.Exit(1)
+	}
+	setupLog.Info("OADP namespace configured", "namespace", oadpNamespace)
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -161,6 +212,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "8f8d9561.openshift.io",
+		Logger:                 zap.New(zap.UseFlagOptions(&opts)),
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -178,10 +230,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.VirtualMachineFileRestoreReconciler{
+	// Initialize backup contents reader
+	backupReader := velerohelpers.NewVeleroBackupContentsReader()
+	backupReader.SetClient(mgr.GetClient())
+
+	// Create VirtualMachineBackupsDiscovery controller
+	vmbdReconciler := &controller.VirtualMachineBackupsDiscoveryReconciler{
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		OADPNamespace:        oadpNamespace,
+		BackupContentsReader: backupReader,
+	}
+
+	if err := vmbdReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachineBackupsDiscovery")
+		os.Exit(1)
+	}
+
+	// Create VirtualMachineFileRestore controller
+	vmfrReconciler := &controller.VirtualMachineFileRestoreReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}
+
+	if err := vmfrReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachineFileRestore")
 		os.Exit(1)
 	}
@@ -200,5 +272,40 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
+	}
+}
+
+func translateLogrusToZapLevel(level logrus.Level) (logLevel zapcore.Level, logLevelEnvInvalid bool) {
+	// only change from default if level can be parsed
+	switch level {
+	case logrus.DebugLevel, logrus.TraceLevel:
+		logLevel = zapcore.DebugLevel
+	case logrus.InfoLevel:
+		logLevel = zapcore.InfoLevel
+	case logrus.WarnLevel:
+		logLevel = zapcore.WarnLevel
+	case logrus.ErrorLevel:
+		logLevel = zapcore.ErrorLevel
+	case logrus.FatalLevel:
+		logLevel = zapcore.FatalLevel
+	case logrus.PanicLevel:
+		logLevel = zapcore.PanicLevel
+	default:
+		logLevelEnvInvalid = true
+		logLevel = zapcore.InfoLevel
+	}
+	return logLevel, logLevelEnvInvalid
+}
+
+func encoderForFormat(format string) zapcore.Encoder {
+	switch format {
+	case "json":
+		cfg := uberzap.NewProductionConfig()
+		return zapcore.NewJSONEncoder(cfg.EncoderConfig)
+	case "text":
+		fallthrough
+	default:
+		cfg := uberzap.NewDevelopmentConfig()
+		return zapcore.NewConsoleEncoder(cfg.EncoderConfig)
 	}
 }

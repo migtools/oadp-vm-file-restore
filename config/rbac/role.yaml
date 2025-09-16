@@ -7,6 +7,7 @@ rules:
 - apiGroups:
   - oadp.openshift.io
   resources:
+  - virtualmachinebackupsdiscoveries
   - virtualmachinefilerestores
   verbs:
   - create
@@ -19,14 +20,24 @@ rules:
 - apiGroups:
   - oadp.openshift.io
   resources:
+  - virtualmachinebackupsdiscoveries/finalizers
   - virtualmachinefilerestores/finalizers
   verbs:
   - update
 - apiGroups:
   - oadp.openshift.io
   resources:
+  - virtualmachinebackupsdiscoveries/status
   - virtualmachinefilerestores/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - velero.io
+  resources:
+  - backups
+  verbs:
+  - get
+  - list
+  - watch
