@@ -9,10 +9,22 @@ GOBIN=$(shell go env GOBIN)
 endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
-# Be aware that the target commands are only tested with Docker which is
-# scaffolded by default. However, you might want to replace it to use other
-# tools. (i.e. podman)
-CONTAINER_TOOL ?= docker
+# By default, this Makefile uses docker, as the target commands have been tested primarily with it.
+# However, if docker is not available, the Makefile will attempt to use podman if it's installed.
+# You may also set CONTAINER_TOOL directly as an environment variable to specify a different tool.
+# If neither docker nor podman is found, or if the specified tool is unavailable, the Makefile will exit with an error.
+
+# Set CONTAINER_TOOL to Docker or Podman if not already defined by the user
+CONTAINER_TOOL ?= $(shell \
+  if command -v docker >/dev/null 2>&1; then echo docker; \
+  elif command -v podman >/dev/null 2>&1; then echo podman; \
+  else echo ""; \
+  fi \
+)
+ifeq ($(shell command -v $(CONTAINER_TOOL) >/dev/null 2>&1 && echo found),)
+  $(error The selected container tool '$(CONTAINER_TOOL)' is not available on this system. Please install it or choose a different tool.)
+endif
+$(info Using Container Tool: $(CONTAINER_TOOL))
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
