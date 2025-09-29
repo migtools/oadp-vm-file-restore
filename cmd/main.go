@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -57,6 +58,7 @@ func init() {
 
 	utilruntime.Must(oadpv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(velerov1api.AddToScheme(scheme))
+	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -249,8 +251,10 @@ func main() {
 
 	// Create VirtualMachineFileRestore controller
 	vmfrReconciler := &controller.VirtualMachineFileRestoreReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		OADPNamespace:        oadpNamespace,
+		BackupContentsReader: backupReader,
 	}
 
 	if err := vmfrReconciler.SetupWithManager(mgr); err != nil {

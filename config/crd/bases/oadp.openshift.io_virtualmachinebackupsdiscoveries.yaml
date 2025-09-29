@@ -113,6 +113,35 @@ spec:
                     name:
                       description: Name of the backup resource.
                       type: string
+                    pvcs:
+                      description: |-
+                        PVCs contains the list of PVCs available in this backup
+                        This field is populated during file restore processing
+                      items:
+                        description: BackupPVCInfo contains minimal PVC information
+                          from a backup
+                        properties:
+                          name:
+                            description: Name is the name of the PersistentVolumeClaim
+                            type: string
+                          namespace:
+                            description: Namespace is the namespace of the PersistentVolumeClaim
+                            type: string
+                          size:
+                            description: Size of the PVC storage request from the
+                              backup contents in human-readable format (e.g., "5Gi",
+                              "30Gi")
+                            type: string
+                          uid:
+                            description: UID is the UID of the PersistentVolumeClaim
+                              resource
+                            type: string
+                        required:
+                        - name
+                        - namespace
+                        - uid
+                        type: object
+                      type: array
                     status:
                       description: Current status of backup discovery for this backup.
                       enum:
@@ -245,6 +274,35 @@ spec:
                     name:
                       description: Name of the backup resource.
                       type: string
+                    pvcs:
+                      description: |-
+                        PVCs contains the list of PVCs available in this backup
+                        This field is populated during file restore processing
+                      items:
+                        description: BackupPVCInfo contains minimal PVC information
+                          from a backup
+                        properties:
+                          name:
+                            description: Name is the name of the PersistentVolumeClaim
+                            type: string
+                          namespace:
+                            description: Namespace is the namespace of the PersistentVolumeClaim
+                            type: string
+                          size:
+                            description: Size of the PVC storage request from the
+                              backup contents in human-readable format (e.g., "5Gi",
+                              "30Gi")
+                            type: string
+                          uid:
+                            description: UID is the UID of the PersistentVolumeClaim
+                              resource
+                            type: string
+                        required:
+                        - name
+                        - namespace
+                        - uid
+                        type: object
+                      type: array
                     reason:
                       description: Reason why this backup doesn't contain the VM or
                         couldn't be processed.
@@ -284,6 +342,35 @@ spec:
                     name:
                       description: Name of the backup resource.
                       type: string
+                    pvcs:
+                      description: |-
+                        PVCs contains the list of PVCs available in this backup
+                        This field is populated during file restore processing
+                      items:
+                        description: BackupPVCInfo contains minimal PVC information
+                          from a backup
+                        properties:
+                          name:
+                            description: Name is the name of the PersistentVolumeClaim
+                            type: string
+                          namespace:
+                            description: Namespace is the namespace of the PersistentVolumeClaim
+                            type: string
+                          size:
+                            description: Size of the PVC storage request from the
+                              backup contents in human-readable format (e.g., "5Gi",
+                              "30Gi")
+                            type: string
+                          uid:
+                            description: UID is the UID of the PersistentVolumeClaim
+                              resource
+                            type: string
+                        required:
+                        - name
+                        - namespace
+                        - uid
+                        type: object
+                      type: array
                   required:
                   - name
                   type: object

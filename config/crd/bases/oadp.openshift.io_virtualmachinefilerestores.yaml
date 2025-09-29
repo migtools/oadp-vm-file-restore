@@ -145,6 +145,11 @@ spec:
                 description: Information about the file serving resources that have
                   been created.
                 type: object
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
               phase:
                 description: Phase indicates the overall phase of the file-serving
                   operation
@@ -154,6 +159,52 @@ spec:
                 - Created
                 - Deleting
                 type: string
+              pvcRestores:
+                description: |-
+                  PVCRestores contains PVC-grouped restore information showing which backups each PVC was restored from.
+                  This provides a user-friendly view of the restoration data organized by PVC.
+                items:
+                  description: PVCRestoreInfo contains information about a PVC and
+                    all backups it has been restored from
+                  properties:
+                    namespace:
+                      description: Namespace of the PVC
+                      type: string
+                    pvc:
+                      description: Name of the PVC
+                      type: string
+                    restores:
+                      description: Restores contains all backup restores for this
+                        PVC
+                      items:
+                        description: RestoreInfo contains information about a specific
+                          backup restore for a PVC
+                        properties:
+                          backupName:
+                            description: BackupName is the name of the backup this
+                              restore came from
+                            type: string
+                          timestamp:
+                            description: Timestamp indicates when the backup was created
+                            format: date-time
+                            type: string
+                        required:
+                        - backupName
+                        type: object
+                      type: array
+                    size:
+                      description: Size of the PVC in human-readable format (e.g.,
+                        "5Gi", "30Gi")
+                      type: string
+                    uid:
+                      description: UID of the PVC from the backup
+                      type: string
+                  required:
+                  - namespace
+                  - pvc
+                  - uid
+                  type: object
+                type: array
             type: object
         required:
         - spec

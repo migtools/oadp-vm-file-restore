@@ -322,7 +322,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 		}
 
 		// Apply basic spec filtering (namespace inclusion/exclusion)
-		if r.isBackupValidForVM(backup, vm) {
+		if velerohelpers.ValidateVMInBackupSpec(&backup, vm) {
 			candidates = append(candidates, backup)
 		}
 	}
@@ -369,7 +369,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 				}
 
 				// Check if backup is valid for this VM (basic spec filtering)
-				if r.isBackupValidForVM(backup, vm) {
+				if velerohelpers.ValidateVMInBackupSpec(&backup, vm) {
 					requestedBackupsStatus[backup.Name] = "candidate" // Will go through discovery
 				} else {
 					requestedBackupsStatus[backup.Name] = "filtered" // Exists but filtered out
@@ -901,34 +901,6 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) isDiscoveryComplete(vmbd *oad
 	stats := vmbd.Status.DiscoveryStats
 	// Discovery is complete only if no pending/in-progress work AND phase is Completed
 	return stats.Pending == 0 && stats.InProgress == 0 && vmbd.Status.Phase == oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseCompleted
-}
-
-// isBackupValidForVM performs basic backup filtering for VM compatibility
-func (r *VirtualMachineBackupsDiscoveryReconciler) isBackupValidForVM(backup velerov1api.Backup, vm *kubevirtv1.VirtualMachine) bool {
-	// Check if VM namespace is included in backup
-	includedNamespaces := backup.Spec.IncludedNamespaces
-	if len(includedNamespaces) > 0 {
-		found := false
-		for _, ns := range includedNamespaces {
-			if ns == vm.Namespace {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-
-	// Check if VM namespace is excluded from backup
-	excludedNamespaces := backup.Spec.ExcludedNamespaces
-	for _, ns := range excludedNamespaces {
-		if ns == vm.Namespace {
-			return false
-		}
-	}
-
-	return true
 }
 
 // updateStatusWithRetry performs a status update with retry on optimistic locking conflicts
