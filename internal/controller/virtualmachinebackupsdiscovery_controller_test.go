@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
+	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -646,7 +647,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 			})
 		})
 
-		Describe("isBackupValidForVM", func() {
+		Describe("ValidateVMInBackupSpec", func() {
 			var vm *kubevirtv1.VirtualMachine
 
 			BeforeEach(func() {
@@ -663,7 +664,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 					Spec: velerov1api.BackupSpec{},
 				}
 
-				result := testReconciler.isBackupValidForVM(backup, vm)
+				result := velerohelpers.ValidateVMInBackupSpec(&backup, vm)
 				Expect(result).To(BeTrue())
 			})
 
@@ -674,7 +675,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 					},
 				}
 
-				result := testReconciler.isBackupValidForVM(backup, vm)
+				result := velerohelpers.ValidateVMInBackupSpec(&backup, vm)
 				Expect(result).To(BeTrue())
 			})
 
@@ -685,7 +686,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 					},
 				}
 
-				result := testReconciler.isBackupValidForVM(backup, vm)
+				result := velerohelpers.ValidateVMInBackupSpec(&backup, vm)
 				Expect(result).To(BeFalse())
 			})
 
@@ -696,7 +697,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 					},
 				}
 
-				result := testReconciler.isBackupValidForVM(backup, vm)
+				result := velerohelpers.ValidateVMInBackupSpec(&backup, vm)
 				Expect(result).To(BeFalse())
 			})
 
@@ -707,7 +708,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 					},
 				}
 
-				result := testReconciler.isBackupValidForVM(backup, vm)
+				result := velerohelpers.ValidateVMInBackupSpec(&backup, vm)
 				Expect(result).To(BeTrue())
 			})
 
@@ -719,7 +720,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 					},
 				}
 
-				result := testReconciler.isBackupValidForVM(backup, vm)
+				result := velerohelpers.ValidateVMInBackupSpec(&backup, vm)
 				Expect(result).To(BeFalse())
 			})
 		})

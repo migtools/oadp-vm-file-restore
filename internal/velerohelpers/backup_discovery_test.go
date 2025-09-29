@@ -220,7 +220,7 @@ func TestBackupMetadata_JSONParsing(t *testing.T) {
 	}
 
 	vmItem := metadata.Items[0]
-	if vmItem.Kind != "VirtualMachine" {
+	if vmItem.Kind != virtualMachineKind {
 		t.Errorf("Expected Kind to be VirtualMachine, got %s", vmItem.Kind)
 	}
 	if vmItem.Namespace != "test-ns" {

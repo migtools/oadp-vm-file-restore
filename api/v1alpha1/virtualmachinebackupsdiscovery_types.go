@@ -26,12 +26,32 @@ import (
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
+// BackupPVCInfo contains minimal PVC information from a backup
+type BackupPVCInfo struct {
+	// Name is the name of the PersistentVolumeClaim
+	Name string `json:"name"`
+
+	// Namespace is the namespace of the PersistentVolumeClaim
+	Namespace string `json:"namespace"`
+
+	// UID is the UID of the PersistentVolumeClaim resource
+	UID string `json:"uid"`
+
+	// Size of the PVC storage request from the backup contents in human-readable format (e.g., "5Gi", "30Gi")
+	// +optional
+	Size string `json:"size,omitempty"`
+}
+
 // VeleroBackupInfo contains information about a discovered backup
 type VeleroBackupInfo struct {
 	// Name of the backup resource.
 	Name string `json:"name"`
 	// When the backup was created.
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
+	// PVCs contains the list of PVCs available in this backup
+	// This field is populated during file restore processing
+	// +optional
+	PVCs []BackupPVCInfo `json:"pvcs,omitempty"`
 }
 
 // InvalidBackupInfo contains information about a backup that doesn't contain the VM

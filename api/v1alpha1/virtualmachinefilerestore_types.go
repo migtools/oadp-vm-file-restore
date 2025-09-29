@@ -48,13 +48,17 @@ const (
 )
 
 // VirtualMachineFileRestoreCondition represents the state of a VirtualMachineFileRestore.
-// +kubebuilder:validation:Enum=Ready
+// +kubebuilder:validation:Enum=Ready;PVCsDiscovered
 type VirtualMachineFileRestoreCondition string
 
 const (
 	// VirtualMachineFileRestoreConditionReady indicates that file serving resources
 	// have been created and files are accessible to the user.
 	VirtualMachineFileRestoreConditionReady VirtualMachineFileRestoreCondition = "Ready"
+
+	// VirtualMachineFileRestoreConditionPVCsDiscovered indicates that PVC information
+	// has been successfully discovered from the selected backups.
+	VirtualMachineFileRestoreConditionPVCsDiscovered VirtualMachineFileRestoreCondition = "PVCsDiscovered"
 )
 
 // VirtualMachineFileRestoreSpec defines the desired state of VirtualMachineFileRestore
@@ -101,9 +105,48 @@ type VirtualMachineFileRestoreStatus struct {
 	// +optional
 	Phase VirtualMachineFileRestorePhase `json:"phase,omitempty"`
 
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// Information about the file serving resources that have been created.
 	// +optional
 	FileServingInfo *FileServingInfo `json:"fileServingInfo,omitempty"`
+
+	// PVCRestores contains PVC-grouped restore information showing which backups each PVC was restored from.
+	// This provides a user-friendly view of the restoration data organized by PVC.
+	// +optional
+	PVCRestores []PVCRestoreInfo `json:"pvcRestores,omitempty"`
+}
+
+// PVCRestoreInfo contains information about a PVC and all backups it has been restored from
+type PVCRestoreInfo struct {
+	// Name of the PVC
+	PVC string `json:"pvc"`
+
+	// Namespace of the PVC
+	Namespace string `json:"namespace"`
+
+	// Size of the PVC in human-readable format (e.g., "5Gi", "30Gi")
+	// +optional
+	Size string `json:"size,omitempty"`
+
+	// UID of the PVC from the backup
+	UID string `json:"uid"`
+
+	// Restores contains all backup restores for this PVC
+	// +optional
+	Restores []RestoreInfo `json:"restores,omitempty"`
+}
+
+// RestoreInfo contains information about a specific backup restore for a PVC
+type RestoreInfo struct {
+	// BackupName is the name of the backup this restore came from
+	BackupName string `json:"backupName"`
+
+	// Timestamp indicates when the backup was created
+	// +optional
+	Timestamp *metav1.Time `json:"timestamp,omitempty"`
 }
 
 // FileServingInfo contains information about file serving resources
