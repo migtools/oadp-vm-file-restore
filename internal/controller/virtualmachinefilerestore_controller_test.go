@@ -935,4 +935,582 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 			})
 		})
 	})
+
+	Context("Namespace Management", func() {
+		var (
+			reconciler    *VirtualMachineFileRestoreReconciler
+			ctx           context.Context
+			scheme        *runtime.Scheme
+			namespace     = "test-namespace"
+			oadpNamespace = "openshift-adp"
+		)
+
+		BeforeEach(func() {
+			ctx = context.Background()
+			scheme = runtime.NewScheme()
+			Expect(oadpv1alpha1.AddToScheme(scheme)).To(Succeed())
+			Expect(velerov1api.AddToScheme(scheme)).To(Succeed())
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(kubevirtv1.AddToScheme(scheme)).To(Succeed())
+		})
+
+		Context("Using existing namespace", func() {
+			It("should use specified existing namespace successfully", func() {
+				existingNamespace := &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "existing-restore-ns",
+					},
+				}
+
+				// Create discovery resource
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "test-vm",
+						VirtualMachineNamespace: namespace,
+					},
+				}
+
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+						UID:       "test-vmfr-uid",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+						RestoreNamespace:    "existing-restore-ns",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(existingNamespace, discovery, vmfr).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				restoreNamespace, err := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(restoreNamespace).To(Equal("existing-restore-ns"))
+
+				// Verify the namespace still exists and was not modified
+				ns := &corev1.Namespace{}
+				err = client.Get(ctx, types.NamespacedName{Name: "existing-restore-ns"}, ns)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ns.Labels).NotTo(HaveKey("oadp.openshift.io/vm-file-restore-temp"))
+			})
+
+			It("should fail when specified namespace does not exist", func() {
+				// Create discovery resource
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "test-vm",
+						VirtualMachineNamespace: namespace,
+					},
+				}
+
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+						UID:       "test-vmfr-uid",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+						RestoreNamespace:    "non-existent-namespace",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(discovery, vmfr).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				_, err := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr)
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("specified restore namespace 'non-existent-namespace' does not exist"))
+			})
+		})
+
+		Context("Automatic namespace creation", func() {
+			It("should create temporary namespace with default naming", func() {
+				// Create discovery resource
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "test-vm",
+						VirtualMachineNamespace: "vm-namespace",
+					},
+				}
+
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "oadp.openshift.io/v1alpha1",
+						Kind:       "VirtualMachineFileRestore",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+						UID:       "12345678-1234-5678-9012-123456789012",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+						// No RestoreNamespace specified - should create temporary
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(discovery, vmfr).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				restoreNamespace, err := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(restoreNamespace).To(Equal("vm-namespace-test-vm-12345678"))
+
+				// Verify the namespace was created with proper labels and owner references
+				ns := &corev1.Namespace{}
+				err = client.Get(ctx, types.NamespacedName{Name: restoreNamespace}, ns)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ns.Labels).To(HaveKeyWithValue("oadp.openshift.io/vm-file-restore", "test-vmfr"))
+				Expect(ns.Labels).To(HaveKeyWithValue("oadp.openshift.io/vm-file-restore-temp", "true"))
+				Expect(ns.Labels).To(HaveKeyWithValue("oadp.openshift.io/managed-by", "oadp-vm-file-restore-controller"))
+				Expect(ns.OwnerReferences).To(HaveLen(1))
+				Expect(ns.OwnerReferences[0].Name).To(Equal("test-vmfr"))
+				Expect(ns.OwnerReferences[0].Kind).To(Equal("VirtualMachineFileRestore"))
+				Expect(ns.OwnerReferences[0].APIVersion).To(Equal(vmfr.APIVersion))
+			})
+
+			It("should create temporary namespace with custom prefix", func() {
+				// Create discovery resource
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "test-vm",
+						VirtualMachineNamespace: "vm-namespace",
+					},
+				}
+
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "oadp.openshift.io/v1alpha1",
+						Kind:       "VirtualMachineFileRestore",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+						UID:       "12345678-1234-5678-9012-123456789012",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+						NamespacePrefix:     "custom-prefix",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(discovery, vmfr).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				restoreNamespace, err := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(restoreNamespace).To(Equal("custom-prefix-vm-namespace-test-vm-12345678"))
+
+				// Verify the namespace was created
+				ns := &corev1.Namespace{}
+				err = client.Get(ctx, types.NamespacedName{Name: restoreNamespace}, ns)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should handle namespace name length limits", func() {
+				// Create discovery resource with very long names
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "very-long-virtual-machine-name-that-exceeds-normal-limits",
+						VirtualMachineNamespace: "very-long-namespace-name-that-also-exceeds-normal-limits",
+					},
+				}
+
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+						UID:       "12345678-1234-5678-9012-123456789012",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+						NamespacePrefix:     "very-long-prefix-that-might-cause-issues",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(discovery, vmfr).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				restoreNamespace, err := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(restoreNamespace)).To(BeNumerically("<=", 63)) // DNS-1123 limit
+				Expect(restoreNamespace).To(ContainSubstring("12345678")) // Should preserve unique suffix
+			})
+
+			It("should generate unique namespace names for multiple VMs", func() {
+				// Create discovery resource
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "test-vm",
+						VirtualMachineNamespace: "vm-namespace",
+					},
+				}
+
+				vmfr1 := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr-1",
+						Namespace: namespace,
+						UID:       "11111111-1111-1111-1111-111111111111",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+					},
+				}
+
+				vmfr2 := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr-2",
+						Namespace: namespace,
+						UID:       "22222222-2222-2222-2222-222222222222",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(discovery, vmfr1, vmfr2).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				namespace1, err1 := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr1)
+				Expect(err1).NotTo(HaveOccurred())
+
+				namespace2, err2 := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr2)
+				Expect(err2).NotTo(HaveOccurred())
+
+				// Should generate different namespace names
+				Expect(namespace1).NotTo(Equal(namespace2))
+				Expect(namespace1).To(ContainSubstring("11111111"))
+				Expect(namespace2).To(ContainSubstring("22222222"))
+			})
+
+			It("should handle namespace creation conflicts gracefully", func() {
+				// Create discovery resource
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "test-vm",
+						VirtualMachineNamespace: "vm-namespace",
+					},
+				}
+
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+						UID:       "12345678-1234-5678-9012-123456789012",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+					},
+				}
+
+				// Pre-create a namespace with the same name that would be generated
+				expectedName := "vm-namespace-test-vm-12345678"
+				existingNS := &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: expectedName,
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(discovery, vmfr, existingNS).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				restoreNamespace, err := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(restoreNamespace).To(Equal(expectedName))
+			})
+		})
+
+		Context("Namespace cleanup", func() {
+			It("should not delete user-specified namespaces", func() {
+				existingNamespace := &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "user-specified-ns",
+					},
+				}
+
+				now := metav1.Now()
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-vmfr",
+						Namespace:         namespace,
+						DeletionTimestamp: &now,                       // Simulate deletion
+						Finalizers:        []string{"test-finalizer"}, // Required for deletion timestamp
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						RestoreNamespace: "user-specified-ns",
+					},
+					Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+						CreatedNamespace: "user-specified-ns",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(existingNamespace, vmfr).
+					WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				_, err := reconciler.handleResourceDeletion(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify the namespace still exists
+				ns := &corev1.Namespace{}
+				err = client.Get(ctx, types.NamespacedName{Name: "user-specified-ns"}, ns)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should delete temporary namespaces on VMFR deletion", func() {
+				tempNamespace := &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "temp-restore-ns",
+						Labels: map[string]string{
+							"oadp.openshift.io/vm-file-restore-temp": "true",
+							"oadp.openshift.io/managed-by":           "oadp-vm-file-restore-controller",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "oadp.openshift.io/v1alpha1",
+								Kind:       "VirtualMachineFileRestore",
+								Name:       "test-vmfr",
+								UID:        "test-uid",
+							},
+						},
+					},
+				}
+
+				now := metav1.Now()
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-vmfr",
+						Namespace:         namespace,
+						UID:               "test-uid",
+						DeletionTimestamp: &now,                             // Simulate deletion
+						Finalizers:        []string{VMFileRestoreFinalizer}, // Required for deletion timestamp
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						// No RestoreNamespace specified - was auto-created
+					},
+					Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+						CreatedNamespace: "temp-restore-ns",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(tempNamespace, vmfr).
+					WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				_, err := reconciler.handleResourceDeletion(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify the namespace was deleted
+				ns := &corev1.Namespace{}
+				err = client.Get(ctx, types.NamespacedName{Name: "temp-restore-ns"}, ns)
+				Expect(errors.IsNotFound(err)).To(BeTrue())
+			})
+
+			It("should skip cleanup of unowned namespaces", func() {
+				// Create a namespace that does NOT have the proper temp label - should not be deleted
+				unownedNamespace := &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "unowned-ns",
+						Labels: map[string]string{
+							"some-other-label": "true",
+						},
+						// No temp label and no owner references - should NOT be deleted
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(unownedNamespace).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				// Test the cleanup function directly - it should recognize this namespace as unowned
+				err := reconciler.cleanupTemporaryNamespace(ctx, zap.New(), "unowned-ns")
+				Expect(err).NotTo(HaveOccurred())
+
+				// Verify the namespace was NOT deleted (it should still exist)
+				ns := &corev1.Namespace{}
+				err = client.Get(ctx, types.NamespacedName{Name: "unowned-ns"}, ns)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should handle cleanup errors gracefully", func() {
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+					},
+					Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+						CreatedNamespace: "non-existent-ns",
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(vmfr).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				err := reconciler.cleanupTemporaryNamespace(ctx, zap.New(), "non-existent-ns")
+				Expect(err).NotTo(HaveOccurred()) // Should handle gracefully
+			})
+		})
+
+		Context("Namespace name generation", func() {
+			It("should generate valid DNS-1123 namespace names", func() {
+				discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: namespace,
+					},
+					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+						VirtualMachineName:      "Test_VM_Name",     // Contains underscores
+						VirtualMachineNamespace: "Test_Namespace_1", // Contains underscores
+					},
+				}
+
+				vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr",
+						Namespace: namespace,
+						UID:       "12345678-1234-5678-9012-123456789012",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-discovery",
+						NamespacePrefix:     "Test_Prefix", // Contains underscores
+					},
+				}
+
+				client := fake.NewClientBuilder().
+					WithScheme(scheme).
+					WithObjects(discovery, vmfr).
+					Build()
+
+				reconciler = &VirtualMachineFileRestoreReconciler{
+					Client:        client,
+					Scheme:        scheme,
+					OADPNamespace: oadpNamespace,
+				}
+
+				namespaceName, err := reconciler.generateTemporaryNamespaceName(ctx, zap.New(), vmfr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(namespaceName).To(Equal("test-prefix-test-namespace-1-test-vm-name-12345678"))
+				Expect(namespaceName).To(MatchRegexp(`^[a-z0-9-]+$`)) // Valid DNS-1123 format
+				Expect(len(namespaceName)).To(BeNumerically("<=", 63))
+			})
+		})
+	})
 })
