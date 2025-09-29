@@ -78,6 +78,19 @@ type VirtualMachineFileRestoreSpec struct {
 	// All specified backup names must exist in the ValidBackups list of the referenced discovery.
 	// +optional
 	SelectedBackups []string `json:"selectedBackups,omitempty"`
+
+	// RestoreNamespace specifies an existing namespace where file serving resources will be created.
+	// If not specified, a temporary namespace will be created automatically.
+	// The namespace must exist and be accessible to the controller.
+	// +optional
+	RestoreNamespace string `json:"restoreNamespace,omitempty"`
+
+	// NamespacePrefix specifies a prefix for automatically generated temporary namespaces.
+	// Only used when RestoreNamespace is not specified.
+	// If not specified, the generated namespace name will use the VM's namespace-name format.
+	// The final namespace name will be: <prefix>-<vm-namespace>-<vm-name>-<suffix>
+	// +optional
+	NamespacePrefix string `json:"namespacePrefix,omitempty"`
 }
 
 // VirtualMachineFileRestoreStatus defines the observed state of VirtualMachineFileRestore.
@@ -117,6 +130,11 @@ type VirtualMachineFileRestoreStatus struct {
 	// This provides a user-friendly view of the restoration data organized by PVC.
 	// +optional
 	PVCRestores []PVCRestoreInfo `json:"pvcRestores,omitempty"`
+
+	// CreatedNamespace contains information about the namespace used for file serving.
+	// This will be set to the specified RestoreNamespace or the name of the auto-generated temporary namespace.
+	// +optional
+	CreatedNamespace string `json:"createdNamespace,omitempty"`
 }
 
 // PVCRestoreInfo contains information about a PVC and all backups it has been restored from

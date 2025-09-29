@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,11 +37,17 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
 	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
+)
+
+const (
+	// VMFileRestoreFinalizer is the finalizer used for VirtualMachineFileRestore resources
+	VMFileRestoreFinalizer = "oadp.openshift.io/vm-file-restore-finalizer"
 )
 
 // VirtualMachineFileRestoreReconciler reconciles a VirtualMachineFileRestore object
@@ -62,6 +69,7 @@ type virtualmachinefilerestoreReconcileStepFunction func(ctx context.Context, lo
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinefilerestores/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinefilerestores/finalizers,verbs=update
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinebackupsdiscoveries,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -86,23 +94,25 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 
 	switch {
 	case vmfr.DeletionTimestamp != nil:
-		// Deletion path
+		// Deletion path - handle finalizer-based cleanup
 		logger.V(0).Info("Executing deletion path")
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
 			r.handleResourceDeletion,
 		}
 
 	case vmfr.Status.Phase == "":
-		// Initial creation path
+		// Initial creation path - add finalizer and initialize
 		logger.V(0).Info("Executing initial creation path")
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
+			r.ensureFinalizer,
 			r.initializePhaseForFileRestore,
 		}
 
 	default:
-		// Standard file restore processing path
+		// Standard file restore processing path - ensure finalizer exists
 		logger.V(0).Info("Executing file restore processing path")
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
+			r.ensureFinalizer,
 			r.processFileRestoreWorkflow,
 		}
 	}
@@ -259,7 +269,31 @@ func (r *VirtualMachineFileRestoreReconciler) processFileRestoreWorkflow(ctx con
 		logger.V(1).Info("PVC discovery completed successfully")
 	}
 
-	// Step 6: Setup file serving
+	// Step 6: Ensure restore namespace exists
+	restoreNamespace, err := r.ensureRestoreNamespace(ctx, logger, vmfr)
+	if err != nil {
+		logger.Error(err, "Failed to ensure restore namespace")
+		// Set backing off phase and condition - single status update
+		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseBackingOff
+		condition := metav1.Condition{
+			Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionReady),
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "NamespaceCreationFailed",
+			Message:            fmt.Sprintf("Failed to ensure restore namespace: %v", err),
+		}
+		meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
+		if statusErr := r.Status().Update(ctx, vmfr); statusErr != nil {
+			return false, statusErr
+		}
+		return true, err // Requeue for retry
+	}
+
+	// Update status with the namespace being used
+	vmfr.Status.CreatedNamespace = restoreNamespace
+	logger.V(1).Info("Restore namespace ready", "namespace", restoreNamespace)
+
+	// Step 7: Setup file serving
 	// TODO: Implement file serving logic here
 	vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseCreated
 
@@ -285,6 +319,22 @@ func (r *VirtualMachineFileRestoreReconciler) processFileRestoreWorkflow(ctx con
 	return false, nil // No requeue, process complete
 }
 
+// ensureFinalizer ensures the finalizer is present on the VirtualMachineFileRestore resource
+func (r *VirtualMachineFileRestoreReconciler) ensureFinalizer(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
+	if controllerutil.ContainsFinalizer(vmfr, VMFileRestoreFinalizer) {
+		return false, nil // Finalizer already exists, continue to next step
+	}
+
+	logger.V(1).Info("Adding finalizer to VirtualMachineFileRestore")
+	controllerutil.AddFinalizer(vmfr, VMFileRestoreFinalizer)
+	if err := r.Update(ctx, vmfr); err != nil {
+		logger.Error(err, "Failed to add finalizer")
+		return false, err
+	}
+	logger.V(0).Info("Finalizer added to VirtualMachineFileRestore")
+	return true, nil // Requeue to proceed with updated resource
+}
+
 // initializePhaseForFileRestore initializes the phase for a new VirtualMachineFileRestore
 func (r *VirtualMachineFileRestoreReconciler) initializePhaseForFileRestore(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
 	vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseNew
@@ -298,6 +348,14 @@ func (r *VirtualMachineFileRestoreReconciler) initializePhaseForFileRestore(ctx 
 
 // handleResourceDeletion handles cleanup when the resource is being deleted
 func (r *VirtualMachineFileRestoreReconciler) handleResourceDeletion(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
+	// Check if our finalizer is present - if not, nothing to clean up
+	if !controllerutil.ContainsFinalizer(vmfr, VMFileRestoreFinalizer) {
+		logger.V(1).Info("Finalizer not present, skipping cleanup")
+		return false, nil
+	}
+
+	logger.V(0).Info("Starting cleanup of resources")
+
 	// Update phase to indicate deletion
 	vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseDeleting
 	if err := r.Status().Update(ctx, vmfr); err != nil {
@@ -305,12 +363,105 @@ func (r *VirtualMachineFileRestoreReconciler) handleResourceDeletion(ctx context
 		return false, err
 	}
 
-	// TODO: Implement cleanup logic here
-	// - Delete file serving pods
-	// - Clean up any other resources
+	// Perform all cleanup operations
+	cleanupErrors := []error{}
 
-	logger.V(0).Info("Cleanup completed")
+	// Clean up temporary namespace if it was created by this controller
+	if vmfr.Status.CreatedNamespace != "" && vmfr.Spec.RestoreNamespace == "" {
+		logger.V(1).Info("Cleaning up temporary namespace", "namespace", vmfr.Status.CreatedNamespace)
+		err := r.cleanupTemporaryNamespace(ctx, logger, vmfr.Status.CreatedNamespace)
+		if err != nil {
+			logger.Error(err, "Failed to cleanup temporary namespace", "namespace", vmfr.Status.CreatedNamespace)
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to cleanup namespace %s: %w", vmfr.Status.CreatedNamespace, err))
+		}
+	}
+
+	// Clean up file serving resources (pods, services, etc.)
+	if err := r.cleanupFileServingResources(ctx, logger, vmfr); err != nil {
+		logger.Error(err, "Failed to cleanup file serving resources")
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to cleanup file serving resources: %w", err))
+	}
+
+	// If there were cleanup errors, log them but continue to remove finalizer
+	// This prevents resources from being stuck in deletion if some cleanup fails
+	if len(cleanupErrors) > 0 {
+		logger.Error(fmt.Errorf("cleanup completed with errors: %v", cleanupErrors), "Some cleanup operations failed")
+	}
+
+	// Remove the finalizer to allow the resource to be deleted
+	logger.V(1).Info("Removing finalizer")
+	controllerutil.RemoveFinalizer(vmfr, VMFileRestoreFinalizer)
+	if err := r.Update(ctx, vmfr); err != nil {
+		logger.Error(err, "Failed to remove finalizer")
+		return false, err
+	}
+
+	logger.V(0).Info("Cleanup completed, finalizer removed")
 	return false, nil // No requeue, cleanup complete
+}
+
+// cleanupTemporaryNamespace deletes a temporary namespace created by this controller
+func (r *VirtualMachineFileRestoreReconciler) cleanupTemporaryNamespace(ctx context.Context, logger logr.Logger, namespaceName string) error {
+	namespace := &corev1.Namespace{}
+	err := r.Get(ctx, types.NamespacedName{Name: namespaceName}, namespace)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.V(1).Info("Temporary namespace already deleted", "namespace", namespaceName)
+			return nil
+		}
+		return fmt.Errorf("failed to get temporary namespace '%s': %w", namespaceName, err)
+	}
+
+	// Verify this is a temporary namespace managed by this controller
+	if label, exists := namespace.Labels["oadp.openshift.io/vm-file-restore-temp"]; !exists || label != "true" {
+		logger.V(1).Info("Namespace is not a temporary VM file restore namespace, skipping deletion", "namespace", namespaceName)
+		return nil
+	}
+
+	// Delete the namespace
+	err = r.Delete(ctx, namespace)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.V(1).Info("Temporary namespace already deleted during cleanup", "namespace", namespaceName)
+			return nil
+		}
+		return fmt.Errorf("failed to delete temporary namespace '%s': %w", namespaceName, err)
+	}
+
+	logger.V(0).Info("Successfully deleted temporary namespace", "namespace", namespaceName)
+	return nil
+}
+
+// cleanupFileServingResources cleans up all file serving resources created for this VMFR
+func (r *VirtualMachineFileRestoreReconciler) cleanupFileServingResources(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) error {
+	// Currently, file serving resources are not yet implemented, but when they are,
+	// this function should clean up:
+	// - File serving pods
+	// - Services exposing the pods
+	// - ConfigMaps or Secrets containing configuration
+	// - PVCs created for file serving (if any)
+	// - Jobs or other workloads
+
+	logger.V(1).Info("File serving resources cleanup - no resources to clean up yet")
+
+	// TODO: Implement cleanup of file serving resources when they are added
+	// Example implementation structure:
+	//
+	// if vmfr.Status.FileServingInfo != nil {
+	//     // Clean up pods
+	//     if err := r.cleanupFileServingPods(ctx, logger, vmfr); err != nil {
+	//         return fmt.Errorf("failed to cleanup file serving pods: %w", err)
+	//     }
+	//
+	//     // Clean up services
+	//     if err := r.cleanupFileServingServices(ctx, logger, vmfr); err != nil {
+	//         return fmt.Errorf("failed to cleanup file serving services: %w", err)
+	//     }
+	//
+	//     // Clean up other resources...
+	// }
+
+	return nil
 }
 
 // getBackupsToServe validates that selectedBackups exist in the discovery results
@@ -910,4 +1061,110 @@ func (r *VirtualMachineFileRestoreReconciler) mapVMBDToVMFR(ctx context.Context,
 	}
 
 	return requests
+}
+
+// ensureRestoreNamespace ensures that the restore namespace exists, either by using the specified one
+// or by creating a new temporary namespace with appropriate naming
+func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (string, error) {
+	// If a specific namespace is provided, validate it exists
+	if vmfr.Spec.RestoreNamespace != "" {
+		namespace := &corev1.Namespace{}
+		err := r.Get(ctx, types.NamespacedName{Name: vmfr.Spec.RestoreNamespace}, namespace)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return "", fmt.Errorf("specified restore namespace '%s' does not exist", vmfr.Spec.RestoreNamespace)
+			}
+			return "", fmt.Errorf("failed to validate restore namespace '%s': %w", vmfr.Spec.RestoreNamespace, err)
+		}
+		logger.V(1).Info("Using existing restore namespace", "namespace", vmfr.Spec.RestoreNamespace)
+		return vmfr.Spec.RestoreNamespace, nil
+	}
+
+	// Generate a temporary namespace name
+	namespaceName, err := r.generateTemporaryNamespaceName(ctx, logger, vmfr)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate temporary namespace name: %w", err)
+	}
+
+	// Create the temporary namespace
+	namespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: namespaceName,
+			Labels: map[string]string{
+				"oadp.openshift.io/vm-file-restore":      vmfr.Name,
+				"oadp.openshift.io/vm-file-restore-temp": "true",
+				"oadp.openshift.io/managed-by":           "oadp-vm-file-restore-controller",
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: vmfr.APIVersion,
+					Kind:       vmfr.Kind,
+					Name:       vmfr.Name,
+					UID:        vmfr.UID,
+				},
+			},
+		},
+	}
+
+	err = r.Create(ctx, namespace)
+	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			logger.V(1).Info("Temporary namespace already exists", "namespace", namespaceName)
+		} else {
+			return "", fmt.Errorf("failed to create temporary namespace '%s': %w", namespaceName, err)
+		}
+	} else {
+		logger.V(0).Info("Created temporary restore namespace", "namespace", namespaceName)
+	}
+
+	return namespaceName, nil
+}
+
+// generateTemporaryNamespaceName generates a unique name for a temporary restore namespace
+// The format is: [prefix-]<vm-namespace>-<vm-name>-<suffix>
+func (r *VirtualMachineFileRestoreReconciler) generateTemporaryNamespaceName(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (string, error) {
+	// Get the discovery resource to access VM info
+	discovery, err := r.getDiscoveryResource(ctx, vmfr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get discovery resource for namespace generation: %w", err)
+	}
+
+	// Start building the namespace name
+	var nameParts []string
+
+	// Add prefix if specified
+	if vmfr.Spec.NamespacePrefix != "" {
+		nameParts = append(nameParts, vmfr.Spec.NamespacePrefix)
+	}
+
+	// Add VM namespace and name
+	nameParts = append(nameParts, discovery.Spec.VirtualMachineNamespace)
+	nameParts = append(nameParts, discovery.Spec.VirtualMachineName)
+
+	// Generate a unique suffix using the VMFR resource UID (first 8 chars)
+	suffix := string(vmfr.UID)[:8]
+	nameParts = append(nameParts, suffix)
+
+	// Join parts with hyphens
+	namespaceName := strings.Join(nameParts, "-")
+
+	// Ensure namespace name is valid (max 63 characters, DNS-1123 label)
+	if len(namespaceName) > 63 {
+		// Truncate to fit within limits while preserving the suffix for uniqueness
+		maxPrefixLen := 63 - len(suffix) - 1 // -1 for the hyphen before suffix
+		truncatedPrefix := namespaceName[:maxPrefixLen]
+		namespaceName = truncatedPrefix + "-" + suffix
+	}
+
+	// Convert to lowercase and replace any invalid characters
+	namespaceName = strings.ToLower(namespaceName)
+	namespaceName = strings.ReplaceAll(namespaceName, "_", "-")
+
+	logger.V(1).Info("Generated temporary namespace name",
+		"namespace", namespaceName,
+		"vmNamespace", discovery.Spec.VirtualMachineNamespace,
+		"vmName", discovery.Spec.VirtualMachineName,
+		"prefix", vmfr.Spec.NamespacePrefix)
+
+	return namespaceName, nil
 }
