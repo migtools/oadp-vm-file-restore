@@ -42,6 +42,7 @@ LABEL name="oadp-vm-file-server" \
 #
 # Core VM disk image tools (qcow2, raw, vmdk support)
 # - libguestfs-tools: Comprehensive VM disk manipulation, includes guestmount (FUSE-based)
+# - libguestfs-xfs: XFS filesystem support for libguestfs appliance
 # - qemu-img: Disk image format detection and conversion
 #
 # FUSE support (for guestmount - Kubernetes-compatible mounting)
@@ -67,6 +68,7 @@ LABEL name="oadp-vm-file-server" \
 # - findutils, coreutils: Basic Unix utilities
 RUN dnf install -y \
     libguestfs-tools \
+    libguestfs-xfs \
     qemu-img \
     e2fsprogs \
     xfsprogs \
