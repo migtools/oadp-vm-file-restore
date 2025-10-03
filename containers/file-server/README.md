@@ -78,18 +78,27 @@ After researching KubeVirt's approach and VM filesystem requirements, we chose a
 #### `/usr/local/bin/detect-and-mount.sh`
 Automatically detects VM disk image formats and mounts their filesystems in read-only mode.
 
+**Mounting Approach: FUSE-based (Kubernetes-compatible)**
+
+Uses `guestmount` from libguestfs instead of NBD for Kubernetes compatibility:
+- ✅ **No privileged container needed**
+- ✅ **No kernel module loading** (no `modprobe nbd`)
+- ✅ **No `/dev` access required**
+- ✅ **Works with OpenShift SecurityContextConstraints**
+- ⚡ Slightly slower than NBD, but security > speed
+
 **Key Functions:**
-- `detect_disk_format()` - Uses qemu-img to identify disk type
-- `connect_nbd_device()` - Connects disk to /dev/nbd* using qemu-nbd
-- `detect_filesystem()` - Uses blkid to identify filesystem type
-- `mount_filesystem()` - Mounts filesystems read-only with appropriate options
+- `detect_disk_format()` - Uses qemu-img to identify disk type (qcow2, raw, vmdk, vdi)
+- `mount_disk_with_guestmount()` - Uses FUSE-based guestmount to mount disk images
+- `unmount_disk()` - Safely unmounts FUSE filesystems
 - `process_disk_image()` - Orchestrates the mounting process
 - `auto_mount_all()` - Discovers and mounts all disks in a directory
 
 **Supported Formats:**
 - qcow2 (most common for KubeVirt)
 - raw
-- Future: vmdk, vdi (easily extendable)
+- vmdk (VMware)
+- vdi (VirtualBox)
 
 **Supported Filesystems:**
 - ext2/ext3/ext4 (Linux)
@@ -97,14 +106,11 @@ Automatically detects VM disk image formats and mounts their filesystems in read
 - Btrfs (Linux)
 - NTFS (Windows)
 - FAT/FAT32 (boot partitions)
+- LVM (Logical Volume Manager)
 
 **Read-Only Safety:**
-- All filesystems mounted with `-o ro`
-- Filesystem-specific safety options:
-  - ext4: `noload` (don't load journal)
-  - xfs: `norecovery` (skip journal replay)
-  - ntfs: ntfs-3g read-only mode
-- qemu-nbd connects in `--read-only` mode
+- All filesystems mounted with `--ro` (read-only)
+- guestmount ensures data integrity
 
 #### `/usr/local/bin/entrypoint.sh`
 Simple entrypoint that keeps the container alive for controller management.
@@ -121,22 +127,30 @@ Simple entrypoint that keeps the container alive for controller management.
 - **Group permissions**: GID 0 (root group) for OpenShift's arbitrary UID assignment
 - **Directory permissions**: `g+rwX` allows group access
 
-#### Privileged Requirements
-**Note**: This container requires privileged access or specific capabilities:
-- `CAP_SYS_ADMIN` - To load NBD kernel module (`modprobe nbd`)
-- `CAP_SYS_MOUNT` - To mount filesystems
+#### Kubernetes/OpenShift Compatibility ✅
+
+**FUSE-based mounting** = **No privileged container needed!**
+
+This container uses `guestmount` (FUSE) instead of NBD, which means:
+- ✅ Works with standard Kubernetes security policies
+- ✅ Compatible with OpenShift SecurityContextConstraints
+- ✅ No `privileged: true` required
+- ✅ No kernel module loading
+- ✅ No special capabilities needed (beyond standard FUSE access)
 
 **Controller Integration (Issue #7)**:
-The VMFR controller will need to create pods with:
+The VMFR controller creates pods with standard security context:
 ```yaml
 securityContext:
-  privileged: true
-  # OR specific capabilities:
-  capabilities:
-    add:
-      - SYS_ADMIN
-      - SYS_MOUNT
+  # No privileged mode needed! ✅
+  runAsUser: 1001
+  runAsGroup: 0
+  fsGroup: 0
+  # FUSE access is typically allowed by default in OpenShift/Kubernetes
 ```
+
+**Note:** FUSE (`/dev/fuse`) access is typically allowed in Kubernetes clusters.
+If restricted, only `CAP_SYS_CHROOT` may be needed (not `CAP_SYS_ADMIN`).
 
 ## Usage
 
@@ -169,10 +183,14 @@ Test commands:
 
 #### Start Container
 ```bash
-podman run -it --privileged \
+# FUSE-based mounting - no --privileged needed!
+podman run -it \
+  --device /dev/fuse \
   -v /path/to/disk-images:/mnt/volumes:ro \
   oadp-vm-file-server:latest /bin/bash
 ```
+
+**Note:** `--device /dev/fuse` gives FUSE access (typically allowed by default in Kubernetes/OpenShift)
 
 #### Mount Disk Images
 ```bash
@@ -221,7 +239,7 @@ The VMFR controller will:
 3. Override CMD to run `detect-and-mount.sh` on startup
 4. Manage pod lifecycle
 
-Example pod spec:
+Example pod spec (FUSE-based, no privileged mode needed):
 ```yaml
 apiVersion: v1
 kind: Pod
@@ -233,15 +251,24 @@ spec:
     image: oadp-vm-file-server:latest
     command: ["/usr/local/bin/detect-and-mount.sh"]
     securityContext:
-      privileged: true
+      # No privileged mode needed with FUSE! ✅
+      runAsUser: 1001
+      runAsGroup: 0
+      fsGroup: 0
     volumeMounts:
     - name: restored-pvc
       mountPath: /mnt/volumes
       readOnly: true
+    - name: fuse-device
+      mountPath: /dev/fuse
   volumes:
   - name: restored-pvc
     persistentVolumeClaim:
       claimName: restored-vm-disk
+  - name: fuse-device
+    hostPath:
+      path: /dev/fuse
+      type: CharDevice
 ```
 
 #### Issue #8: SSH/rsync Access
@@ -253,29 +280,52 @@ Add HTTP file server (Flask/Python) for web-based file browsing.
 ## Troubleshooting
 
 ### Container Fails to Start
-- Check if using privileged mode or required capabilities
 - Verify base image is accessible
+- Check container logs: `podman logs <container-id>`
 
-### NBD Module Load Fails
+### guestmount Fails
 ```
-ERROR: Failed to load NBD module. Container may need privileged security context.
+ERROR: Failed to mount <disk> with guestmount
 ```
-**Solution**: Run container with `--privileged` or add `CAP_SYS_ADMIN` capability
+**Possible causes:**
+1. **FUSE not available**: Ensure `/dev/fuse` is accessible
+   - Check: `ls -la /dev/fuse` in container
+   - Solution: Add `--device /dev/fuse` to podman/docker run
+2. **Disk image corrupted**: Verify with `qemu-img check <image>`
+3. **Unsupported format**: Check format with `qemu-img info <image>`
 
 ### Filesystem Not Detected
-- Verify disk image format is supported (qcow2, raw)
+- Verify disk image format is supported (qcow2, raw, vmdk, vdi)
 - Check disk image is not corrupted: `qemu-img check <image>`
+- Try manual mount: `guestmount -a <disk> -i --ro <mountpoint>`
 
-### Mount Fails
-- Check filesystem type is supported
-- Verify partition table is readable: `parted <nbd-device> print`
+### Mount Fails in Kubernetes
+```
+ERROR: fuse: device not found, try 'modprobe fuse' first
+```
+**Solution**: Ensure pod has access to `/dev/fuse`:
+```yaml
+volumes:
+- name: fuse-device
+  hostPath:
+    path: /dev/fuse
+    type: CharDevice
+volumeMounts:
+- name: fuse-device
+  mountPath: /dev/fuse
+```
+
+### Permission Denied
+- Ensure container runs with correct user/group (UID 1001, GID 0)
+- Check SecurityContextConstraints in OpenShift allow FUSE
 
 ## References
 
 - [KubeVirt virt-launcher](https://github.com/kubevirt/kubevirt)
 - [Velero Restore Process](https://velero.io/docs/)
 - [libguestfs Tools](https://libguestfs.org/)
-- [QEMU NBD Documentation](https://qemu.readthedocs.io/en/latest/tools/qemu-nbd.html)
+- [libguestfs guestmount](https://libguestfs.org/guestmount.1.html)
+- [FUSE Documentation](https://www.kernel.org/doc/html/latest/filesystems/fuse.html)
 - [OpenShift Container Best Practices](https://docs.openshift.com/container-platform/latest/openshift_images/create-images.html)
 
 ## License

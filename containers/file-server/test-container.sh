@@ -65,12 +65,12 @@ test_container() {
     log "Test 2: Verify required tools are installed"
     if $runtime run --rm "$IMAGE_NAME" /bin/bash -c "
         command -v qemu-img && \
-        command -v qemu-nbd && \
-        command -v blkid && \
-        command -v mount && \
+        command -v guestmount && \
+        command -v guestunmount && \
+        command -v fusermount && \
         command -v ntfs-3g
     " > /dev/null 2>&1; then
-        log "✓ Test 2 passed: Required tools are installed"
+        log "✓ Test 2 passed: Required tools are installed (qemu-img, guestmount, fusermount)"
     else
         error "✗ Test 2 failed: Missing required tools"
         return 1

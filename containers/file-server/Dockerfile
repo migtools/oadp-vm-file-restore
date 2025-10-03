@@ -41,12 +41,13 @@ LABEL name="oadp-vm-file-server" \
 # Package selection based on KubeVirt research (libguestfs, qemu, etc.)
 #
 # Core VM disk image tools (qcow2, raw, vmdk support)
-# - libguestfs-tools: Comprehensive VM disk manipulation
+# - libguestfs-tools: Comprehensive VM disk manipulation, includes guestmount (FUSE-based)
 # - qemu-img: Disk image format detection and conversion
-# - qemu-kvm-core: QEMU/KVM core functionality
 #
-# Network Block Device (NBD) support
-# - nbd: Mount qcow2/raw disk images as block devices
+# FUSE support (for guestmount - Kubernetes-compatible mounting)
+# - fuse: Userspace filesystem mounting (no kernel modules needed)
+# - fuse-libs: FUSE libraries
+# Note: guestmount uses FUSE instead of NBD, so no privileged container needed!
 #
 # Filesystem utilities for common VM filesystems
 # - e2fsprogs: ext2/ext3/ext4 (Linux)
@@ -55,21 +56,18 @@ LABEL name="oadp-vm-file-server" \
 # - ntfs-3g: NTFS (Windows)
 # - dosfstools: FAT/FAT32 (boot partitions, Windows)
 #
-# LVM and partition support
+# LVM and partition support (guestmount auto-handles these)
 # - lvm2: Logical Volume Manager (common in Linux VMs)
 # - parted: Partition table manipulation
 # - gdisk: GPT partition support
 #
 # Additional utilities
-# - fuse/fuse-libs: Userspace filesystem mounting
 # - file: File type detection
-# - util-linux: blkid, lsblk, mount, etc.
+# - util-linux: Various utilities
 # - findutils, coreutils: Basic Unix utilities
 RUN dnf install -y \
     libguestfs-tools \
     qemu-img \
-    qemu-kvm-core \
-    nbd \
     e2fsprogs \
     xfsprogs \
     btrfs-progs \

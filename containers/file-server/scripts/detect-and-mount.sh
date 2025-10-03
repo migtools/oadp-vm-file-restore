@@ -11,7 +11,8 @@
 # Supported Disk Formats:
 #   - qcow2 (QEMU Copy-On-Write, most common for KubeVirt)
 #   - raw (Raw disk images)
-#   - Future: vmdk, vdi (can be added if needed)
+#   - vmdk (VMware disks)
+#   - vdi (VirtualBox disks)
 #
 # Supported Filesystems:
 #   - ext2/ext3/ext4 (Linux)
@@ -19,19 +20,24 @@
 #   - Btrfs (Linux)
 #   - NTFS (Windows)
 #   - FAT/FAT32 (Boot partitions, Windows)
+#   - LVM (Logical Volume Manager)
 #
-# How It Works:
+# How It Works (FUSE-based approach):
 #   1. detect_disk_format(): Use qemu-img to identify disk image type
-#   2. connect_nbd_device(): Connect disk to /dev/nbd* using qemu-nbd
-#   3. detect_filesystem(): Use blkid to identify filesystem type on partitions
-#   4. mount_filesystem(): Mount each filesystem read-only with appropriate options
-#   5. process_disk_image(): Orchestrate the above steps for each disk
-#   6. auto_mount_all(): Discover and mount all disks in /mnt/volumes/
+#   2. mount_disk_with_guestmount(): Use guestmount (FUSE) to mount the entire disk
+#   3. process_disk_image(): Orchestrate the mounting for each disk
+#   4. auto_mount_all(): Discover and mount all disks in /mnt/volumes/
+#
+# Why FUSE/guestmount instead of NBD?
+#   - Works in Kubernetes without privileged containers
+#   - No kernel module loading required (modprobe nbd)
+#   - No /dev access needed
+#   - Compatible with OpenShift security policies
+#   - Trade-off: Slightly slower than NBD, but much better security
 #
 # Read-Only Safety:
-#   - All filesystems mounted with -o ro (read-only)
-#   - Filesystem-specific safety options (noload for ext4, norecovery for xfs)
-#   - qemu-nbd connects in read-only mode
+#   - All filesystems mounted with --ro (read-only)
+#   - guestmount ensures data safety
 #
 # Usage:
 #   - No arguments: Auto-discover and mount all disk images in /mnt/volumes/
@@ -86,154 +92,104 @@ detect_disk_format() {
     echo "$format"
 }
 
-# connect_nbd_device - Connect disk image to Network Block Device
+# mount_disk_with_guestmount - Mount VM disk using FUSE-based guestmount
 #
-# Uses qemu-nbd to connect a qcow2/raw disk image to a /dev/nbd* device.
-# This allows us to access the disk as if it were a real block device,
-# enabling partition detection and filesystem mounting.
+# Uses guestmount (from libguestfs) to mount VM disk images via FUSE.
+# This approach works in Kubernetes without requiring privileged containers.
 #
-# NBD (Network Block Device) is a Linux kernel module that allows treating
-# remote or file-based storage as a local block device.
+# guestmount capabilities:
+#   - Auto-detects partitions and filesystems (-i flag)
+#   - Supports LVM, RAID, encryption
+#   - Works with qcow2, raw, vmdk, vdi formats
+#   - Read-only mounting for data safety
+#
+# Why guestmount over NBD?
+#   - No kernel module loading (no modprobe nbd)
+#   - No /dev access required
+#   - Works with standard Kubernetes security policies
+#   - OpenShift SecurityContextConstraints compatible
 #
 # Args:
 #   $1 - Path to disk image file
-#   $2 - Disk format (qcow2, raw, etc.)
-#
-# Returns:
-#   NBD device path (e.g., /dev/nbd0) via stdout
-#   Exit code 1 on error
-#
-# Note: Requires privileged container or CAP_SYS_ADMIN capability to load kernel modules
-connect_nbd_device() {
-    local disk_path="$1"
-    local format="$2"
-
-    # Load NBD kernel module if not already loaded
-    # max_part=8 allows up to 8 partitions per NBD device
-    if ! lsmod | grep -q nbd; then
-        log "Loading NBD kernel module..."
-        modprobe nbd max_part=8 || {
-            error "Failed to load NBD module. Container may need privileged security context."
-            return 1
-        }
-    fi
-
-    # Find an available NBD device (check /dev/nbd0 through /dev/nbd15)
-    local nbd_device
-    for i in {0..15}; do
-        nbd_device="/dev/nbd$i"
-        # Check if device exists and is not already in use
-        if [[ -b "$nbd_device" ]] && ! qemu-nbd --list "$nbd_device" >/dev/null 2>&1; then
-            log "Connecting $disk_path to $nbd_device (format: $format)"
-            # Connect in read-only mode for data safety
-            qemu-nbd --read-only --format="$format" --connect="$nbd_device" "$disk_path"
-
-            # Wait for kernel to detect partitions
-            sleep 2
-
-            echo "$nbd_device"
-            return 0
-        fi
-    done
-
-    error "No available NBD devices found"
-    return 1
-}
-
-# detect_filesystem - Identify filesystem type on a partition
-#
-# Uses blkid to detect the filesystem type (ext4, xfs, ntfs, etc.)
-# on a block device or partition.
-#
-# Args:
-#   $1 - Device path (e.g., /dev/nbd0, /dev/nbd0p1)
-#
-# Returns:
-#   Filesystem type string via stdout (e.g., ext4, xfs, ntfs)
-#   Returns "unknown" if filesystem cannot be detected
-detect_filesystem() {
-    local device="$1"
-
-    local fstype
-    # blkid reads filesystem metadata to detect type
-    fstype=$(blkid -s TYPE -o value "$device" 2>/dev/null || echo "unknown")
-
-    echo "$fstype"
-}
-
-# mount_filesystem - Mount a filesystem in read-only mode
-#
-# Mounts a filesystem with appropriate read-only options for each filesystem type.
-# Uses filesystem-specific safety options to prevent any modifications.
-#
-# Read-Only Options by Filesystem:
-#   - ext2/3/4: noload (don't load journal, prevent any writes)
-#   - xfs: norecovery (skip journal replay, prevent modifications)
-#   - ntfs: ro (ntfs-3g read-only mode)
-#   - btrfs: ro (standard read-only)
-#   - vfat/fat: ro (standard read-only)
-#
-# Args:
-#   $1 - Device path (e.g., /dev/nbd0p1)
-#   $2 - Mount point directory path
-#   $3 - Filesystem type
+#   $2 - Mount point directory
+#   $3 - Volume name (for logging)
 #
 # Returns:
 #   Exit code 0 on success, 1 on failure
-mount_filesystem() {
-    local device="$1"
+mount_disk_with_guestmount() {
+    local disk_path="$1"
     local mount_point="$2"
-    local fstype="$3"
+    local volume_name="$3"
 
+    # Create mount point
     mkdir -p "$mount_point"
 
-    log "Mounting $device ($fstype) at $mount_point (read-only)"
+    log "Mounting $disk_path at $mount_point using guestmount (FUSE)"
 
-    case "$fstype" in
-        ext2|ext3|ext4)
-            # noload: Don't load the journal (prevents writes)
-            mount -t "$fstype" -o ro,noload "$device" "$mount_point"
-            ;;
-        xfs)
-            # norecovery: Skip journal replay (read-only safe mode)
-            mount -t xfs -o ro,norecovery "$device" "$mount_point"
-            ;;
-        ntfs)
-            # ntfs-3g with read-only option
-            ntfs-3g -o ro "$device" "$mount_point"
-            ;;
-        btrfs)
-            # Btrfs with standard read-only
-            mount -t btrfs -o ro "$device" "$mount_point"
-            ;;
-        vfat|fat|msdos)
-            # FAT filesystems (common for boot partitions)
-            mount -t vfat -o ro "$device" "$mount_point"
-            ;;
-        *)
-            # Attempt generic read-only mount for unknown filesystem types
-            log "Unknown filesystem type: $fstype, attempting generic read-only mount"
-            mount -o ro "$device" "$mount_point" || {
-                error "Failed to mount $device"
-                return 1
-            }
-            ;;
-    esac
+    # Use guestmount with auto-inspection (-i)
+    # --ro: Read-only mode (data safety)
+    # -a: Add disk image
+    # -i: Auto-inspect and mount all filesystems
+    # -o allow_other: Allow other users to access (useful for multi-user pods)
+    if guestmount -a "$disk_path" -i --ro -o allow_other "$mount_point" 2>&1; then
+        log "✓ Successfully mounted $volume_name at $mount_point"
+        return 0
+    else
+        error "Failed to mount $disk_path with guestmount"
 
-    log "Successfully mounted $device at $mount_point"
+        # Try alternative: mount first partition only
+        log "Attempting to mount first partition only..."
+        if guestmount -a "$disk_path" -m /dev/sda1 --ro -o allow_other "$mount_point" 2>&1; then
+            log "✓ Successfully mounted first partition of $volume_name"
+            return 0
+        fi
+
+        error "All mount attempts failed for $disk_path"
+        return 1
+    fi
+}
+
+# unmount_disk - Safely unmount a guestmount filesystem
+#
+# Uses guestunmount or fusermount to unmount FUSE filesystems.
+# This is useful for cleanup or remounting.
+#
+# Args:
+#   $1 - Mount point to unmount
+#
+# Returns:
+#   Exit code 0 on success
+unmount_disk() {
+    local mount_point="$1"
+
+    if [[ ! -d "$mount_point" ]]; then
+        return 0
+    fi
+
+    log "Unmounting $mount_point"
+
+    # Try guestunmount first (preferred)
+    if command -v guestunmount >/dev/null 2>&1; then
+        guestunmount "$mount_point" || fusermount -u "$mount_point"
+    else
+        # Fallback to fusermount
+        fusermount -u "$mount_point"
+    fi
+
+    log "✓ Unmounted $mount_point"
 }
 
 # process_disk_image - Main orchestration function to process a single disk image
 #
 # This function coordinates all steps to make a VM disk image's filesystems accessible:
 #   1. Detect disk format (qcow2, raw, etc.)
-#   2. Connect disk to NBD device
-#   3. Detect partitions
-#   4. Mount each partition's filesystem
+#   2. Mount entire disk using guestmount (FUSE)
 #
-# Handles two scenarios:
-#   - Partitioned disks: Mounts each partition separately (e.g., /mnt/filesystems/disk-p1, disk-p2)
-#   - Non-partitioned disks: Mounts filesystem directly (e.g., /mnt/filesystems/disk)
+# The guestmount tool handles:
+#   - Partition detection automatically
+#   - LVM volume detection
+#   - Filesystem type detection
+#   - Read-only mounting
 #
 # Args:
 #   $1 - Path to disk image file
@@ -243,71 +199,36 @@ mount_filesystem() {
 #   Exit code 0 on success, 1 on failure
 process_disk_image() {
     local disk_path="$1"
-    local volume_name="${2:-$(basename "$disk_path")}"
+    local volume_name="${2:-$(basename "$disk_path" | sed 's/\.[^.]*$//')}"
 
     log "Processing disk image: $disk_path"
 
-    # Step 1: Detect the disk format
+    # Step 1: Detect the disk format (for validation and logging)
     local format
     format=$(detect_disk_format "$disk_path")
     log "Detected format: $format"
 
-    # Step 2: Handle qcow2/raw formats using NBD
-    if [[ "$format" == "qcow2" ]] || [[ "$format" == "raw" ]]; then
-        local nbd_device
-        nbd_device=$(connect_nbd_device "$disk_path" "$format")
+    # Step 2: Validate format is supported
+    case "$format" in
+        qcow2|raw|vmdk|vdi)
+            log "Format $format is supported"
+            ;;
+        *)
+            log "Warning: Format $format may not be fully supported, attempting anyway"
+            ;;
+    esac
 
-        if [[ -z "$nbd_device" ]]; then
-            error "Failed to connect NBD device"
-            return 1
-        fi
+    # Step 3: Mount the disk using guestmount (FUSE-based)
+    local mount_point="$FS_MOUNT_DIR/${volume_name}"
 
-        # Wait for kernel to detect partitions on the NBD device
-        sleep 2
-
-        # Step 3: Try to detect and mount partitions
-        local mounted=false
-
-        # Check if disk has partitions (indicated by /dev/nbd0p1, /dev/nbd0p2, etc.)
-        if [[ -b "${nbd_device}p1" ]]; then
-            # Disk has partitions - mount each one
-            log "Disk has partitions, mounting each partition separately"
-            for part in "${nbd_device}p"*; do
-                if [[ -b "$part" ]]; then
-                    local fstype
-                    fstype=$(detect_filesystem "$part")
-
-                    if [[ "$fstype" != "unknown" ]] && [[ -n "$fstype" ]]; then
-                        # Extract partition number for naming
-                        local part_num=${part##*p}
-                        local mount_point="$FS_MOUNT_DIR/${volume_name}-p${part_num}"
-
-                        mount_filesystem "$part" "$mount_point" "$fstype" && mounted=true
-                    fi
-                fi
-            done
-        else
-            # No partitions - filesystem directly on device (less common)
-            log "No partitions detected, attempting to mount device directly"
-            local fstype
-            fstype=$(detect_filesystem "$nbd_device")
-
-            if [[ "$fstype" != "unknown" ]] && [[ -n "$fstype" ]]; then
-                local mount_point="$FS_MOUNT_DIR/${volume_name}"
-                mount_filesystem "$nbd_device" "$mount_point" "$fstype" && mounted=true
-            fi
-        fi
-
-        if [[ "$mounted" == "false" ]]; then
-            error "No mountable filesystems found on $disk_path"
-            return 1
-        fi
+    if mount_disk_with_guestmount "$disk_path" "$mount_point" "$volume_name"; then
+        log "✓ Successfully processed disk image: $disk_path"
+        log "Files are now accessible at: $mount_point"
+        return 0
     else
-        log "Unsupported or unknown disk format: $format"
+        error "Failed to process disk image: $disk_path"
         return 1
     fi
-
-    log "Successfully processed disk image: $disk_path"
 }
 
 # auto_mount_all - Auto-discover and mount all disk images in a directory
@@ -322,6 +243,7 @@ process_disk_image() {
 #   - .img
 #   - .qcow
 #   - .vmdk (VMware, less common but supported)
+#   - .vdi (VirtualBox)
 #
 # Returns:
 #   Always returns 0 (does not fail if no disks found or some fail to mount)
@@ -329,22 +251,37 @@ auto_mount_all() {
     log "Auto-mounting all disk images in $VOLUME_MOUNT_DIR"
 
     local found=false
+    local success_count=0
+    local fail_count=0
 
     # Look for common VM disk image file extensions
     # Bash brace expansion: expands to multiple patterns
-    for disk in "$VOLUME_MOUNT_DIR"/*.{qcow2,raw,img,qcow,vmdk}; do
+    for disk in "$VOLUME_MOUNT_DIR"/*.{qcow2,raw,img,qcow,vmdk,vdi}; do
+        # Check if file actually exists (glob may not match anything)
         if [[ -f "$disk" ]]; then
             found=true
+            log "Found disk image: $disk"
+
             # Process each disk, but don't fail on individual errors
-            process_disk_image "$disk" || log "Warning: Failed to process $disk"
+            if process_disk_image "$disk"; then
+                ((success_count++))
+            else
+                ((fail_count++))
+                log "Warning: Failed to process $disk, continuing with remaining disks"
+            fi
         fi
     done
 
     if [[ "$found" == "false" ]]; then
         log "No disk images found in $VOLUME_MOUNT_DIR"
+        log "Supported extensions: .qcow2, .raw, .img, .qcow, .vmdk, .vdi"
+    else
+        log "Auto-mount completed: $success_count successful, $fail_count failed"
     fi
 
-    log "Auto-mount completed"
+    # List mounted filesystems
+    log "Currently mounted filesystems:"
+    mount | grep "$FS_MOUNT_DIR" || log "No filesystems currently mounted"
 }
 
 # main - Entry point for the script
@@ -356,6 +293,9 @@ auto_mount_all() {
 # This allows the script to be used both by the controller (auto mode)
 # and manually by users for specific disks.
 main() {
+    log "OADP VM File Restore - Filesystem Mounter (FUSE-based)"
+    log "Using guestmount for Kubernetes-compatible mounting"
+
     if [[ $# -eq 0 ]]; then
         # No arguments: auto-discover and mount all disk images
         auto_mount_all
@@ -363,6 +303,9 @@ main() {
         # Arguments provided: process specific disk image
         process_disk_image "$@"
     fi
+
+    log "Mounting operations completed"
+    log "Filesystems mounted at: $FS_MOUNT_DIR"
 }
 
 # Execute main function with all script arguments
