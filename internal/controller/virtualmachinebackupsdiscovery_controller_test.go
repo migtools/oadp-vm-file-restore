@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
+	oadptypes "github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
 	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	kubevirtv1 "kubevirt.io/api/core/v1"
@@ -146,7 +147,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 		Entry("Discovery with time range", testScenario{
 			name: "time-range-discovery",
 			spec: func() oadpv1alpha1.VirtualMachineBackupsDiscoverySpec {
-				startTime := oadpv1alpha1.FlexibleTime(time.Now().Add(-24 * time.Hour).Format(time.RFC3339))
+				startTime := oadptypes.FlexibleTime(time.Now().Add(-24 * time.Hour).Format(time.RFC3339))
 				return oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
 					VirtualMachineName:      "test-vm",
 					VirtualMachineNamespace: "vm-namespace",
@@ -158,7 +159,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 		Entry("Discovery with both time range and explicit list", testScenario{
 			name: "combined-criteria",
 			spec: func() oadpv1alpha1.VirtualMachineBackupsDiscoverySpec {
-				startTime := oadpv1alpha1.FlexibleTime(time.Now().Add(-24 * time.Hour).Format(time.RFC3339))
+				startTime := oadptypes.FlexibleTime(time.Now().Add(-24 * time.Hour).Format(time.RFC3339))
 				return oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
 					VirtualMachineName:      "test-vm",
 					VirtualMachineNamespace: "vm-namespace",
@@ -424,7 +425,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 
 		It("should handle time range modifications", func() {
 			// Create initial spec with start time
-			startTime := oadpv1alpha1.FlexibleTime(time.Now().Add(-48 * time.Hour).Format(time.RFC3339))
+			startTime := oadptypes.FlexibleTime(time.Now().Add(-48 * time.Hour).Format(time.RFC3339))
 			vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-time-range-modification",
@@ -453,7 +454,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 			currentVMBD := &oadpv1alpha1.VirtualMachineBackupsDiscovery{}
 			Expect(k8sClient.Get(ctx, namespacedName, currentVMBD)).To(Succeed())
 
-			endTime := oadpv1alpha1.FlexibleTime(time.Now().Add(-12 * time.Hour).Format(time.RFC3339))
+			endTime := oadptypes.FlexibleTime(time.Now().Add(-12 * time.Hour).Format(time.RFC3339))
 			currentVMBD.Spec.EndTime = &endTime
 			Expect(k8sClient.Update(ctx, currentVMBD)).To(Succeed())
 
@@ -500,7 +501,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 
 			It("should handle start time only", func() {
 				timeStr := "2024-01-01T00:00:00Z"
-				startTimeVal := oadpv1alpha1.FlexibleTime(timeStr)
+				startTimeVal := oadptypes.FlexibleTime(timeStr)
 				vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
 					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
 						StartTime: &startTimeVal,
@@ -515,7 +516,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 
 			It("should handle end time only", func() {
 				timeStr := "2024-12-31T23:59:59Z"
-				endTimeVal := oadpv1alpha1.FlexibleTime(timeStr)
+				endTimeVal := oadptypes.FlexibleTime(timeStr)
 				vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
 					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
 						EndTime: &endTimeVal,
@@ -530,7 +531,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 
 			It("should handle date-only end time and convert to end of day", func() {
 				timeStr := "2024-01-15"
-				endTimeVal := oadpv1alpha1.FlexibleTime(timeStr)
+				endTimeVal := oadptypes.FlexibleTime(timeStr)
 				vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
 					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
 						EndTime: &endTimeVal,
@@ -546,7 +547,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 			})
 
 			It("should handle invalid start time format", func() {
-				invalidTime := oadpv1alpha1.FlexibleTime("invalid-time")
+				invalidTime := oadptypes.FlexibleTime("invalid-time")
 				vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
 					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
 						StartTime: &invalidTime,
@@ -559,7 +560,7 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 			})
 
 			It("should handle invalid end time format", func() {
-				invalidTime := oadpv1alpha1.FlexibleTime("not-a-time")
+				invalidTime := oadptypes.FlexibleTime("not-a-time")
 				vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
 					Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
 						EndTime: &invalidTime,

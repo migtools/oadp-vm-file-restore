@@ -87,13 +87,15 @@ spec:
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the VirtualMachineFileRestore resource.
+                  Conditions represent the current state of the VirtualMachineFileRestore resource.
+                  This is the PRIMARY source of truth for resource state.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
+                  Standard condition types for this resource (defined in types package):
+                  - types.ConditionTypeProgressing: Restore is actively running
+                  - types.ConditionTypeAvailable: File serving resources are ready and accessible
+                  - types.ConditionTypeDegraded: Partial failures occurred (may still be usable)
+                  - types.ConditionTypeReady: Summary condition (resource is usable)
 
                   The status of each condition is one of True, False, or Unknown.
                 items:
@@ -164,17 +166,23 @@ spec:
                   been created.
                 type: object
               observedGeneration:
-                description: ObservedGeneration is the most recent generation observed
-                  by the controller.
+                description: |-
+                  ObservedGeneration is the most recent generation observed by the controller.
+                  IMPORTANT: Controllers must set this at the START of reconciliation, not at the end.
+                  This prevents race conditions where clients see updated conditions but stale observedGeneration.
                 format: int64
                 type: integer
               phase:
-                description: Phase indicates the overall phase of the file-serving
-                  operation
+                description: |-
+                  Phase indicates the overall phase of the file restore operation.
+                  Derived from conditions for human readability. Matches Velero's phase model.
+                  Automation should rely on conditions, not phase.
                 enum:
                 - New
-                - BackingOff
-                - Created
+                - InProgress
+                - Completed
+                - PartiallyFailed
+                - Failed
                 - Deleting
                 type: string
               pvcRestores:
@@ -182,45 +190,86 @@ spec:
                   PVCRestores contains PVC-grouped restore information showing which backups each PVC was restored from.
                   This provides a user-friendly view of the restoration data organized by PVC.
                 items:
-                  description: PVCRestoreInfo contains information about a PVC and
-                    all backups it has been restored from
+                  description: |-
+                    PVCRestoreInfo combines PVC metadata with restores.
+                    PVC metadata is inlined for simplicity in JSON output.
                   properties:
-                    namespace:
-                      description: Namespace of the PVC
+                    pvcName:
+                      description: Name of the PVC at the time of the backup
                       type: string
-                    pvc:
-                      description: Name of the PVC
+                    pvcNamespace:
+                      description: Namespace of the PVC at the time of the backup
+                      type: string
+                    pvcUID:
+                      description: UID of the PVC at the time of the backup
                       type: string
                     restores:
                       description: Restores contains all backup restores for this
                         PVC
                       items:
                         description: RestoreInfo contains information about a specific
-                          backup restore for a PVC
+                          restore of a PVC from a backup.
                         properties:
-                          backupName:
-                            description: BackupName is the name of the backup this
-                              restore came from
+                          completedAt:
+                            description: When the Velero Restore completed
+                            format: date-time
+                            type: string
+                          createdAt:
+                            description: When the Velero Restore object was created
+                            format: date-time
+                            type: string
+                          failureReason:
+                            description: Reason for failure if the restore failed
+                            type: string
+                          phase:
+                            description: Phase of the Velero Restore object
+                            enum:
+                            - New
+                            - FailedValidation
+                            - InProgress
+                            - WaitingForPluginOperations
+                            - WaitingForPluginOperationsPartiallyFailed
+                            - Completed
+                            - PartiallyFailed
+                            - Failed
+                            - Finalizing
+                            - FinalizingPartiallyFailed
+                            type: string
+                          state:
+                            description: |-
+                              State indicates the compatibility and processing state of this backup
+                              Values: "available", "backup-deleted", "backup-missing", "unsupported-plugin", "extraction-failed", "processing", "failed"
                             type: string
                           timestamp:
                             description: Timestamp indicates when the backup was created
                             format: date-time
                             type: string
+                          veleroBackupName:
+                            description: Name of the backup this restore came from
+                            type: string
+                          veleroBackupNamespace:
+                            description: Namespace of the backup this restore came
+                              from
+                            type: string
+                          veleroRestoreName:
+                            description: Name of the Velero Restore object
+                            type: string
+                          veleroRestoreNamespace:
+                            description: Namespace of the Velero Restore object
+                            type: string
                         required:
-                        - backupName
+                        - veleroBackupName
+                        - veleroBackupNamespace
                         type: object
                       type: array
                     size:
                       description: Size of the PVC in human-readable format (e.g.,
                         "5Gi", "30Gi")
                       type: string
-                    uid:
-                      description: UID of the PVC from the backup
-                      type: string
                   required:
-                  - namespace
-                  - pvc
-                  - uid
+                  - pvcName
+                  - pvcNamespace
+                  - pvcUID
                   type: object
                 type: array
             type: object

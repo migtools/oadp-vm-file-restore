@@ -19,12 +19,16 @@ package constant
 
 // Common labels for objects manipulated by the VM File Restore Controller
 const (
-	OadpLabel           = "oadp.openshift.io/oadp-vm-file-restore"
-	OadpLabelValue      = TrueString
-	ManagedByLabel      = "app.kubernetes.io/managed-by"
-	ManagedByLabelValue = "oadp-vm-file-restore-controller"
-	VMFROriginUUIDLabel = "oadp.openshift.io/vmfr-origin-uuid"
-	VMFRFinalizerName   = "virtualmachinefilerestore.oadp.openshift.io/finalizer"
+	OadpLabel              = "oadp.openshift.io/oadp-vm-file-restore"
+	OadpLabelValue         = TrueString
+	ManagedByLabel         = "app.kubernetes.io/managed-by"
+	ManagedByLabelValue    = "oadp-vm-file-restore-controller"
+	VMFROriginUUIDLabel    = "oadp.openshift.io/vmfr-origin-uuid"
+	VMFRTempNamespaceLabel = "oadp.openshift.io/vmfr-temp-namespace"
+
+	// Resource UID labeling constants for selective restore implemented
+	// by the https://github.com/kubevirt/kubevirt-velero-plugin/pull/396
+	PVCUIDLabel = "velero.kubevirt.io/pvc-uid"
 )
 
 // Common annotations for tracking ownership and origin
@@ -34,6 +38,15 @@ const (
 	BackupNameAnnotation              = "oadp.openshift.io/backup-name"
 	VirtualMachineNameAnnotation      = "oadp.openshift.io/vm-name"
 	VirtualMachineNamespaceAnnotation = "oadp.openshift.io/vm-namespace"
+)
+
+// Common finalizers for VirtualMachineFileRestore resources
+const (
+	// VMFileRestoreFinalizer is the main finalizer used for VirtualMachineFileRestore resources
+	VMFileRestoreFinalizer = "oadp.openshift.io/vm-file-restore-finalizer"
+
+	// VeleroRestoreCleanupFinalizer ensures Velero Restore objects are cleaned up before other resources
+	VeleroRestoreCleanupFinalizer = "oadp.openshift.io/velero-restore-cleanup-finalizer"
 )
 
 // Common environment variables for the VM File Restore Controller

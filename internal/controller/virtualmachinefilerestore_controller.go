@@ -19,7 +19,7 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -28,13 +28,13 @@ import (
 	"github.com/go-logr/logr"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	kubevirtv1 "kubevirt.io/api/core/v1"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -42,12 +42,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
+	oadptypes "github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
+	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
+	"github.com/migtools/oadp-vm-file-restore/internal/common/function"
+	"github.com/migtools/oadp-vm-file-restore/internal/predicate"
 	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
-)
-
-const (
-	// VMFileRestoreFinalizer is the finalizer used for VirtualMachineFileRestore resources
-	VMFileRestoreFinalizer = "oadp.openshift.io/vm-file-restore-finalizer"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 )
 
 // VirtualMachineFileRestoreReconciler reconciles a VirtualMachineFileRestore object
@@ -65,11 +65,27 @@ type VirtualMachineFileRestoreReconciler struct {
 // virtualmachinefilerestoreReconcileStepFunction defines the signature for VMFR reconciliation steps
 type virtualmachinefilerestoreReconcileStepFunction func(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error)
 
+// ErrUnsupportedBackup indicates a backup was created with unsupported kubevirt-velero-plugin
+type ErrUnsupportedBackup struct {
+	BackupName   string
+	PVCName      string
+	PVCNamespace string
+	PVCUID       string
+	PVCSize      string
+	Reason       string
+}
+
+func (e ErrUnsupportedBackup) Error() string {
+	return fmt.Sprintf("backup %s created with unsupported kubevirt-velero-plugin", e.BackupName)
+}
+
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinefilerestores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinefilerestores/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinefilerestores/finalizers,verbs=update
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinebackupsdiscoveries,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -81,7 +97,7 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 	vmfr := &oadpv1alpha1.VirtualMachineFileRestore{}
 	err := r.Get(ctx, req.NamespacedName, vmfr)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.V(1).Info("VirtualMachineFileRestore not found, skipping reconciliation")
 			return ctrl.Result{}, nil
 		}
@@ -97,23 +113,46 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		// Deletion path - handle finalizer-based cleanup
 		logger.V(0).Info("Executing deletion path")
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
-			r.handleResourceDeletion,
+			// r.handleResourceDeletion,
+			// TBD handle resource deletion
 		}
 
 	case vmfr.Status.Phase == "":
-		// Initial creation path - add finalizer and initialize
+		// Initial creation path - add finalizer and initialize to New phase
+		// Phase -> New
 		logger.V(0).Info("Executing initial creation path")
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
 			r.ensureFinalizer,
 			r.initializePhaseForFileRestore,
 		}
 
+	case vmfr.Status.Phase == oadpv1alpha1.VirtualMachineFileRestorePhaseNew ||
+		vmfr.Status.Phase == oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress:
+		progressingCondition := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
+
+		if progressingCondition == nil || progressingCondition.Reason != "ValidationCompleted" {
+			// Still validating
+			// ensure to give reason in logger
+			// Remember there may be few conditions in the status conditions array.
+			// log all the conditions
+			logger.V(0).Info("Status conditions", "conditions", vmfr.Status.Conditions)
+			reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
+				r.validateAndDiscoverPVCs,
+			}
+		} else {
+			// Validation complete — proceed with restore
+			// ensure to give reason in logger
+			logger.V(0).Info("Executing file restore workflow (validation completed)")
+			reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
+				r.executeFileRestoreWorkflow,
+			}
+		}
+
 	default:
-		// Standard file restore processing path - ensure finalizer exists
-		logger.V(0).Info("Executing file restore processing path")
+		// Handle any unexpected phases - should not normally happen
+		logger.V(0).Info("Handling unknown phase, defaulting to execution workflow", "phase", vmfr.Status.Phase)
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
-			r.ensureFinalizer,
-			r.processFileRestoreWorkflow,
+			// TBD execute file restore workflow?
 		}
 	}
 
@@ -131,366 +170,449 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 	return ctrl.Result{}, nil
 }
 
-// processFileRestoreWorkflow combines all file restore processing steps in a single function
-// to eliminate redundant calls to get the VirtualMachineBackupsDiscovery and validate selected backups
-func (r *VirtualMachineFileRestoreReconciler) processFileRestoreWorkflow(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
-	// Step 1: Get the referenced VirtualMachineBackupsDiscovery (only once)
-	vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{}
-	err := r.Get(ctx, types.NamespacedName{
-		Name:      vmfr.Spec.BackupsDiscoveryRef,
-		Namespace: vmfr.Namespace,
-	}, vmbd)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Error(err, "Referenced VirtualMachineBackupsDiscovery not found",
-				"backupsDiscoveryRef", vmfr.Spec.BackupsDiscoveryRef,
-				"namespace", vmfr.Namespace)
+// patchVmfrStatusPhaseConditions updates the Status.Phase, Status.ObservedGeneration, and Status.Conditions fields using a patch operation
+func (r *VirtualMachineFileRestoreReconciler) patchVmfrStatusPhaseConditions(
+	ctx context.Context,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	newPhase oadpv1alpha1.VirtualMachineFileRestorePhase,
+	conditions []metav1.Condition, // can be nil or empty
+	updateObservedGen bool,
+	logger logr.Logger,
+) error {
+	patch := client.MergeFrom(vmfr.DeepCopy())
+	vmfr.Status.Phase = newPhase
+	if updateObservedGen {
+		vmfr.Status.ObservedGeneration = vmfr.Generation
+	}
+	originalStatus := vmfr.Status.DeepCopy()
 
-			// Set backing off phase and condition - single status update
-			vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseBackingOff
-			condition := metav1.Condition{
-				Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionReady),
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: metav1.Now(),
-				Reason:             "DiscoveryNotFound",
-				Message:            fmt.Sprintf("Referenced VirtualMachineBackupsDiscovery '%s' not found in namespace '%s'", vmfr.Spec.BackupsDiscoveryRef, vmfr.Namespace),
-			}
-			meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-			if err := r.Status().Update(ctx, vmfr); err != nil {
-				return false, err
-			}
+	// Only set conditions if any are provided
+	for _, cond := range conditions {
+		meta.SetStatusCondition(&vmfr.Status.Conditions, cond)
+	}
 
-			return true, nil // Requeue after delay
-		}
-		logger.Error(err, "Failed to get referenced VirtualMachineBackupsDiscovery")
+	// Compare before patching
+	if equality.Semantic.DeepEqual(originalStatus, &vmfr.Status) {
+		logger.V(1).Info("No status update required", "phase", newPhase)
+		return nil
+	}
+
+	if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to patch status phase", "newPhase", newPhase)
+		return err
+	}
+
+	logger.V(1).Info("Successfully updated phase", "newPhase", newPhase, "observedGeneration", vmfr.Generation)
+	return nil
+}
+
+// failValidation sets a phase + condition for a permanent failure and returns it as an error
+func (r *VirtualMachineFileRestoreReconciler) failValidation(
+	ctx context.Context,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	reason, message string,
+	logger logr.Logger,
+) error {
+	// Set all 4 conditions for Failed phase with semantically appropriate reasons per design doc
+	// - Available gets the root cause (reason parameter)
+	// - Other conditions get generic/summary reasons
+	conditions := []metav1.Condition{
+		{
+			Type:               oadptypes.ConditionTypeProgressing,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "ValidationFailed",
+			Message:            message,
+		},
+		{
+			Type:               oadptypes.ConditionTypeAvailable,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             reason, // Root cause (e.g., "NoValidBackups", "InvalidSelectedBackups")
+			Message:            message,
+		},
+		{
+			Type:               oadptypes.ConditionTypeDegraded,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "CriticalFailure",
+			Message:            message,
+		},
+		{
+			Type:               oadptypes.ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "Failed",
+			Message:            message,
+		},
+	}
+
+	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseFailed, conditions, false, logger); err != nil {
+		return err
+	}
+	// Return a sentinel error to stop reconciliation
+	return fmt.Errorf("validation failed: %s", message)
+}
+
+// ensureFinalizer ensures both finalizers are present on the VirtualMachineFileRestore resource.
+func (r *VirtualMachineFileRestoreReconciler) ensureFinalizer(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (bool, error) {
+	// Keep a copy of the original object before mutation
+	original := vmfr.DeepCopy()
+
+	// Always attempt to add the required finalizers
+	controllerutil.AddFinalizer(vmfr, constant.VeleroRestoreCleanupFinalizer)
+	controllerutil.AddFinalizer(vmfr, constant.VMFileRestoreFinalizer)
+
+	// If nothing actually changed, skip patch
+	if equality.Semantic.DeepEqual(original.Finalizers, vmfr.Finalizers) {
+		return false, nil
+	}
+
+	// Patch only the finalizers field
+	if err := r.Patch(ctx, vmfr, client.MergeFrom(original)); err != nil {
+		logger.Error(err, "Failed to patch finalizers")
 		return false, err
 	}
 
-	// Step 2: Check if discovery is complete
-	discoveryCompleteCondition := meta.FindStatusCondition(vmbd.Status.Conditions,
-		string(oadpv1alpha1.VirtualMachineBackupsDiscoveryConditionComplete))
+	logger.V(0).Info("Finalizers added to VirtualMachineFileRestore")
+	return true, nil
+}
 
-	if discoveryCompleteCondition == nil || discoveryCompleteCondition.Status != metav1.ConditionTrue {
-		logger.V(0).Info("Discovery not yet complete, waiting",
-			"discoveryRef", vmfr.Spec.BackupsDiscoveryRef,
-			"discoveryNamespace", vmfr.Namespace)
-
-		// Set backing off phase and condition - single status update
-		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseBackingOff
-		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionReady),
+// initializePhaseForFileRestore initializes the phase for a new VirtualMachineFileRestore
+func (r *VirtualMachineFileRestoreReconciler) initializePhaseForFileRestore(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
+	now := metav1.Now()
+	conditions := []metav1.Condition{
+		{
+			Type:               oadptypes.ConditionTypeProgressing,
 			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "DiscoveryInProgress",
-			Message:            "Waiting for backup discovery to complete",
-		}
-		meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-		if err := r.Status().Update(ctx, vmfr); err != nil {
-			return false, err
-		}
-		return true, nil // Requeue after delay
+			LastTransitionTime: now,
+			Reason:             "Initialized",
+			Message:            "File restore request has been accepted",
+		},
+		{
+			Type:               oadptypes.ConditionTypeAvailable,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             "NotStarted",
+			Message:            "File serving resources not yet created",
+		},
+		{
+			Type:               oadptypes.ConditionTypeDegraded,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             "NoFailures",
+			Message:            "No errors have occurred",
+		},
+		{
+			Type:               oadptypes.ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: now,
+			Reason:             "NotReady",
+			Message:            "File restore has not started processing",
+		},
 	}
 
-	// Step 3: Check if any valid backups were found
-	if len(vmbd.Status.ValidBackups) == 0 {
-		logger.V(0).Info("No valid backups found in discovery",
-			"discoveryRef", vmfr.Spec.BackupsDiscoveryRef)
+	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseNew, conditions, true, logger); err != nil {
+		return false, err
+	}
+	logger.V(0).Info("VirtualMachineFileRestore phase initialized to New")
+	return true, nil // Requeue to proceed to validation step
+}
 
-		// Set backing off phase and condition - single status update
-		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseBackingOff
-		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionReady),
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "NoValidBackups",
-			Message:            "No valid backups found containing the specified virtual machine",
+// validateAndDiscoverPVCs handles the validation phase - discovers and validates backups, populates PVCRestores
+func (r *VirtualMachineFileRestoreReconciler) validateAndDiscoverPVCs(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
+	// During first run, set Phase -> InProgress with proper conditions
+	if vmfr.Status.Phase == oadpv1alpha1.VirtualMachineFileRestorePhaseNew {
+		conditions := []metav1.Condition{
+			{
+				Type:    oadptypes.ConditionTypeProgressing,
+				Status:  metav1.ConditionTrue,
+				Reason:  "Validating",
+				Message: "Validating discovery reference and discovering PVCs from backups",
+			},
+			{
+				Type:    oadptypes.ConditionTypeAvailable,
+				Status:  metav1.ConditionFalse,
+				Reason:  "InProgress",
+				Message: "Validation in progress",
+			},
+			{
+				Type:    oadptypes.ConditionTypeDegraded,
+				Status:  metav1.ConditionFalse,
+				Reason:  "NoFailures",
+				Message: "No failures detected yet",
+			},
+			{
+				Type:    oadptypes.ConditionTypeReady,
+				Status:  metav1.ConditionFalse,
+				Reason:  "InProgress",
+				Message: "Validation in progress",
+			},
 		}
-		meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-		if err := r.Status().Update(ctx, vmfr); err != nil {
+
+		if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress, conditions, true, logger); err != nil {
 			return false, err
 		}
 
-		return false, nil // No requeue, permanent failure
+		logger.V(0).Info("VirtualMachineFileRestore phase updated to InProgress")
 	}
 
-	// Step 4: Validate selected backups and get the list to serve (only once)
-	backupsToServe, err := r.getBackupsToServe(vmfr, vmbd)
+	// Step 1: Validate and get discovery resource
+	vmbd, requeue, err := r.validateReferencedDiscovery(ctx, logger, vmfr)
+	if err != nil || requeue {
+		return requeue, err
+	}
+
+	logger.V(1).Info("Discovery reference validated, proceeding to backup selection",
+		"validBackups", len(vmbd.Status.ValidBackups),
+		"selectedBackupsRequested", len(vmfr.Spec.SelectedBackups))
+
+	// Step 2: Validate backups and selected backups from discovery
+	// backupsToServe contains the list of backups which are valid and selected
+	backupsToServe, err := r.validateDiscoveryBackups(ctx, logger, vmfr, vmbd)
 	if err != nil {
-		logger.Error(err, "Invalid selected backups")
-
-		// Set backing off phase and condition - single status update
-		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseBackingOff
-		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionReady),
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "InvalidSelectedBackups",
-			Message:            err.Error(),
-		}
-		meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-		if err := r.Status().Update(ctx, vmfr); err != nil {
-			return false, err
-		}
-		return false, nil // No requeue, permanent failure
+		return false, err
 	}
 
 	logger.V(1).Info("Discovery reference and selected backups validation passed",
 		"validBackups", len(vmbd.Status.ValidBackups),
 		"selectedBackups", len(backupsToServe))
 
-	// Step 5: Discover PVCs from backups (if not already done)
-	pvcDiscoveredCondition := meta.FindStatusCondition(vmfr.Status.Conditions, string(oadpv1alpha1.VirtualMachineFileRestoreConditionPVCsDiscovered))
-
-	// Check for already completed discovery
-	if pvcDiscoveredCondition != nil && pvcDiscoveredCondition.Status == metav1.ConditionTrue {
-		logger.V(1).Info("PVC discovery already completed, skipping")
-	} else {
-		logger.V(1).Info("Starting PVC discovery from backups")
-
-		// Perform the actual PVC discovery
-		err = r.discoverAndStorePVCInfo(ctx, logger, vmfr)
-		if err != nil {
-			logger.Error(err, "PVC discovery failed")
-			// Set failed condition - single status update
-			condition := metav1.Condition{
-				Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionPVCsDiscovered),
-				Status:             metav1.ConditionFalse,
-				LastTransitionTime: metav1.Now(),
-				Reason:             "PVCDiscoveryFailed",
-				Message:            fmt.Sprintf("Failed to discover PVCs: %v", err),
-			}
-			meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-			if statusErr := r.Status().Update(ctx, vmfr); statusErr != nil {
-				logger.Error(statusErr, "Failed to set PVC discovery failed condition")
-			}
-			return true, err // Requeue for retry
-		}
-
-		logger.V(1).Info("PVC discovery completed successfully")
+	// Update status - transitioning from validation to PVC discovery
+	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr,
+		oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+		[]metav1.Condition{{
+			Type:               oadptypes.ConditionTypeProgressing,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "DiscoveringPVCs",
+			Message:            fmt.Sprintf("Discovering PVCs from %d backups", len(backupsToServe)),
+		}},
+		false,
+		logger); err != nil {
+		return false, err
 	}
 
-	// Step 6: Ensure restore namespace exists
-	restoreNamespace, err := r.ensureRestoreNamespace(ctx, logger, vmfr)
+	// Step 3: Discover PVCs from backups
+	// Ad this stage we need to get the PVCs from the backups that belongs to the selected
+	// discovery VM. This is the last step before we can transition to the Processing phase.
+	pvcDiscoveryResults := r.runConcurrentPVCDiscovery(ctx, logger, vmbd, backupsToServe)
+
+	// Step 4: Process PVC discovery results
+	logger.V(0).Info("Processing PVC discovery results", "pvcDiscoveryResults", len(pvcDiscoveryResults))
+
+	err = r.processDiscoveryResults(ctx, logger, vmfr, pvcDiscoveryResults)
 	if err != nil {
-		logger.Error(err, "Failed to ensure restore namespace")
-		// Set backing off phase and condition - single status update
-		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseBackingOff
-		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionReady),
+		return false, r.failValidation(ctx, vmfr, "ProcessDiscoveryFailed", err.Error(), logger)
+	}
+
+	// All validation/discovery completed successfully - stay in InProgress, update progress reason
+	conditions := []metav1.Condition{
+		{
+			Type:               oadptypes.ConditionTypeProgressing,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "ValidationCompleted",
+			Message:            fmt.Sprintf("PVC discovery completed for %d backups, ready to create restores", len(backupsToServe)),
+		},
+		{
+			Type:               oadptypes.ConditionTypeAvailable,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "NamespaceCreationFailed",
-			Message:            fmt.Sprintf("Failed to ensure restore namespace: %v", err),
-		}
-		meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-		if statusErr := r.Status().Update(ctx, vmfr); statusErr != nil {
-			return false, statusErr
-		}
-		return true, err // Requeue for retry
+			Reason:             "InProgress",
+			Message:            "Validation completed, restore creation pending",
+		},
+		{
+			Type:               oadptypes.ConditionTypeDegraded,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "NoFailures",
+			Message:            "No failures detected during validation",
+		},
+		{
+			Type:               oadptypes.ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "InProgress",
+			Message:            "File restore in progress",
+		},
 	}
 
-	// Update status with the namespace being used
-	vmfr.Status.CreatedNamespace = restoreNamespace
-	logger.V(1).Info("Restore namespace ready", "namespace", restoreNamespace)
-
-	// Step 7: Setup file serving
-	// TODO: Implement file serving logic here
-	vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseCreated
-
-	// TODO: Create and populate FileServingInfo based on chosen implementation
-	// vmfr.Status.FileServingInfo = &oadpv1alpha1.FileServingInfo{
-	//     // Fields TBD based on file serving implementation
-	// }
-
-	// Set ready condition - single status update
-	condition := metav1.Condition{
-		Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionReady),
-		Status:             metav1.ConditionTrue,
-		LastTransitionTime: metav1.Now(),
-		Reason:             "FileServingReady",
-		Message:            fmt.Sprintf("File serving setup completed for %d backups", len(backupsToServe)),
-	}
-	meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-	if err := r.Status().Update(ctx, vmfr); err != nil {
+	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress, conditions, false, logger); err != nil {
 		return false, err
 	}
-
-	logger.V(0).Info("File restore process completed successfully")
-	return false, nil // No requeue, process complete
+	logger.V(0).Info("Validation phase completed successfully, ready to create Velero restores")
+	return true, nil // Requeue to proceed to restore creation phase
 }
 
-// ensureFinalizer ensures the finalizer is present on the VirtualMachineFileRestore resource
-func (r *VirtualMachineFileRestoreReconciler) ensureFinalizer(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
-	if controllerutil.ContainsFinalizer(vmfr, VMFileRestoreFinalizer) {
-		return false, nil // Finalizer already exists, continue to next step
-	}
+// validateReferencedDiscovery validates and retrieves the discovery resource
+func (r *VirtualMachineFileRestoreReconciler) validateReferencedDiscovery(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (*oadpv1alpha1.VirtualMachineBackupsDiscovery, bool, error) {
 
-	logger.V(1).Info("Adding finalizer to VirtualMachineFileRestore")
-	controllerutil.AddFinalizer(vmfr, VMFileRestoreFinalizer)
-	if err := r.Update(ctx, vmfr); err != nil {
-		logger.Error(err, "Failed to add finalizer")
-		return false, err
-	}
-	logger.V(0).Info("Finalizer added to VirtualMachineFileRestore")
-	return true, nil // Requeue to proceed with updated resource
-}
-
-// initializePhaseForFileRestore initializes the phase for a new VirtualMachineFileRestore
-func (r *VirtualMachineFileRestoreReconciler) initializePhaseForFileRestore(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
-	vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseNew
-	if err := r.Status().Update(ctx, vmfr); err != nil {
-		logger.Error(err, "Failed to update status to New phase")
-		return false, err
-	}
-	logger.V(0).Info("VirtualMachineFileRestore phase initialized to New")
-	return true, nil // Requeue to proceed to next step
-}
-
-// handleResourceDeletion handles cleanup when the resource is being deleted
-func (r *VirtualMachineFileRestoreReconciler) handleResourceDeletion(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
-	// Check if our finalizer is present - if not, nothing to clean up
-	if !controllerutil.ContainsFinalizer(vmfr, VMFileRestoreFinalizer) {
-		logger.V(1).Info("Finalizer not present, skipping cleanup")
-		return false, nil
-	}
-
-	logger.V(0).Info("Starting cleanup of resources")
-
-	// Update phase to indicate deletion
-	vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseDeleting
-	if err := r.Status().Update(ctx, vmfr); err != nil {
-		logger.Error(err, "Failed to update phase to Deleting")
-		return false, err
-	}
-
-	// Perform all cleanup operations
-	cleanupErrors := []error{}
-
-	// Clean up temporary namespace if it was created by this controller
-	if vmfr.Status.CreatedNamespace != "" && vmfr.Spec.RestoreNamespace == "" {
-		logger.V(1).Info("Cleaning up temporary namespace", "namespace", vmfr.Status.CreatedNamespace)
-		err := r.cleanupTemporaryNamespace(ctx, logger, vmfr.Status.CreatedNamespace)
-		if err != nil {
-			logger.Error(err, "Failed to cleanup temporary namespace", "namespace", vmfr.Status.CreatedNamespace)
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to cleanup namespace %s: %w", vmfr.Status.CreatedNamespace, err))
-		}
-	}
-
-	// Clean up file serving resources (pods, services, etc.)
-	if err := r.cleanupFileServingResources(ctx, logger, vmfr); err != nil {
-		logger.Error(err, "Failed to cleanup file serving resources")
-		cleanupErrors = append(cleanupErrors, fmt.Errorf("failed to cleanup file serving resources: %w", err))
-	}
-
-	// If there were cleanup errors, log them but continue to remove finalizer
-	// This prevents resources from being stuck in deletion if some cleanup fails
-	if len(cleanupErrors) > 0 {
-		logger.Error(fmt.Errorf("cleanup completed with errors: %v", cleanupErrors), "Some cleanup operations failed")
-	}
-
-	// Remove the finalizer to allow the resource to be deleted
-	logger.V(1).Info("Removing finalizer")
-	controllerutil.RemoveFinalizer(vmfr, VMFileRestoreFinalizer)
-	if err := r.Update(ctx, vmfr); err != nil {
-		logger.Error(err, "Failed to remove finalizer")
-		return false, err
-	}
-
-	logger.V(0).Info("Cleanup completed, finalizer removed")
-	return false, nil // No requeue, cleanup complete
-}
-
-// cleanupTemporaryNamespace deletes a temporary namespace created by this controller
-func (r *VirtualMachineFileRestoreReconciler) cleanupTemporaryNamespace(ctx context.Context, logger logr.Logger, namespaceName string) error {
-	namespace := &corev1.Namespace{}
-	err := r.Get(ctx, types.NamespacedName{Name: namespaceName}, namespace)
+	vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      vmfr.Spec.BackupsDiscoveryRef,
+		Namespace: vmfr.Namespace,
+	}, vmbd)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.V(1).Info("Temporary namespace already deleted", "namespace", namespaceName)
-			return nil
+		var reason, msg string
+		if apierrors.IsNotFound(err) {
+			logger.Error(err, "Referenced VirtualMachineBackupsDiscovery not found",
+				"backupsDiscoveryRef", vmfr.Spec.BackupsDiscoveryRef,
+				"namespace", vmfr.Namespace)
+			reason = "DiscoveryNotFound"
+			msg = fmt.Sprintf("Referenced VirtualMachineBackupsDiscovery '%s' not found in namespace '%s'",
+				vmfr.Spec.BackupsDiscoveryRef, vmfr.Namespace)
+		} else {
+			logger.Error(err, "Failed to get referenced VirtualMachineBackupsDiscovery",
+				"backupsDiscoveryRef", vmfr.Spec.BackupsDiscoveryRef,
+				"namespace", vmfr.Namespace)
+			reason = "DiscoveryGetFailed"
+			msg = fmt.Sprintf("Failed to get referenced VirtualMachineBackupsDiscovery '%s' in namespace '%s'",
+				vmfr.Spec.BackupsDiscoveryRef, vmfr.Namespace)
 		}
-		return fmt.Errorf("failed to get temporary namespace '%s': %w", namespaceName, err)
+
+		if failErr := r.failValidation(ctx, vmfr, reason, msg, logger); failErr != nil {
+			return nil, false, failErr
+		}
+		return nil, false, err
 	}
 
-	// Verify this is a temporary namespace managed by this controller
-	if label, exists := namespace.Labels["oadp.openshift.io/vm-file-restore-temp"]; !exists || label != "true" {
-		logger.V(1).Info("Namespace is not a temporary VM file restore namespace, skipping deletion", "namespace", namespaceName)
-		return nil
+	// Check if discovery is ready
+	if vmbd.Status.Phase == oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseInProgress ||
+		vmbd.Status.Phase == oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseNew {
+		logger.V(1).Info("Discovery not yet ready, waiting",
+			"discoveryRef", vmfr.Spec.BackupsDiscoveryRef,
+			"discoveryNamespace", vmfr.Namespace)
+
+		// Set all 4 conditions for InProgress state while waiting
+		conditions := []metav1.Condition{
+			{
+				Type:               oadptypes.ConditionTypeProgressing,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "WaitingForDiscovery",
+				Message:            "Waiting for backup discovery to complete",
+			},
+			{
+				Type:               oadptypes.ConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "DiscoveryInProgress",
+				Message:            "Discovery not yet completed",
+			},
+			{
+				Type:               oadptypes.ConditionTypeDegraded,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "NoFailures",
+				Message:            "No failures detected",
+			},
+			{
+				Type:               oadptypes.ConditionTypeReady,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "DiscoveryInProgress",
+				Message:            "Waiting for backup discovery to complete",
+			},
+		}
+
+		if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr,
+			oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+			conditions,
+			false,
+			logger); err != nil {
+			return nil, false, err
+		}
+
+		return nil, true, nil // Requeue, discovery not ready yet
 	}
 
-	// Delete the namespace
-	err = r.Delete(ctx, namespace)
+	return vmbd, false, nil // Success
+}
+
+func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
+	return false, nil
+}
+
+// validateDiscoveryBackups validates selected backups and returns the list to serve
+func (r *VirtualMachineFileRestoreReconciler) validateDiscoveryBackups(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	vmbd *oadpv1alpha1.VirtualMachineBackupsDiscovery,
+) ([]oadptypes.VeleroBackupInfo, error) {
+
+	// No valid backups in discovery
+	if len(vmbd.Status.ValidBackups) == 0 {
+		logger.V(0).Info("No valid backups found in discovery", "discoveryRef", vmfr.Spec.BackupsDiscoveryRef)
+		return nil, r.failValidation(ctx, vmfr, "NoValidBackups",
+			fmt.Sprintf("Referenced discovery '%s' found no valid backups", vmfr.Spec.BackupsDiscoveryRef),
+			logger)
+	}
+
+	// Filter selected backups if specified
+	backupsToServe, err := r.getFilteredBackupsToServe(vmfr, vmbd)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.V(1).Info("Temporary namespace already deleted during cleanup", "namespace", namespaceName)
-			return nil
-		}
-		return fmt.Errorf("failed to delete temporary namespace '%s': %w", namespaceName, err)
+		logger.Error(err, "Invalid selected backups")
+		return nil, r.failValidation(ctx, vmfr, "InvalidSelectedBackups", err.Error(), logger)
 	}
 
-	logger.V(0).Info("Successfully deleted temporary namespace", "namespace", namespaceName)
-	return nil
+	// User selected backups but none matched discovery results
+	if len(vmfr.Spec.SelectedBackups) > 0 && len(backupsToServe) == 0 {
+		logger.V(0).Info("Selected backups not found in discovery results", "discoveryRef", vmfr.Spec.BackupsDiscoveryRef)
+		return nil, r.failValidation(ctx, vmfr, "InvalidSelectedBackups",
+			fmt.Sprintf("None of the selected backups were found in discovery '%s'", vmfr.Spec.BackupsDiscoveryRef),
+			logger)
+	}
+
+	// After filtering, ensure we have at least one backup to serve
+	if len(backupsToServe) == 0 {
+		noBackupsMsg := "No valid backups available for file restore after applying filters"
+		logger.V(0).Info(noBackupsMsg, "discoveryRef", vmfr.Spec.BackupsDiscoveryRef)
+		return nil, r.failValidation(ctx, vmfr, "NoValidBackups",
+			noBackupsMsg,
+			logger)
+	}
+	return backupsToServe, nil
 }
 
-// cleanupFileServingResources cleans up all file serving resources created for this VMFR
-func (r *VirtualMachineFileRestoreReconciler) cleanupFileServingResources(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) error {
-	// Currently, file serving resources are not yet implemented, but when they are,
-	// this function should clean up:
-	// - File serving pods
-	// - Services exposing the pods
-	// - ConfigMaps or Secrets containing configuration
-	// - PVCs created for file serving (if any)
-	// - Jobs or other workloads
-
-	logger.V(1).Info("File serving resources cleanup - no resources to clean up yet")
-
-	// TODO: Implement cleanup of file serving resources when they are added
-	// Example implementation structure:
-	//
-	// if vmfr.Status.FileServingInfo != nil {
-	//     // Clean up pods
-	//     if err := r.cleanupFileServingPods(ctx, logger, vmfr); err != nil {
-	//         return fmt.Errorf("failed to cleanup file serving pods: %w", err)
-	//     }
-	//
-	//     // Clean up services
-	//     if err := r.cleanupFileServingServices(ctx, logger, vmfr); err != nil {
-	//         return fmt.Errorf("failed to cleanup file serving services: %w", err)
-	//     }
-	//
-	//     // Clean up other resources...
-	// }
-
-	return nil
-}
-
-// getBackupsToServe validates that selectedBackups exist in the discovery results
+// getFilteredBackupsToServe validates that selectedBackups exist in the discovery results
 // Returns the list of backups to serve (selected or all valid backups)
-func (r *VirtualMachineFileRestoreReconciler) getBackupsToServe(vmfr *oadpv1alpha1.VirtualMachineFileRestore, vmbd *oadpv1alpha1.VirtualMachineBackupsDiscovery) ([]oadpv1alpha1.VeleroBackupInfo, error) {
-	// If no selection specified, use all valid backups
+func (r *VirtualMachineFileRestoreReconciler) getFilteredBackupsToServe(
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	vmbd *oadpv1alpha1.VirtualMachineBackupsDiscovery,
+) ([]oadptypes.VeleroBackupInfo, error) {
+
+	// If no selection specified, return all valid backups
 	if len(vmfr.Spec.SelectedBackups) == 0 {
 		return vmbd.Status.ValidBackups, nil
 	}
 
-	// Create a map of valid backup names for efficient lookup
-	validBackupNames := make(map[string]oadpv1alpha1.VeleroBackupInfo)
+	// Build lookup map of valid backups
+	validBackupNames := make(map[string]oadptypes.VeleroBackupInfo, len(vmbd.Status.ValidBackups))
 	for _, backup := range vmbd.Status.ValidBackups {
 		validBackupNames[backup.Name] = backup
 	}
 
-	// Validate each selected backup and collect the results
-	var backupsToServe []oadpv1alpha1.VeleroBackupInfo
+	// Validate each selected backup
+	var backupsToServe []oadptypes.VeleroBackupInfo
 	var invalidSelections []string
-
 	for _, selectedName := range vmfr.Spec.SelectedBackups {
-		if backup, exists := validBackupNames[selectedName]; exists {
+		if backup, ok := validBackupNames[selectedName]; ok {
 			backupsToServe = append(backupsToServe, backup)
 		} else {
 			invalidSelections = append(invalidSelections, selectedName)
 		}
 	}
 
-	// Return error if any selected backups are invalid
 	if len(invalidSelections) > 0 {
 		return nil, fmt.Errorf("selected backups not found in discovery results: %v", invalidSelections)
 	}
@@ -498,443 +620,59 @@ func (r *VirtualMachineFileRestoreReconciler) getBackupsToServe(vmfr *oadpv1alph
 	return backupsToServe, nil
 }
 
-// addPVCsToBackups enhances backup information by adding PVC metadata from each backup
-// This method extracts PVC UIDs from backup metadata to enable file serving
-func (r *VirtualMachineFileRestoreReconciler) addPVCsToBackups(ctx context.Context, logger logr.Logger, backups []oadpv1alpha1.VeleroBackupInfo, vmName, vmNamespace string) []oadpv1alpha1.VeleroBackupInfo {
-	enhancedBackups := make([]oadpv1alpha1.VeleroBackupInfo, 0, len(backups))
+// runConcurrentPVCDiscovery discovers PVCs from multiple backups concurrently.
+// Returns a slice of BackupDiscoveryProgress containing results from all backups.
+// Errors are encoded in the BackupDiscoveryProgress status field, not returned.
+func (r *VirtualMachineFileRestoreReconciler) runConcurrentPVCDiscovery(
+	ctx context.Context,
+	logger logr.Logger,
+	vmbd *oadpv1alpha1.VirtualMachineBackupsDiscovery,
+	backupsToServe []oadptypes.VeleroBackupInfo,
+) []oadptypes.BackupDiscoveryProgress {
 
-	for _, backup := range backups {
-		// Extract PVC information from this backup
-		pvcInfo, err := r.extractPVCsFromBackup(ctx, logger, backup.Name, vmName, vmNamespace)
-		if err != nil {
-			logger.Error(err, "failed to extract PVC information from backup", "backup", backup.Name)
-			// Skip this backup if we can't extract PVC info
-			continue
-		}
-
-		enhancedBackup := backup
-		enhancedBackup.PVCs = pvcInfo
-		enhancedBackups = append(enhancedBackups, enhancedBackup)
-	}
-
-	return enhancedBackups
-}
-
-// extractPVCsFromBackup extracts PVC information for a specific VM from backup using tar-based extraction
-// This method gets the VM resource and finds its explicit PVC volume references
-func (r *VirtualMachineFileRestoreReconciler) extractPVCsFromBackup(ctx context.Context, logger logr.Logger, backupName, vmName, vmNamespace string) ([]oadpv1alpha1.BackupPVCInfo, error) {
-	if r.BackupContentsReader == nil {
-		return nil, fmt.Errorf("backup contents reader not configured")
-	}
-
-	// For test environments, we can use a fake backup object since the mock doesn't need the real backup
-	var backup *veleroapi.Backup
-	if r.isTestEnvironment() {
-		// Create a minimal backup object for testing
-		backup = &veleroapi.Backup{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      backupName,
-				Namespace: r.OADPNamespace,
-			},
-			Spec: veleroapi.BackupSpec{
-				IncludedNamespaces: []string{vmNamespace},
-			},
-			Status: veleroapi.BackupStatus{
-				CompletionTimestamp: &metav1.Time{Time: time.Now()},
-			},
-		}
-	} else {
-		// Get the real Velero backup object for production
-		var err error
-		backup, err = r.getVeleroBackup(ctx, backupName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get Velero backup %s: %w", backupName, err)
-		}
-	}
-
-	// Extract the VM from backup to get its explicit volume references
-	logger.V(1).Info("Extracting VM from backup to find explicit PVC references", "backupName", backupName, "vmName", vmName, "vmNamespace", vmNamespace)
-	vm, err := r.BackupContentsReader.ExtractVMFromBackupMetadata(ctx, backup, vmName, vmNamespace)
-	if err != nil {
-		logger.Error(err, "failed to extract VM from backup", "backupName", backupName, "vmName", vmName)
-		return nil, err
-	}
-	if vm == nil {
-		logger.V(1).Info("VM not found in backup", "vmName", vmName, "vmNamespace", vmNamespace)
-		return []oadpv1alpha1.BackupPVCInfo{}, nil
-	}
-
-	// Extract explicit PVC names that belong to this VM from its volume references
-	vmPVCNames := make(map[string]bool)
-	if vm.Spec.Template != nil && vm.Spec.Template.Spec.Volumes != nil {
-		for _, volume := range vm.Spec.Template.Spec.Volumes {
-			if volume.PersistentVolumeClaim != nil {
-				vmPVCNames[volume.PersistentVolumeClaim.ClaimName] = true
-				logger.V(1).Info("Found VM PVC reference", "pvcName", volume.PersistentVolumeClaim.ClaimName, "vmName", vmName)
-			}
-			if volume.DataVolume != nil {
-				vmPVCNames[volume.DataVolume.Name] = true
-				logger.V(1).Info("Found VM DataVolume reference (maps to PVC)", "pvcName", volume.DataVolume.Name, "vmName", vmName)
-			}
-		}
-	}
-
-	if len(vmPVCNames) == 0 {
-		logger.V(1).Info("VM has no PVC volumes", "vmName", vmName)
-		return []oadpv1alpha1.BackupPVCInfo{}, nil
-	}
-
-	logger.V(1).Info("Found VM PVC references", "pvcCount", len(vmPVCNames), "vmName", vmName)
-
-	// Fetch UIDs for the specific PVCs that the VM actually references
-	pvcInfos := make([]oadpv1alpha1.BackupPVCInfo, 0, len(vmPVCNames))
-	for pvcName := range vmPVCNames {
-		logger.V(1).Info("Fetching UID for VM's PVC", "pvcName", pvcName, "vmName", vmName)
-
-		// Try to fetch the full PVC manifest to get the real UID from backup tar with retry
-		pvc, err := r.retryFetchPVCFromBackup(ctx, logger, backup, pvcName, vmNamespace)
-		if err != nil {
-			logger.Error(err, "failed to fetch PVC from backup, using fallback UID", "pvcName", pvcName, "pvcNamespace", vmNamespace)
-			// Generate deterministic fallback UID when backup contents are not accessible
-			fallbackUID := r.generateDeterministicUID(backupName, vmNamespace, pvcName)
-			pvcInfo := oadpv1alpha1.BackupPVCInfo{
-				Name:      pvcName,
-				Namespace: vmNamespace,
-				UID:       fallbackUID,
-				// Size: nil - not available in fallback case
-			}
-			pvcInfos = append(pvcInfos, pvcInfo)
-			logger.V(1).Info("Added VM's PVC with fallback UID", "pvcName", pvcName, "fallbackUID", fallbackUID, "vmName", vmName)
-			continue
-		}
-
-		// Create PVC info with real data from backup including size
-		var size string
-		if storageRequest, exists := pvc.Spec.Resources.Requests["storage"]; exists {
-			size = r.formatSizeHumanReadable(storageRequest)
-		}
-
-		pvcInfo := oadpv1alpha1.BackupPVCInfo{
-			Name:      pvc.Name,
-			Namespace: pvc.Namespace,
-			UID:       string(pvc.UID),
-			Size:      size, // Human-readable size from backup PVC manifest
-		}
-		pvcInfos = append(pvcInfos, pvcInfo)
-		logger.V(1).Info("Successfully added VM's PVC to results", "pvcName", pvc.Name, "pvcUID", string(pvc.UID), "size", size, "vmName", vmName)
-	}
-
-	logger.Info("VM-specific PVC extraction completed", "vmName", vmName, "vmPVCs", len(pvcInfos), "backupName", backupName)
-	return pvcInfos, nil
-}
-
-// getVeleroBackup retrieves a Velero backup object by name
-func (r *VirtualMachineFileRestoreReconciler) getVeleroBackup(ctx context.Context, backupName string) (*veleroapi.Backup, error) {
-	backup := &veleroapi.Backup{}
-	namespacedName := types.NamespacedName{
-		Name:      backupName,
-		Namespace: r.OADPNamespace,
-	}
-
-	err := r.Get(ctx, namespacedName, backup)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Velero backup %s in namespace %s: %w", backupName, r.OADPNamespace, err)
-	}
-
-	return backup, nil
-}
-
-// extractVMPVCsFromBackupContents extracts PVCs that belong to a specific VM from backup contents
-// This method looks at the current cluster state to find PVCs that were created before the backup completion time
-func (r *VirtualMachineFileRestoreReconciler) extractVMPVCsFromBackupContents(ctx context.Context, backup *veleroapi.Backup, vmName, vmNamespace string) ([]oadpv1alpha1.BackupPVCInfo, error) {
-	// Get the VM to understand which PVCs belong to it
-	vm := &kubevirtv1.VirtualMachine{}
-	vmKey := types.NamespacedName{Name: vmName, Namespace: vmNamespace}
-
-	err := r.Get(ctx, vmKey, vm)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get VM %s/%s: %w", vmNamespace, vmName, err)
-	}
-
-	// Extract PVC names from VM volumes
-	vmPVCNames := make(map[string]bool)
-	for _, volume := range vm.Spec.Template.Spec.Volumes {
-		if volume.PersistentVolumeClaim != nil {
-			vmPVCNames[volume.PersistentVolumeClaim.ClaimName] = true
-		}
-	}
-
-	// List all PVCs in the VM's namespace
-	pvcList := &corev1.PersistentVolumeClaimList{}
-	err = r.List(ctx, pvcList, client.InNamespace(vmNamespace))
-	if err != nil {
-		return nil, fmt.Errorf("failed to list PVCs in namespace %s: %w", vmNamespace, err)
-	}
-
-	// Filter PVCs that belong to the VM and were created before backup completion
-	vmPVCs := make([]oadpv1alpha1.BackupPVCInfo, 0)
-	backupCompletionTime := backup.Status.CompletionTimestamp
-
-	for _, pvc := range pvcList.Items {
-		// Check if this PVC belongs to the VM
-		if !vmPVCNames[pvc.Name] {
-			continue
-		}
-
-		// Check if PVC was created before backup completion (if backup has completion time)
-		if backupCompletionTime != nil && pvc.CreationTimestamp.After(backupCompletionTime.Time) {
-			continue
-		}
-
-		// Add to the result
-		vmPVCs = append(vmPVCs, oadpv1alpha1.BackupPVCInfo{
-			Name:      pvc.Name,
-			Namespace: pvc.Namespace,
-			UID:       string(pvc.UID),
-		})
-	}
-
-	return vmPVCs, nil
-}
-
-// retryFetchPVCFromBackup retries fetching PVC from backup with exponential backoff
-func (r *VirtualMachineFileRestoreReconciler) retryFetchPVCFromBackup(ctx context.Context, logger logr.Logger, backup *veleroapi.Backup, pvcName, pvcNamespace string) (*corev1.PersistentVolumeClaim, error) {
-	maxRetries := 3
-	baseDelay := 2 * time.Second
-
-	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			delay := time.Duration(attempt) * baseDelay
-			logger.Info("Retrying PVC fetch from backup", "pvcName", pvcName, "attempt", attempt+1, "delay", delay)
-			time.Sleep(delay)
-		}
-
-		pvc, err := r.BackupContentsReader.FetchPVCFromBackup(ctx, backup, pvcName, pvcNamespace)
-		if err == nil {
-			if attempt > 0 {
-				logger.Info("Successfully fetched PVC from backup after retry", "pvcName", pvcName, "attempt", attempt+1)
-			}
-			return pvc, nil
-		}
-
-		lastErr = err
-		logger.V(1).Info("Failed to fetch PVC from backup", "pvcName", pvcName, "attempt", attempt+1, "error", err)
-	}
-
-	logger.Error(lastErr, "Failed to fetch PVC from backup after all retries", "pvcName", pvcName, "maxRetries", maxRetries)
-	return nil, lastErr
-}
-
-// formatSizeHumanReadable converts a resource.Quantity to human-readable storage format
-// It ensures consistent formatting using binary units (Ki, Mi, Gi, Ti) which are standard for storage
-func (r *VirtualMachineFileRestoreReconciler) formatSizeHumanReadable(quantity resource.Quantity) string {
-	// Convert to bytes to ensure we start with a consistent base
-	bytes := quantity.Value()
-
-	// Create a new quantity from the byte value and format it with binary units
-	newQuantity := resource.NewQuantity(bytes, resource.BinarySI)
-
-	// The String() method will automatically choose the appropriate unit
-	// e.g., 5368709120 bytes -> 5Gi, 32212254720 bytes -> 30Gi
-	return newQuantity.String()
-}
-
-// generateDeterministicUID creates a deterministic UID for a PVC in a specific backup context
-// This ensures that the same PVC in different backups gets different UIDs, making file serving unique per backup
-func (r *VirtualMachineFileRestoreReconciler) generateDeterministicUID(backupName, namespace, pvcName string) string {
-	// Create a deterministic UID based on backup name, namespace, and PVC name
-	input := fmt.Sprintf("%s-%s-%s", backupName, namespace, pvcName)
-	hash := sha256.Sum256([]byte(input))
-
-	// Take first 8 characters of the hash and add the components for readability
-	hashStr := fmt.Sprintf("%x", hash)[:8]
-	return fmt.Sprintf("%s-%s-%s-%s", backupName, namespace, pvcName, hashStr)
-}
-
-// isTestEnvironment detects if we're running in a test environment
-// This can be used to modify behavior in tests (e.g., using fake clients)
-func (r *VirtualMachineFileRestoreReconciler) isTestEnvironment() bool {
-	// Check if we're using mock backup contents reader (more reliable than client type checking)
-	if r.BackupContentsReader != nil {
-		return fmt.Sprintf("%T", r.BackupContentsReader) == "*velerohelpers.MockBackupContentsReader"
-	}
-	return false
-}
-
-// backupDiscoveryResult holds the result of a single backup's PVC discovery
-type backupDiscoveryResult struct {
-	backupName      string
-	backupTimestamp *metav1.Time
-	discoveredPVCs  []oadpv1alpha1.BackupPVCInfo
-	err             error
-}
-
-// discoverAndStorePVCInfo discovers PVC information from selected backups concurrently and stores it in the status
-// This method fetches PVC UIDs from backup storage concurrently, waiting for all to complete before proceeding
-func (r *VirtualMachineFileRestoreReconciler) discoverAndStorePVCInfo(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) error {
-	// Get the discovery resource to understand which VM we're working with
-	discovery, err := r.getDiscoveryResource(ctx, vmfr)
-	if err != nil {
-		return fmt.Errorf("failed to get discovery resource: %w", err)
-	}
-
-	// Get the list of backups to process
-	backupsToProcess, err := r.getBackupsToProcess(vmfr, discovery)
-	if err != nil {
-		return fmt.Errorf("failed to get backups to process: %w", err)
-	}
-
-	if len(backupsToProcess) == 0 {
+	if len(backupsToServe) == 0 {
 		logger.V(1).Info("No backups to process for PVC discovery")
-		// Set condition for empty backups - single status update
-		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionPVCsDiscovered),
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "PVCDiscoveryCompleted",
-			Message:            "No backups found to process",
-		}
-		meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-
-		err = r.Status().Update(ctx, vmfr)
-		if err != nil {
-			return fmt.Errorf("failed to set PVC discovered condition: %w", err)
-		}
-		return nil
+		return []oadptypes.BackupDiscoveryProgress{}
 	}
 
-	logger.Info("Starting concurrent PVC discovery", "backupCount", len(backupsToProcess))
+	logger.V(0).Info("Starting concurrent PVC discovery", "backupCount", len(backupsToServe))
 
 	// Channel to collect results from concurrent goroutines
-	resultsChan := make(chan backupDiscoveryResult, len(backupsToProcess))
+	resultsChan := make(chan oadptypes.BackupDiscoveryProgress, len(backupsToServe))
 
 	// WaitGroup to ensure all goroutines complete
 	var wg sync.WaitGroup
 
 	// Start concurrent PVC discovery for each backup
-	for _, backupInfo := range backupsToProcess {
+	for _, backupInfo := range backupsToServe {
 		wg.Add(1)
-		go r.discoverPVCsFromSingleBackup(ctx, logger, backupInfo, discovery, resultsChan, &wg)
+		go r.discoverPVCsFromSingleBackup(ctx, logger, backupInfo, vmbd, resultsChan, &wg)
 	}
 
 	// Wait for all goroutines to complete
 	wg.Wait()
 	close(resultsChan)
 
-	// Collect results from all concurrent discoveries and build PVC-grouped data directly
-	pvcMap := make(map[string]*oadpv1alpha1.PVCRestoreInfo)
-	var discoveryErrors []string
-	totalPVCs := 0
-
+	// Collect results from channel into slice
+	results := make([]oadptypes.BackupDiscoveryProgress, 0, len(backupsToServe))
 	for result := range resultsChan {
-		if result.err != nil {
-			logger.Error(result.err, "Failed to discover PVCs from backup", "backup", result.backupName)
-			discoveryErrors = append(discoveryErrors, fmt.Sprintf("%s: %v", result.backupName, result.err))
-			continue
-		}
-
-		// Process each PVC from this backup
-		for _, pvc := range result.discoveredPVCs {
-			// Use UID as the unique key since it's already globally unique
-			pvcKey := pvc.UID
-
-			// Initialize PVC restore info if not exists
-			if _, exists := pvcMap[pvcKey]; !exists {
-				pvcMap[pvcKey] = &oadpv1alpha1.PVCRestoreInfo{
-					PVC:       pvc.Name,
-					Namespace: pvc.Namespace,
-					Size:      pvc.Size,
-					UID:       pvc.UID,
-					Restores:  []oadpv1alpha1.RestoreInfo{},
-				}
-			}
-
-			// Add restore information for this backup
-			restoreInfo := oadpv1alpha1.RestoreInfo{
-				BackupName: result.backupName,
-				Timestamp:  result.backupTimestamp,
-			}
-
-			pvcMap[pvcKey].Restores = append(pvcMap[pvcKey].Restores, restoreInfo)
-		}
-
-		totalPVCs += len(result.discoveredPVCs)
-		logger.V(1).Info("Discovered PVCs from backup",
-			"backup", result.backupName,
-			"pvcCount", len(result.discoveredPVCs))
-	}
-
-	// Convert map to slice
-	pvcRestores := make([]oadpv1alpha1.PVCRestoreInfo, 0, len(pvcMap))
-	for _, pvcRestore := range pvcMap {
-		pvcRestores = append(pvcRestores, *pvcRestore)
-	}
-
-	// Update the status with PVC-grouped information and condition in a single update
-	vmfr.Status.PVCRestores = pvcRestores
-
-	// Set the PVCsDiscovered condition based on results
-	var conditionMessage string
-	var conditionStatus metav1.ConditionStatus
-	var reason string
-
-	successfulBackups := len(backupsToProcess) - len(discoveryErrors)
-
-	if len(discoveryErrors) > 0 && len(pvcRestores) == 0 {
-		// All discoveries failed
-		conditionMessage = fmt.Sprintf("Failed to discover PVCs from all %d backups. Errors: %v", len(backupsToProcess), discoveryErrors)
-		conditionStatus = metav1.ConditionFalse
-		reason = "PVCDiscoveryFailed"
-	} else if len(discoveryErrors) > 0 {
-		// Partial success
-		conditionMessage = fmt.Sprintf("Discovered %d PVCs from %d backups (partial success, %d failures)", len(pvcRestores), successfulBackups, len(discoveryErrors))
-		conditionStatus = metav1.ConditionTrue
-		reason = "PVCDiscoveryPartialSuccess"
-	} else if len(pvcRestores) == 0 {
-		// Success but no PVCs found
-		conditionMessage = "No PVCs discovered from selected backups"
-		conditionStatus = metav1.ConditionTrue
-		reason = "PVCDiscoveryCompleted"
-	} else {
-		// Complete success
-		conditionMessage = fmt.Sprintf("Discovered %d PVCs from %d backups", len(pvcRestores), successfulBackups)
-		conditionStatus = metav1.ConditionTrue
-		reason = "PVCDiscoveryCompleted"
-	}
-
-	// Set condition on the status object (not yet persisted)
-	condition := metav1.Condition{
-		Type:               string(oadpv1alpha1.VirtualMachineFileRestoreConditionPVCsDiscovered),
-		Status:             conditionStatus,
-		LastTransitionTime: metav1.Now(),
-		Reason:             reason,
-		Message:            conditionMessage,
-	}
-	meta.SetStatusCondition(&vmfr.Status.Conditions, condition)
-
-	// Single status update with both PVCRestores and condition
-	err = r.Status().Update(ctx, vmfr)
-	if err != nil {
-		return fmt.Errorf("failed to update status with PVC discovery results: %w", err)
+		results = append(results, result)
 	}
 
 	logger.Info("Concurrent PVC discovery completed",
-		"discoveredPVCs", len(pvcRestores),
-		"successfulBackups", successfulBackups,
-		"failedBackups", len(discoveryErrors),
-		"totalBackups", len(backupsToProcess))
+		"totalBackups", len(backupsToServe),
+		"resultsCollected", len(results))
 
-	return nil
+	return results
 }
 
 // discoverPVCsFromSingleBackup discovers PVCs from a single backup in a goroutine
 func (r *VirtualMachineFileRestoreReconciler) discoverPVCsFromSingleBackup(
 	ctx context.Context,
 	logger logr.Logger,
-	backupInfo oadpv1alpha1.VeleroBackupInfo,
-	discovery *oadpv1alpha1.VirtualMachineBackupsDiscovery,
-	resultsChan chan<- backupDiscoveryResult,
+	backupInfo oadptypes.VeleroBackupInfo,
+	vmbd *oadpv1alpha1.VirtualMachineBackupsDiscovery,
+	resultsChan chan<- oadptypes.BackupDiscoveryProgress,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
@@ -942,40 +680,432 @@ func (r *VirtualMachineFileRestoreReconciler) discoverPVCsFromSingleBackup(
 	backupLogger := logger.WithValues("backup", backupInfo.Name)
 	backupLogger.V(1).Info("Starting PVC discovery for backup")
 
-	// Get Velero backup metadata to extract creation timestamp
-	veleroBackup, err := r.getVeleroBackup(ctx, backupInfo.Name)
+	// Step 1: Get backup metadata (creation timestamp)
+	progress, err := r.getBackupMetadata(ctx, backupInfo)
 	if err != nil {
-		backupLogger.Error(err, "Failed to get Velero backup metadata")
-		// Continue without timestamp rather than failing
+		// Failed to get backup CRD - permanent failure
+		backupLogger.Error(err, "Failed to get backup CRD")
+		resultsChan <- r.buildFailedProgress(backupInfo, "BackupNotFound", err.Error())
+		return
 	}
 
-	// Get the enhanced backup info with PVCs (this calls our existing addPVCsToBackups logic)
-	enhancedBackups := r.addPVCsToBackups(ctx, backupLogger, []oadpv1alpha1.VeleroBackupInfo{backupInfo}, discovery.Spec.VirtualMachineName, discovery.Spec.VirtualMachineNamespace)
-
-	var discoveredPVCs []oadpv1alpha1.BackupPVCInfo
-	var timestamp *metav1.Time
-
-	if len(enhancedBackups) > 0 {
-		discoveredPVCs = enhancedBackups[0].PVCs
-		backupLogger.V(1).Info("Successfully discovered PVCs from backup", "pvcCount", len(discoveredPVCs))
-	} else {
-		discoveredPVCs = []oadpv1alpha1.BackupPVCInfo{}
-		backupLogger.V(1).Info("No PVCs discovered from backup")
+	// Step 2: Extract PVCs from backup storage
+	pvcs, err := r.extractPVCsForGivenVMFromBackup(ctx, backupLogger, backupInfo.Name, backupInfo.Namespace, vmbd.Spec.VirtualMachineName, vmbd.Spec.VirtualMachineNamespace)
+	if err != nil {
+		backupLogger.Error(err, "Failed to extract PVCs from backup")
+		// Failed to extract PVCs - could be missing files, unsupported format, etc.
+		var unsupportedErr ErrUnsupportedBackup
+		if errors.As(err, &unsupportedErr) {
+			// For unsupported backups, we have PVC metadata but the backup is incompatible
+			// Include the PVC in results so it appears in status with failure reason
+			progress.VeleroBackupInfo.PVCs = []oadptypes.PVCInfo{
+				{
+					PVCName:      unsupportedErr.PVCName,
+					PVCNamespace: unsupportedErr.PVCNamespace,
+					PVCUID:       unsupportedErr.PVCUID,
+					Size:         unsupportedErr.PVCSize,
+				},
+			}
+			progress.Status = oadptypes.BackupDiscoveryStatusFailed
+			progress.Message = fmt.Sprintf("UnsupportedBackupFormat: %s", unsupportedErr.Reason)
+			now := metav1.Now()
+			progress.LastUpdated = &now
+			backupLogger.V(1).Info("Backup incompatible with vmfr, including PVC metadata in results",
+				"pvcUID", unsupportedErr.PVCUID, "reason", unsupportedErr.Reason)
+			resultsChan <- progress
+		} else if strings.Contains(err.Error(), "file not found") {
+			resultsChan <- r.buildFailedProgress(backupInfo, "BackupFilesMissing", "Backup files missing from storage")
+		} else {
+			resultsChan <- r.buildFailedProgress(backupInfo, "ExtractionFailed", err.Error())
+		}
+		return
 	}
 
-	// Add creation timestamp if available
-	if veleroBackup != nil {
-		timestamp = &veleroBackup.CreationTimestamp
+	// Step 3: Build success result
+	progress.VeleroBackupInfo.PVCs = pvcs
+	progress.Status = oadptypes.BackupDiscoveryStatusCompleted
+	progress.Message = fmt.Sprintf("Successfully discovered %d PVCs", len(pvcs))
+	now := metav1.Now()
+	progress.LastUpdated = &now
+
+	backupLogger.V(1).Info("Successfully discovered PVCs from backup", "pvcCount", len(pvcs))
+	resultsChan <- progress
+}
+
+// getBackupMetadata retrieves Velero backup metadata and initializes BackupDiscoveryProgress
+func (r *VirtualMachineFileRestoreReconciler) getBackupMetadata(
+	ctx context.Context,
+	backupInfo oadptypes.VeleroBackupInfo,
+) (oadptypes.BackupDiscoveryProgress, error) {
+
+	veleroBackup, err := r.getVeleroBackup(ctx, backupInfo.Name, backupInfo.Namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return oadptypes.BackupDiscoveryProgress{}, fmt.Errorf("backup CRD object deleted from cluster")
+		}
+		return oadptypes.BackupDiscoveryProgress{}, fmt.Errorf("failed to get Velero backup metadata: %w", err)
 	}
 
-	resultsChan <- backupDiscoveryResult{
-		backupName:      backupInfo.Name,
-		backupTimestamp: timestamp,
-		discoveredPVCs:  discoveredPVCs,
+	// Initialize progress with backup metadata
+	now := metav1.Now()
+	progress := oadptypes.BackupDiscoveryProgress{
+		VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+			Name:      backupInfo.Name,
+			Namespace: backupInfo.Namespace,
+			CreatedAt: &veleroBackup.CreationTimestamp,
+		},
+		Status:      oadptypes.BackupDiscoveryStatusInProgress,
+		Message:     "Extracting PVC information",
+		LastUpdated: &now,
+	}
+
+	return progress, nil
+}
+
+// extractPVCsForGivenVMFromBackup extracts PVC information from backup storage
+// This reads PVC metadata from the backup tar files, NOT from the live cluster
+func (r *VirtualMachineFileRestoreReconciler) extractPVCsForGivenVMFromBackup(
+	ctx context.Context,
+	logger logr.Logger,
+	backupName string,
+	backupNamespace string,
+	vmName string,
+	vmNamespace string,
+) ([]oadptypes.PVCInfo, error) {
+
+	if r.BackupContentsReader == nil {
+		return nil, fmt.Errorf("backup contents reader not configured")
+	}
+
+	// Get the Velero backup object
+	backup, err := r.getVeleroBackup(ctx, backupName, backupNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Velero backup %s: %w", backupName, err)
+	}
+
+	// Step 1: Extract VM resource from backup metadata
+	logger.V(1).Info("Extracting VM from backup metadata",
+		"backupName", backupName, "vmName", vmName, "vmNamespace", vmNamespace)
+
+	vm, err := r.BackupContentsReader.ExtractVMFromBackupMetadata(ctx, backup, vmName, vmNamespace)
+	if err != nil {
+		logger.Error(err, "Failed to extract VM from backup", "backupName", backupName)
+		return nil, fmt.Errorf("failed to extract VM from backup: %w", err)
+	}
+	if vm == nil {
+		logger.V(1).Info("VM not found in backup", "vmName", vmName, "vmNamespace", vmNamespace)
+		return []oadptypes.PVCInfo{}, nil
+	}
+
+	// Step 2: Extract PVC names from VM volume references
+	vmPVCNames := make(map[string]bool)
+	if vm.Spec.Template != nil && vm.Spec.Template.Spec.Volumes != nil {
+		for _, volume := range vm.Spec.Template.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil {
+				vmPVCNames[volume.PersistentVolumeClaim.ClaimName] = true
+				logger.V(1).Info("Found VM PVC reference", "pvcName", volume.PersistentVolumeClaim.ClaimName)
+			}
+			if volume.DataVolume != nil {
+				vmPVCNames[volume.DataVolume.Name] = true
+				logger.V(1).Info("Found VM DataVolume reference (maps to PVC)", "pvcName", volume.DataVolume.Name)
+			}
+		}
+	}
+
+	if len(vmPVCNames) == 0 {
+		logger.V(1).Info("VM has no PVC volumes", "vmName", vmName)
+		return []oadptypes.PVCInfo{}, nil
+	}
+
+	logger.V(1).Info("Found VM PVC references", "pvcCount", len(vmPVCNames), "vmName", vmName)
+
+	// Step 3: Fetch PVC manifests from backup and extract metadata
+	pvcInfos := make([]oadptypes.PVCInfo, 0, len(vmPVCNames))
+	for pvcName := range vmPVCNames {
+		logger.V(1).Info("Fetching PVC from backup", "pvcName", pvcName)
+
+		// Fetch the full PVC manifest from backup tar
+		pvc, err := r.BackupContentsReader.FetchPVCFromBackup(ctx, backup, pvcName, vmNamespace)
+		if err != nil {
+			logger.Error(err, "Failed to fetch PVC from backup", "pvcName", pvcName, "pvcNamespace", vmNamespace)
+			return nil, fmt.Errorf("failed to fetch PVC %s from backup: %w", pvcName, err)
+		}
+
+		// Extract size from PVC spec first (we'll need it for error reporting)
+		var size string
+		if storageRequest, exists := pvc.Spec.Resources.Requests["storage"]; exists {
+			size = function.FormatSizeHumanReadable(storageRequest)
+		}
+
+		// Validate that PVC has the required UID label added by supported kubevirt-velero-plugin
+		// This label is required for VMFR to work correctly with selective restore
+		if pvc.Labels == nil {
+			logger.Error(nil, "PVC missing labels in backup metadata - backup not compatible with vmfr",
+				"pvcName", pvcName, "backupName", backupName)
+			return nil, ErrUnsupportedBackup{
+				BackupName:   backupName,
+				PVCName:      pvc.Name,
+				PVCNamespace: pvc.Namespace,
+				PVCUID:       string(pvc.UID),
+				PVCSize:      size,
+				Reason:       "PVC missing labels - backup created with plugin not compatible with vmfr",
+			}
+		}
+
+		pvcUIDLabel, exists := pvc.Labels[constant.PVCUIDLabel]
+		if !exists {
+			logger.Error(nil, "PVC missing required UID label in backup metadata - backup not compatible with vmfr",
+				"pvcName", pvcName, "backupName", backupName, "requiredLabel", constant.PVCUIDLabel)
+			return nil, ErrUnsupportedBackup{
+				BackupName:   backupName,
+				PVCName:      pvc.Name,
+				PVCNamespace: pvc.Namespace,
+				PVCUID:       string(pvc.UID),
+				PVCSize:      size,
+				Reason:       fmt.Sprintf("PVC missing required label '%s' - backup created with plugin not compatible with vmfr", constant.PVCUIDLabel),
+			}
+		}
+
+		// Verify label value matches actual PVC UID
+		if pvcUIDLabel != string(pvc.UID) {
+			logger.Error(nil, "PVC UID label mismatch in backup metadata",
+				"pvcName", pvcName, "backupName", backupName,
+				"labelValue", pvcUIDLabel, "actualUID", string(pvc.UID))
+			return nil, ErrUnsupportedBackup{
+				BackupName:   backupName,
+				PVCName:      pvc.Name,
+				PVCNamespace: pvc.Namespace,
+				PVCUID:       string(pvc.UID),
+				PVCSize:      size,
+				Reason:       fmt.Sprintf("PVC UID label mismatch (label: %s, actual: %s) - backup metadata corrupted or created with incompatible plugin", pvcUIDLabel, string(pvc.UID)),
+			}
+		}
+
+		logger.V(1).Info("PVC validation passed - backup compatible with vmfr",
+			"pvcName", pvcName, "pvcUID", string(pvc.UID))
+
+		// Create PVC info with data from backup (size already extracted above)
+		pvcInfo := oadptypes.PVCInfo{
+			PVCName:      pvc.Name,
+			PVCNamespace: pvc.Namespace,
+			PVCUID:       string(pvc.UID),
+			Size:         size,
+		}
+		pvcInfos = append(pvcInfos, pvcInfo)
+
+		logger.V(1).Info("Successfully extracted PVC from backup",
+			"pvcName", pvc.Name, "pvcUID", string(pvc.UID), "size", size)
+	}
+
+	logger.Info("PVC extraction from backup completed",
+		"vmName", vmName, "pvcCount", len(pvcInfos), "backupName", backupName)
+
+	return pvcInfos, nil
+}
+
+// buildFailedProgress creates a BackupDiscoveryProgress for failed discovery
+func (r *VirtualMachineFileRestoreReconciler) buildFailedProgress(
+	backupInfo oadptypes.VeleroBackupInfo,
+	reason string,
+	message string,
+) oadptypes.BackupDiscoveryProgress {
+
+	now := metav1.Now()
+	return oadptypes.BackupDiscoveryProgress{
+		VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+			Name:      backupInfo.Name,
+			Namespace: backupInfo.Namespace,
+			CreatedAt: backupInfo.CreatedAt,
+			PVCs:      []oadptypes.PVCInfo{}, // Empty list for failed discoveries
+		},
+		Status:      oadptypes.BackupDiscoveryStatusFailed,
+		Message:     fmt.Sprintf("%s: %s", reason, message),
+		LastUpdated: &now,
 	}
 }
 
+// processDiscoveryResults transforms backup-centric discovery results into PVC-centric restore information
+// and stores it in VMFR status for later use in creating Velero Restore objects
+func (r *VirtualMachineFileRestoreReconciler) processDiscoveryResults(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	pvcDiscoveryResults []oadptypes.BackupDiscoveryProgress,
+) error {
+	// Build PVC-grouped restore information from backup-centric discovery results
+	// Key: PVC UID (unique identifier across all backups)
+	// Value: PVCRestoreInfo with all backups containing this PVC
+	pvcMap := make(map[string]*oadpv1alpha1.PVCRestoreInfo)
+
+	for _, backupProgress := range pvcDiscoveryResults {
+		// Determine state based on backup discovery status
+		var state string
+		switch backupProgress.Status {
+		case oadptypes.BackupDiscoveryStatusCompleted:
+			state = string(oadptypes.BackupDiscoveryStateAvailable)
+		case oadptypes.BackupDiscoveryStatusFailed:
+			// Parse message to determine specific failure reason
+			if strings.Contains(backupProgress.Message, "BackupNotFound") ||
+				strings.Contains(backupProgress.Message, "backup CRD object deleted") {
+				state = string(oadptypes.BackupDiscoveryStateBackupDeleted)
+			} else if strings.Contains(backupProgress.Message, "BackupFilesMissing") ||
+				strings.Contains(backupProgress.Message, "Backup files missing") {
+				state = string(oadptypes.BackupDiscoveryStateBackupMissing)
+			} else if strings.Contains(backupProgress.Message, "UnsupportedBackupFormat") {
+				state = string(oadptypes.BackupDiscoveryStateUnsupportedPlugin)
+			} else {
+				state = string(oadptypes.BackupDiscoveryStateExtractionFailed)
+			}
+		case oadptypes.BackupDiscoveryStatusSkipped:
+			// Skip backups that were skipped during discovery
+			logger.V(1).Info("Skipping backup that was skipped during discovery", "backup", backupProgress.Name)
+			continue
+		default:
+			logger.V(1).Info("Unexpected backup status, skipping", "status", backupProgress.Status, "backup", backupProgress.Name)
+			continue
+		}
+
+		// Process each PVC from this backup
+		// For failed backups with no PVC data (backup-deleted, backup-missing, extraction-failed without PVC info),
+		// create synthetic entry to track backup-level failures
+		if state != string(oadptypes.BackupDiscoveryStateAvailable) && len(backupProgress.VeleroBackupInfo.PVCs) == 0 {
+			logger.V(1).Info("Creating synthetic PVC entry for backup-level failure (no PVC data available)",
+				"backup", backupProgress.Name, "state", state)
+
+			// Create synthetic PVC UID for backup-level failures
+			syntheticUID := fmt.Sprintf("backup-failure-%s-%s", backupProgress.Namespace, backupProgress.Name)
+
+			// Add synthetic PVC entry for backup-level failures
+			pvcMap[syntheticUID] = &oadpv1alpha1.PVCRestoreInfo{
+				PVCInfo: oadptypes.PVCInfo{
+					PVCName:      "backup-level-failure",
+					PVCNamespace: backupProgress.Namespace,
+					PVCUID:       syntheticUID,
+					Size:         "N/A",
+				},
+				Restores: []oadpv1alpha1.RestoreInfo{
+					{
+						VeleroBackupName:      backupProgress.Name,
+						VeleroBackupNamespace: backupProgress.Namespace,
+						Timestamp:             backupProgress.CreatedAt,
+						State:                 state,
+						FailureReason:         backupProgress.Message,
+					},
+				},
+			}
+			continue // Skip to next backup
+		}
+
+		// Process PVCs (either successful or failed with PVC metadata)
+		for _, pvc := range backupProgress.VeleroBackupInfo.PVCs {
+			// Use UID as unique key for grouping PVCs across backups
+			pvcKey := pvc.PVCUID
+
+			// Initialize PVC restore info if this is the first time we see this PVC
+			if _, exists := pvcMap[pvcKey]; !exists {
+				pvcMap[pvcKey] = &oadpv1alpha1.PVCRestoreInfo{
+					PVCInfo: oadptypes.PVCInfo{
+						PVCName:      pvc.PVCName,
+						PVCNamespace: pvc.PVCNamespace,
+						PVCUID:       pvc.PVCUID,
+						Size:         pvc.Size,
+					},
+					Restores: []oadpv1alpha1.RestoreInfo{},
+				}
+			}
+
+			// Add restore information for this backup to the PVC's restore list
+			restoreInfo := oadpv1alpha1.RestoreInfo{
+				VeleroBackupName:      backupProgress.Name,
+				VeleroBackupNamespace: backupProgress.Namespace,
+				Timestamp:             backupProgress.CreatedAt,
+				State:                 state,
+				// VeleroRestore* fields will be populated later when Velero Restore objects are created
+			}
+
+			// For failed backups, include the failure reason
+			if state != string(oadptypes.BackupDiscoveryStateAvailable) {
+				restoreInfo.FailureReason = backupProgress.Message
+			}
+
+			pvcMap[pvcKey].Restores = append(pvcMap[pvcKey].Restores, restoreInfo)
+		}
+	}
+
+	// Convert map to slice
+	pvcRestores := make([]oadpv1alpha1.PVCRestoreInfo, 0, len(pvcMap))
+	for _, pvcRestore := range pvcMap {
+		// Sort restores by timestamp (newest first) for each PVC
+		r.sortRestoresByTimestamp(pvcRestore.Restores)
+		pvcRestores = append(pvcRestores, *pvcRestore)
+	}
+
+	// Use patch pattern (same as patchVmfrStatusPhaseConditions) to update status
+	patch := client.MergeFrom(vmfr.DeepCopy())
+	originalStatus := vmfr.Status.DeepCopy()
+
+	// Update PVCRestores field
+	vmfr.Status.PVCRestores = pvcRestores
+
+	// Compare before patching to avoid unnecessary API calls
+	if equality.Semantic.DeepEqual(originalStatus, &vmfr.Status) {
+		logger.V(1).Info("No status update required for PVC restores")
+		return nil
+	}
+
+	// Patch the status
+	if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to patch status with PVC restore info")
+		return fmt.Errorf("failed to update VMFR status with PVC restore info: %w", err)
+	}
+
+	logger.V(0).Info("Successfully stored PVC restore information in status",
+		"pvcCount", len(pvcRestores),
+		"totalBackups", len(pvcDiscoveryResults))
+
+	return nil
+}
+
+// sortRestoresByTimestamp sorts restore info by timestamp (newest first)
+func (r *VirtualMachineFileRestoreReconciler) sortRestoresByTimestamp(restores []oadpv1alpha1.RestoreInfo) {
+	// Sort newest first using simple bubble sort
+	for i := 0; i < len(restores); i++ {
+		for j := i + 1; j < len(restores); j++ {
+			var iTime, jTime time.Time
+			if restores[i].Timestamp != nil {
+				iTime = restores[i].Timestamp.Time
+			}
+			if restores[j].Timestamp != nil {
+				jTime = restores[j].Timestamp.Time
+			}
+
+			// Sort newest first (jTime > iTime means j should come before i)
+			if jTime.After(iTime) {
+				restores[i], restores[j] = restores[j], restores[i]
+			}
+		}
+	}
+}
+
+// getVeleroBackup retrieves a Velero backup object by name
+func (r *VirtualMachineFileRestoreReconciler) getVeleroBackup(ctx context.Context, backupName string, backupNamespace string) (*veleroapi.Backup, error) {
+	backup := &veleroapi.Backup{}
+	namespacedName := types.NamespacedName{
+		Name:      backupName,
+		Namespace: backupNamespace,
+	}
+
+	err := r.Get(ctx, namespacedName, backup)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Velero backup %s in namespace %s: %w", backupName, backupNamespace, err)
+	}
+
+	return backup, nil
+}
+
 // getDiscoveryResource retrieves the referenced VirtualMachineBackupsDiscovery resource
+//
+//nolint:unused // Will be used in file restore workflow implementation
 func (r *VirtualMachineFileRestoreReconciler) getDiscoveryResource(ctx context.Context, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (*oadpv1alpha1.VirtualMachineBackupsDiscovery, error) {
 	discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{}
 	discoveryKey := types.NamespacedName{
@@ -991,50 +1121,13 @@ func (r *VirtualMachineFileRestoreReconciler) getDiscoveryResource(ctx context.C
 	return discovery, nil
 }
 
-// getBackupsToProcess returns the list of backups to process based on selectedBackups or all valid backups
-func (r *VirtualMachineFileRestoreReconciler) getBackupsToProcess(vmfr *oadpv1alpha1.VirtualMachineFileRestore, discovery *oadpv1alpha1.VirtualMachineBackupsDiscovery) ([]oadpv1alpha1.VeleroBackupInfo, error) {
-	if len(vmfr.Spec.SelectedBackups) > 0 {
-		// Use only selected backups
-		return r.filterSelectedBackups(vmfr.Spec.SelectedBackups, discovery.Status.ValidBackups)
-	} else {
-		// Use all valid backups from discovery
-		return discovery.Status.ValidBackups, nil
-	}
-}
-
-// filterSelectedBackups filters valid backups to include only the selected ones
-func (r *VirtualMachineFileRestoreReconciler) filterSelectedBackups(selectedBackups []string, validBackups []oadpv1alpha1.VeleroBackupInfo) ([]oadpv1alpha1.VeleroBackupInfo, error) {
-	// Create a map for fast lookup
-	validBackupNames := make(map[string]oadpv1alpha1.VeleroBackupInfo)
-	for _, backup := range validBackups {
-		validBackupNames[backup.Name] = backup
-	}
-
-	// Validate each selected backup and collect the results
-	var backupsToServe []oadpv1alpha1.VeleroBackupInfo
-	var invalidSelections []string
-
-	for _, selectedName := range selectedBackups {
-		if backup, exists := validBackupNames[selectedName]; exists {
-			backupsToServe = append(backupsToServe, backup)
-		} else {
-			invalidSelections = append(invalidSelections, selectedName)
-		}
-	}
-
-	// Return error if any selected backups are invalid
-	if len(invalidSelections) > 0 {
-		return nil, fmt.Errorf("selected backups not found in discovery results: %v", invalidSelections)
-	}
-
-	return backupsToServe, nil
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *VirtualMachineFileRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&oadpv1alpha1.VirtualMachineFileRestore{}).
 		Watches(&oadpv1alpha1.VirtualMachineBackupsDiscovery{}, handler.EnqueueRequestsFromMapFunc(r.mapVMBDToVMFR)).
+		Watches(&veleroapi.Restore{}, handler.EnqueueRequestsFromMapFunc(r.mapVeleroRestoreToVMFR),
+			builder.WithPredicates(predicate.VeleroRestorePredicate{OADPNamespace: r.OADPNamespace})).
 		Named("virtualmachinefilerestore").
 		Complete(r)
 }
@@ -1063,15 +1156,51 @@ func (r *VirtualMachineFileRestoreReconciler) mapVMBDToVMFR(ctx context.Context,
 	return requests
 }
 
+// mapVeleroRestoreToVMFR maps Velero Restore changes to VirtualMachineFileRestore reconcile requests
+func (r *VirtualMachineFileRestoreReconciler) mapVeleroRestoreToVMFR(ctx context.Context, obj client.Object) []ctrl.Request {
+	restore, ok := obj.(*veleroapi.Restore)
+	if !ok {
+		return nil
+	}
+
+	// Check if this Velero Restore is managed by a VMFR
+	vmfrName, exists := restore.Labels["oadp.openshift.io/vm-file-restore"]
+	if !exists {
+		return nil
+	}
+
+	vmfrNamespace, exists := restore.Labels["oadp.openshift.io/vm-file-restore-ns"]
+	if !exists {
+		return nil
+	}
+
+	// Return a reconcile request for the VMFR that owns this Velero Restore
+	return []ctrl.Request{
+		{
+			NamespacedName: client.ObjectKey{
+				Name:      vmfrName,
+				Namespace: vmfrNamespace,
+			},
+		},
+	}
+}
+
 // ensureRestoreNamespace ensures that the restore namespace exists, either by using the specified one
 // or by creating a new temporary namespace with appropriate naming
-func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (string, error) {
+//
+//nolint:unused // Will be used in file restore workflow implementation
+func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (string, error) {
+
 	// If a specific namespace is provided, validate it exists
 	if vmfr.Spec.RestoreNamespace != "" {
 		namespace := &corev1.Namespace{}
 		err := r.Get(ctx, types.NamespacedName{Name: vmfr.Spec.RestoreNamespace}, namespace)
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				return "", fmt.Errorf("specified restore namespace '%s' does not exist", vmfr.Spec.RestoreNamespace)
 			}
 			return "", fmt.Errorf("failed to validate restore namespace '%s': %w", vmfr.Spec.RestoreNamespace, err)
@@ -1080,27 +1209,38 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(ctx context
 		return vmfr.Spec.RestoreNamespace, nil
 	}
 
-	// Generate a temporary namespace name
-	namespaceName, err := r.generateTemporaryNamespaceName(ctx, logger, vmfr)
+	// Generate a temporary namespace name using information from the vmbd discovery object
+	// and eventually optional prefix provided by the user in the vmfr spec
+	vmbd, err := r.getDiscoveryResource(ctx, vmfr)
 	if err != nil {
-		return "", fmt.Errorf("failed to generate temporary namespace name: %w", err)
+		return "", fmt.Errorf("failed to get discovery resource for namespace generation: %w", err)
 	}
+
+	namespaceName := function.GenerateTemporaryVMFRNamespaceName(
+		vmfr.Spec.NamespacePrefix,         // optional prefix
+		vmbd.Spec.VirtualMachineNamespace, // VM namespace
+		vmbd.Spec.VirtualMachineName,      // VM name
+		string(vmfr.UID),                  // UID suffix
+		logger,
+	)
 
 	// Create the temporary namespace
 	namespace := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: namespaceName,
 			Labels: map[string]string{
-				"oadp.openshift.io/vm-file-restore":      vmfr.Name,
-				"oadp.openshift.io/vm-file-restore-temp": "true",
-				"oadp.openshift.io/managed-by":           "oadp-vm-file-restore-controller",
+				constant.VMFROriginUUIDLabel:    string(vmfr.UID),
+				constant.VMFRTempNamespaceLabel: "true",
+				constant.ManagedByLabel:         constant.ManagedByLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
-					APIVersion: vmfr.APIVersion,
-					Kind:       vmfr.Kind,
-					Name:       vmfr.Name,
-					UID:        vmfr.UID,
+					APIVersion:         vmfr.APIVersion,
+					Kind:               vmfr.Kind,
+					Name:               vmfr.Name,
+					UID:                vmfr.UID,
+					Controller:         ptr.To(true),
+					BlockOwnerDeletion: ptr.To(true),
 				},
 			},
 		},
@@ -1108,7 +1248,7 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(ctx context
 
 	err = r.Create(ctx, namespace)
 	if err != nil {
-		if errors.IsAlreadyExists(err) {
+		if apierrors.IsAlreadyExists(err) {
 			logger.V(1).Info("Temporary namespace already exists", "namespace", namespaceName)
 		} else {
 			return "", fmt.Errorf("failed to create temporary namespace '%s': %w", namespaceName, err)
@@ -1116,55 +1256,6 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(ctx context
 	} else {
 		logger.V(0).Info("Created temporary restore namespace", "namespace", namespaceName)
 	}
-
-	return namespaceName, nil
-}
-
-// generateTemporaryNamespaceName generates a unique name for a temporary restore namespace
-// The format is: [prefix-]<vm-namespace>-<vm-name>-<suffix>
-func (r *VirtualMachineFileRestoreReconciler) generateTemporaryNamespaceName(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (string, error) {
-	// Get the discovery resource to access VM info
-	discovery, err := r.getDiscoveryResource(ctx, vmfr)
-	if err != nil {
-		return "", fmt.Errorf("failed to get discovery resource for namespace generation: %w", err)
-	}
-
-	// Start building the namespace name
-	var nameParts []string
-
-	// Add prefix if specified
-	if vmfr.Spec.NamespacePrefix != "" {
-		nameParts = append(nameParts, vmfr.Spec.NamespacePrefix)
-	}
-
-	// Add VM namespace and name
-	nameParts = append(nameParts, discovery.Spec.VirtualMachineNamespace)
-	nameParts = append(nameParts, discovery.Spec.VirtualMachineName)
-
-	// Generate a unique suffix using the VMFR resource UID (first 8 chars)
-	suffix := string(vmfr.UID)[:8]
-	nameParts = append(nameParts, suffix)
-
-	// Join parts with hyphens
-	namespaceName := strings.Join(nameParts, "-")
-
-	// Ensure namespace name is valid (max 63 characters, DNS-1123 label)
-	if len(namespaceName) > 63 {
-		// Truncate to fit within limits while preserving the suffix for uniqueness
-		maxPrefixLen := 63 - len(suffix) - 1 // -1 for the hyphen before suffix
-		truncatedPrefix := namespaceName[:maxPrefixLen]
-		namespaceName = truncatedPrefix + "-" + suffix
-	}
-
-	// Convert to lowercase and replace any invalid characters
-	namespaceName = strings.ToLower(namespaceName)
-	namespaceName = strings.ReplaceAll(namespaceName, "_", "-")
-
-	logger.V(1).Info("Generated temporary namespace name",
-		"namespace", namespaceName,
-		"vmNamespace", discovery.Spec.VirtualMachineNamespace,
-		"vmName", discovery.Spec.VirtualMachineName,
-		"prefix", vmfr.Spec.NamespacePrefix)
 
 	return namespaceName, nil
 }
