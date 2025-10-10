@@ -306,6 +306,15 @@ main() {
 
     log "Mounting operations completed"
     log "Filesystems mounted at: $FS_MOUNT_DIR"
+
+    # Keep container alive - guestmount process must stay running
+    # This is critical: FUSE mounts require the mounting process to remain active
+    log "Keeping container alive to maintain FUSE mounts..."
+    log "To access files, use: kubectl exec <pod> -- ls /mnt/filesystems/"
+
+    # Sleep forever to keep container running
+    # Future: This will be replaced with SSH/HTTP server (Issues #8, #9)
+    exec sleep infinity
 }
 
 # Execute main function with all script arguments
