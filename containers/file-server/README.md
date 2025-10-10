@@ -790,6 +790,18 @@ T+300s  : Timeout! ❌ (or finally ready but very slow)
 ### Future Integration (Other Issues)
 
 #### Issue #7: Controller Lifecycle Management
+
+**📋 Complete Implementation Guide:** See [CONTROLLER_INTEGRATION.md](CONTROLLER_INTEGRATION.md)
+
+This guide provides:
+- ✅ Complete checklist for pod provisioning
+- ✅ Security configuration requirements (SELinux, privileged mode, qemu user)
+- ✅ Volume mounting specifications
+- ✅ Pre-deployment validation steps
+- ✅ Status monitoring and verification
+- ✅ Troubleshooting common issues
+- ✅ Complete working example pod spec
+
 The VMFR controller will:
 1. Create pods using this container image
 2. Mount restored PVCs at `/mnt/volumes/`
