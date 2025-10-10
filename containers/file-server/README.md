@@ -777,12 +777,15 @@ T+300s  : Timeout! ❌ (or finally ready but very slow)
 ✅ Container image with all required tools
 ✅ Read-only filesystem mounting capability
 ✅ Automatic disk format detection
+✅ Automated mounting script (`detect-and-mount.sh`)
 ✅ Tests and documentation
 ✅ **Live cluster testing completed** (OpenShift Virtualization)
   - Tested with real VM disk (9.8GB raw format, XFS filesystem)
   - Validated end-to-end: VM backup → disk mount → file access
   - All test files successfully accessible via guestmount
+  - Automated script tested: `detect-and-mount.sh` successfully mounts filesystem and keeps pod alive
   - Security requirements documented (privileged mode, qemu user, SELinux labels)
+  - Pod runs continuously with FUSE mounts active
 
 ### Future Integration (Other Issues)
 

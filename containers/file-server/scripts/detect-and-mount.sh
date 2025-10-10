@@ -44,7 +44,7 @@
 #   - With argument: Mount specific disk image
 #     Example: detect-and-mount.sh /mnt/volumes/disk.qcow2
 
-set -euo pipefail
+set -uo pipefail
 
 # Default mount points
 # VOLUME_MOUNT_DIR: Where restored PVCs are mounted (controller provides this)
@@ -281,7 +281,7 @@ auto_mount_all() {
 
     # List mounted filesystems
     log "Currently mounted filesystems:"
-    mount | grep "$FS_MOUNT_DIR" || log "No filesystems currently mounted"
+    mount | grep "$FS_MOUNT_DIR" || true
 }
 
 # main - Entry point for the script

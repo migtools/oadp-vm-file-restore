@@ -48,9 +48,14 @@ spec:
     image: quay.io/spampatt/oadp-vm-file-server:dev
     imagePullPolicy: Always
 
-    # Keep container running so we can exec in and run manual tests
-    # In production, VMFR controller would run: /usr/local/bin/detect-and-mount.sh
-    command: ["/bin/bash", "-c", "sleep infinity"]
+    # Run detect-and-mount.sh to automatically mount VM disk filesystem
+    # This is what the VMFR controller will do in production
+    command: ["/usr/local/bin/detect-and-mount.sh"]
+
+    # Environment variables
+    env:
+    - name: HOME
+      value: /tmp  # libguestfs needs writable HOME for cache
 
     # ==========================================================================
     # Security Context - Privileged Container for KVM Access
