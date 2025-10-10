@@ -1,0 +1,84 @@
+---
+# ==============================================================================
+# Test VM for OADP File Server Container Testing
+# ==============================================================================
+#
+# Purpose:
+#   Creates a Fedora VM to test the file-server container with a real VM disk.
+#   This simulates the OADP workflow: VM backup → restore → file access.
+#
+# What This Creates:
+#   - Fedora VM with 10Gi disk (XFS filesystem - most common in RHEL/Fedora)
+#   - DataVolume PVC: test-vm-rootdisk (contains VM disk image)
+#   - Cloud-init for easy access (user: fedora, password: fedora)
+#
+# Testing Workflow:
+#   1. Apply this manifest to create VM
+#   2. VM boots, access via web console
+#   3. Add test data inside VM (/root/test-file.txt, etc.)
+#   4. Stop VM (important! PVC is ReadWriteOnce)
+#   5. Deploy file-server pod (test-pod.yaml) to mount this VM's disk
+#   6. Verify file-server can read test data from VM filesystem
+#
+# ==============================================================================
+
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: test-vm
+  namespace: shubh-oadp-vm-file-server-test
+  labels:
+    app: oadp-file-server-test
+    test: vm-disk-mounting
+spec:
+  running: true  # Set to false before creating file-server pod
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: test-vm
+    spec:
+      domain:
+        devices:
+          disks:
+          - disk:
+              bus: virtio
+            name: rootdisk
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+          interfaces:
+          - name: default
+            masquerade: {}
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: 1
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - dataVolume:
+          name: test-vm-rootdisk
+        name: rootdisk
+      - cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            user: fedora
+            password: fedora
+            chpasswd: { expire: False }
+            ssh_pwauth: True
+        name: cloudinitdisk
+  dataVolumeTemplates:
+  - metadata:
+      name: test-vm-rootdisk
+    spec:
+      pvc:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 10Gi
+        storageClassName: ocs-storagecluster-ceph-rbd-virtualization
+      source:
+        registry:
+          url: docker://quay.io/containerdisks/fedora:latest
