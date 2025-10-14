@@ -9,9 +9,9 @@ This project provides **two Dockerfiles** for different use cases:
 | Dockerfile | Base Image | Build Requirements | Who Uses It |
 |------------|------------|-------------------|-------------|
 | **Dockerfile** | Fedora 42 | None | Community, contributors, upstream development |
-| **Dockerfile.rhel** | RHEL 9 UBI | Red Hat subscription | Red Hat product builds (downstream) |
+| **konflux.Dockerfile** | RHEL 9 UBI | None (Konflux handles it) | Red Hat Konflux CI/CD (official product builds) |
 
-Both produce functionally identical images - the choice is about build accessibility vs production alignment.
+Both produce functionally identical images - the choice is about build context and automation.
 
 ---
 
@@ -43,99 +43,57 @@ podman build -f Dockerfile -t oadp-vm-file-server:latest .
 
 ---
 
-## Building Downstream (RHEL 9) - For Red Hat Product
+## Building Downstream (RHEL 9) - For Red Hat Product via Konflux
 
-### Prerequisites
+### What is Konflux?
 
-**Red Hat Subscription Required**
+Red Hat Konflux is Red Hat's official container build system (successor to OSBS). It's used for building all official Red Hat product container images, including OADP.
 
-Building with RHEL 9 base requires Red Hat subscription credentials to access full RHEL repositories for packages like `libguestfs-tools`.
+### konflux.Dockerfile
 
-The built image does NOT require a subscription to run - only the build process needs credentials.
+The `konflux.Dockerfile` follows the standard Red Hat pattern (same as `openshift/oadp-operator`) and is specifically designed for automated Konflux builds.
 
-#### Get a Subscription
+**Key features:**
+- ✅ Uses RHEL 9 UBI base image
+- ✅ Includes LICENSE file in `/licenses/` (Red Hat requirement)
+- ✅ Red Hat-specific metadata labels
+- ✅ NO manual subscription management (Konflux handles this)
+- ✅ Identical tools and functionality to Fedora build
 
-You need access to RHEL 9 repositories. This is included with:
-- Red Hat Developer Subscription (free for developers)
-- Red Hat Enterprise Linux subscription
-- Red Hat Employee subscription
+### How Konflux Builds Work
 
-Get a free developer subscription at: https://developers.redhat.com/
+Konflux builds are **fully automated**:
 
-### Build Methods
+1. Code merged to tracked branch (e.g., `oadp-1.5`)
+2. Konflux detects `konflux.Dockerfile`
+3. Build runs with automatic RHEL repository access (no credentials needed)
+4. Image pushed to official Red Hat registries
+5. Image goes through Red Hat security scanning and certification
 
-#### Method 1: Using Build Arguments (Simplest)
+### Manual Testing of konflux.Dockerfile (Optional)
 
+For local development/testing, use the **Dockerfile** (Fedora) instead - it's simpler and requires no credentials.
+
+The konflux.Dockerfile is primarily for the automated Red Hat build pipeline.
+
+If you need to test the konflux.Dockerfile locally:
 ```bash
 cd containers/file-server/
 
-podman build -f Dockerfile.rhel \
-  --build-arg RHSM_USER="your-redhat-username" \
-  --build-arg RHSM_PASS="your-redhat-password" \
-  -t oadp-vm-file-server:rhel \
+# This will work if you have access to Red Hat internal build environment
+podman build -f konflux.Dockerfile \
+  -t oadp-vm-file-server:konflux \
   .
 ```
 
-**Security Note:** This method passes credentials as build arguments. They won't appear in the final image but may be visible in build logs.
+**Note:** Outside the Konflux environment, this may fail due to repository access. Use the Fedora Dockerfile for local testing instead.
 
-#### Method 2: Using Build Secrets (More Secure)
+### Required Files for Konflux
 
-1. Create secret files:
-```bash
-echo "your-redhat-username" > /tmp/rhsm-username
-echo "your-redhat-password" > /tmp/rhsm-password
-chmod 600 /tmp/rhsm-*
-```
-
-2. Build with secrets:
-```bash
-cd containers/file-server/
-
-podman build -f Dockerfile.rhel \
-  --secret id=rhsm-username,src=/tmp/rhsm-username \
-  --secret id=rhsm-password,src=/tmp/rhsm-password \
-  -t oadp-vm-file-server:rhel \
-  .
-```
-
-3. Clean up secrets:
-```bash
-rm -f /tmp/rhsm-username /tmp/rhsm-password
-```
-
-#### Method 3: Using Environment Variables
-
-```bash
-export RHSM_USER="your-redhat-username"
-export RHSM_PASS="your-redhat-password"
-
-cd containers/file-server/
-
-podman build -f Dockerfile.rhel \
-  --build-arg RHSM_USER="${RHSM_USER}" \
-  --build-arg RHSM_PASS="${RHSM_PASS}" \
-  -t oadp-vm-file-server:rhel \
-  .
-
-unset RHSM_USER RHSM_PASS
-```
-
-### RHEL Build Process Explained
-
-The Dockerfile.rhel performs these steps:
-
-1. **Starts from RHEL 9 UBI** (`registry.access.redhat.com/ubi9/ubi:latest`)
-2. **Registers with Red Hat subscription** (temporarily)
-3. **Installs packages from RHEL repos:**
-   - libguestfs-tools (VM disk mounting)
-   - libguestfs-xfs (XFS filesystem support)
-   - All filesystem and utility tools
-4. **Unregisters subscription** (cleanup)
-5. **Removes subscription cache** (security)
-6. **Adds helper scripts** (detect-and-mount.sh, entrypoint.sh)
-7. **Creates qemu user** (UID/GID 107)
-
-**Result:** A container image with all required tools, NO subscription needed to run.
+When Konflux builds, it needs:
+- ✅ `konflux.Dockerfile` - The build definition
+- ✅ `LICENSE` - Red Hat container policy requirement (symlinked from repo root)
+- ✅ `scripts/` - Helper scripts to copy into container
 
 ---
 
@@ -196,45 +154,21 @@ jobs:
 - `QUAY_USER` - Quay.io username
 - `QUAY_TOKEN` - Quay.io token
 
-### GitHub Actions - RHEL (Downstream)
+### Red Hat Konflux (Downstream)
 
-```yaml
-name: Build OADP File Server (Downstream)
+Red Hat product builds use the **Konflux** build system, not GitHub Actions.
 
-on:
-  push:
-    branches: [ release-* ]
+Konflux builds are configured through Red Hat's internal build pipeline and happen automatically when code is merged to tracked branches (e.g., `oadp-1.5`).
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+**No GitHub Actions configuration needed for downstream** - Konflux handles everything automatically:
+- ✅ Detects `konflux.Dockerfile`
+- ✅ Provides RHEL repository access
+- ✅ Builds multi-arch images
+- ✅ Pushes to Red Hat registries
+- ✅ Runs security scans
+- ✅ Certifies the image
 
-      - name: Build container (RHEL)
-        run: |
-          cd containers/file-server
-          podman build -f Dockerfile.rhel \
-            --build-arg RHSM_USER="${{ secrets.RHSM_USERNAME }}" \
-            --build-arg RHSM_PASS="${{ secrets.RHSM_PASSWORD }}" \
-            -t oadp-vm-file-server:rhel \
-            .
-
-      - name: Push to registry.redhat.io
-        run: |
-          podman login -u="${{ secrets.RH_REGISTRY_USER }}" \
-                      -p="${{ secrets.RH_REGISTRY_TOKEN }}" \
-                      registry.redhat.io
-          podman tag oadp-vm-file-server:rhel \
-                     registry.redhat.io/oadp/oadp-vm-file-server:latest
-          podman push registry.redhat.io/oadp/oadp-vm-file-server:latest
-```
-
-**Required GitHub Secrets:**
-- `RHSM_USERNAME` - Red Hat subscription username
-- `RHSM_PASSWORD` - Red Hat subscription password
-- `RH_REGISTRY_USER` - Red Hat registry username
-- `RH_REGISTRY_TOKEN` - Red Hat registry token
+For Konflux configuration, see Red Hat internal documentation.
 
 ---
 
@@ -250,26 +184,18 @@ jobs:
 1. Verify Fedora 42 is available: https://fedoraproject.org/
 2. Try with explicit mirror: `dnf install --setopt=fastestmirror=false ...`
 
-### RHEL Build Issues
-
-#### Error: "Unable to read consumer identity"
-
-This is **normal** and can be ignored. UBI images show this warning but subscription-manager still works.
+### Konflux Build Issues
 
 #### Error: "Unable to find a match: libguestfs-tools"
 
-**Cause:** Subscription registration failed or RHEL repos not enabled.
+**Cause:** Running konflux.Dockerfile outside the Konflux environment.
 
-**Fix:**
-1. Verify your Red Hat credentials are correct
-2. Ensure your subscription includes RHEL 9
-3. Check you're not hitting subscription limits
+**Fix:** Use the Fedora Dockerfile for local development:
+```bash
+podman build -f Dockerfile -t oadp-vm-file-server:dev .
+```
 
-#### Error: "subscription-manager: command not found"
-
-**Cause:** Using wrong base image or wrong Dockerfile.
-
-**Fix:** Ensure building with `-f Dockerfile.rhel` and base is `registry.access.redhat.com/ubi9/ubi:latest`
+The konflux.Dockerfile is designed for automated Konflux builds only.
 
 ### Build is Slow
 
@@ -322,7 +248,7 @@ trivy image oadp-vm-file-server:latest
 
 Both Dockerfiles support multi-arch builds:
 
-### Fedora (Easier - No Subscription)
+### Fedora (Upstream)
 
 ```bash
 podman manifest create oadp-vm-file-server:latest
@@ -340,29 +266,9 @@ podman manifest push oadp-vm-file-server:latest \
   quay.io/oadp/oadp-vm-file-server:latest
 ```
 
-### RHEL (Requires Subscription)
+### Konflux (Downstream)
 
-```bash
-podman manifest create oadp-vm-file-server:rhel
-
-# Build for x86_64
-podman build -f Dockerfile.rhel \
-  --platform linux/amd64 \
-  --build-arg RHSM_USER="..." \
-  --build-arg RHSM_PASS="..." \
-  --manifest oadp-vm-file-server:rhel .
-
-# Build for aarch64
-podman build -f Dockerfile.rhel \
-  --platform linux/arm64 \
-  --build-arg RHSM_USER="..." \
-  --build-arg RHSM_PASS="..." \
-  --manifest oadp-vm-file-server:rhel .
-
-# Push manifest
-podman manifest push oadp-vm-file-server:rhel \
-  registry.redhat.io/oadp/oadp-vm-file-server:latest
-```
+Konflux automatically handles multi-arch builds. No manual commands needed - it builds for all supported architectures automatically.
 
 ---
 
@@ -370,7 +276,7 @@ podman manifest push oadp-vm-file-server:rhel \
 
 For local testing without pushing to registry:
 
-### Fedora Build (Quick Testing)
+### Quick Local Testing
 
 ```bash
 # Build
@@ -385,23 +291,7 @@ podman run -it --privileged \
   /bin/bash
 ```
 
-### RHEL Build (Product Testing)
-
-```bash
-# Build
-podman build -f Dockerfile.rhel \
-  --build-arg RHSM_USER="your-username" \
-  --build-arg RHSM_PASS="your-password" \
-  -t oadp-vm-file-server:rhel-dev .
-
-# Run locally
-podman run -it --privileged \
-  --device /dev/fuse \
-  --device /dev/kvm \
-  -v /path/to/test-data:/mnt/volumes \
-  oadp-vm-file-server:rhel-dev \
-  /bin/bash
-```
+For testing Konflux builds, use the same Fedora build - they produce functionally identical images.
 
 ---
 
@@ -414,8 +304,9 @@ podman run -it --privileged \
 | Development | `Dockerfile` (Fedora) | `podman build -t my-image .` |
 | Contributing to upstream | `Dockerfile` (Fedora) | `podman build -t my-image .` |
 | CI/CD for community | `Dockerfile` (Fedora) | `podman build -t my-image .` |
-| Red Hat internal builds | `Dockerfile.rhel` (RHEL) | `podman build -f Dockerfile.rhel --build-arg RHSM_USER=... -t my-image .` |
-| Product release | `Dockerfile.rhel` (RHEL) | `podman build -f Dockerfile.rhel --build-arg RHSM_USER=... -t my-image .` |
+| Testing | `Dockerfile` (Fedora) | `podman build -t my-image .` |
+| Red Hat internal builds | `konflux.Dockerfile` (RHEL) | Automated by Konflux |
+| Product release | `konflux.Dockerfile` (RHEL) | Automated by Konflux |
 
 ### What's the difference at runtime?
 
@@ -432,11 +323,11 @@ The only difference is the build process.
 
 ## Questions?
 
-- **Where do I get Red Hat credentials?** https://developers.redhat.com/
-- **Can I use RHEL for free?** Yes, developer subscription is free
-- **Why does RHEL build need subscription?** To access libguestfs packages in RHEL repos
-- **Does the runtime image need subscription?** No, only build process
-- **Which should I use for development?** Fedora (Dockerfile) - simpler and no credentials needed
+- **Which Dockerfile should I use for development?** Always use `Dockerfile` (Fedora) - it's simpler and requires no credentials
+- **How do Red Hat product builds happen?** Automatically via Konflux when code is merged
+- **Can I test konflux.Dockerfile locally?** Not recommended - use Fedora Dockerfile for local testing instead
+- **Do the images differ at runtime?** No - both Fedora and Konflux images have identical tools and behavior
+- **Do I need a Red Hat subscription?** Not for development or testing - only Konflux automated builds need access to RHEL repos
 
 ## References
 
