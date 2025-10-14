@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: file-server-test-live
+  namespace: oadp-file-server-live-test
+  labels:
+    app: oadp-file-server
+    test: live-cluster
+spec:
+  securityContext:
+    fsGroup: 107
+    supplementalGroups: [107]
+    # SELinux label will be set automatically to match the PVC
+
+  containers:
+  - name: file-server
+    image: quay.io/spampatt/oadp-vm-file-server:amd64-test
+    imagePullPolicy: Always
+
+    # Mount block device directly with guestmount
+    command: ["/bin/bash", "-c"]
+    args:
+      - |
+        set -eo pipefail
+        echo "=========================================="
+        echo "OADP VM File Restore - Live Cluster Test"
+        echo "=========================================="
+
+        # guestmount can work directly with block devices
+        DISK_DEVICE="/dev/disk-image"
+        MOUNT_POINT="/mnt/filesystems/rootdisk"
+
+        echo "Detecting disk format..."
+        qemu-img info $DISK_DEVICE
+
+        echo ""
+        echo "Mounting disk at $MOUNT_POINT..."
+        mkdir -p $MOUNT_POINT
+
+        # Use guestmount with the block device
+        if guestmount -a $DISK_DEVICE -i --ro -o allow_other $MOUNT_POINT; then
+          echo "✓ Successfully mounted VM disk"
+          echo ""
+          echo "Filesystem contents:"
+          ls -la $MOUNT_POINT/ | head -20
+          echo ""
+          echo "Checking for test files..."
+          if [ -f "$MOUNT_POINT/root/test-file.txt" ]; then
+            echo "✓ Found test-file.txt:"
+            cat $MOUNT_POINT/root/test-file.txt
+          fi
+          echo ""
+          echo "Mount successful! Keeping container alive..."
+          exec sleep infinity
+        else
+          echo "✗ Failed to mount disk"
+          exit 1
+        fi
+
+    env:
+    - name: HOME
+      value: /tmp
+    - name: VOLUME_MOUNT_DIR
+      value: /mnt/volumes
+
+    securityContext:
+      privileged: true
+      runAsUser: 107
+      runAsGroup: 107
+
+    volumeDevices:
+    # Block device mount for raw disk
+    - name: vm-disk
+      devicePath: /dev/disk-image
+
+    volumeMounts:
+    - name: fuse-device
+      mountPath: /dev/fuse
+    - name: kvm-device
+      mountPath: /dev/kvm
+    - name: filesystems
+      mountPath: /mnt/filesystems
+    - name: volumes-dir
+      mountPath: /mnt/volumes
+
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+
+  volumes:
+  - name: fuse-device
+    hostPath:
+      path: /dev/fuse
+      type: CharDevice
+
+  - name: kvm-device
+    hostPath:
+      path: /dev/kvm
+      type: CharDevice
+
+  - name: vm-disk
+    persistentVolumeClaim:
+      claimName: test-vm-live-rootdisk
+
+  - name: filesystems
+    emptyDir: {}
+
+  - name: volumes-dir
+    emptyDir: {}
+
+  restartPolicy: Never

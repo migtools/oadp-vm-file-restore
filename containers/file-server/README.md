@@ -116,21 +116,37 @@ After researching KubeVirt's approach and VM filesystem requirements, we chose a
 
 ## Architecture
 
-### Base Image
+### Base Image - Two Dockerfiles Strategy
 
-**Upstream (this repository):**
-- **Base**: Fedora 40
+This project provides **two Dockerfiles** for different build scenarios:
+
+| Dockerfile | Base Image | Build Requirements | Use Case |
+|------------|------------|-------------------|----------|
+| **Dockerfile** | Fedora 42 | None | **Upstream** - Community development, anyone can build |
+| **Dockerfile.rhel** | RHEL 9 UBI | Red Hat subscription | **Downstream** - Red Hat product builds |
+
+Both produce functionally identical runtime images - the choice is about build accessibility vs production alignment.
+
+**Upstream (Dockerfile - Fedora 42):**
+- **Base**: `registry.fedoraproject.org/fedora:42`
+- **Build Requirements**: None - anyone can build
 - **Why Fedora?**
   - Red Hat ecosystem (upstream for RHEL)
   - Full multi-arch support (ARM64 + x86_64)
-  - All required packages natively available (no EPEL needed)
+  - All required packages natively available (no subscription needed)
   - Easier for contributors to build and test
   - Follows standard Red Hat upstream/downstream pattern
 
-**Downstream (Red Hat Product):**
-- **Base**: RHEL9 (when Red Hat productizes OADP with this feature)
-- Red Hat will rebuild with RHEL base + subscriptions (like OpenShift Virtualization does)
-- Same approach as other Red Hat projects (e.g., Velero uses Ubuntu upstream, RHEL downstream)
+**Downstream (Dockerfile.rhel - RHEL 9):**
+- **Base**: `registry.access.redhat.com/ubi9/ubi:latest`
+- **Build Requirements**: Red Hat subscription credentials (build time only)
+- **Why RHEL?**
+  - Production alignment with OpenShift Virtualization
+  - Red Hat supported and signed packages
+  - Same security profile as VM infrastructure
+  - Runtime image does NOT require subscription
+
+**For detailed build instructions**, see [BUILD.md](BUILD.md).
 
 ### Installed Tools - Why Each Tool Is Needed
 
@@ -472,6 +488,30 @@ guestmount -a /mnt/volumes/disk.img -i --ro /mnt/filesystems
 
 #### Security Justification: Is Privileged Mode Safe?
 
+**Why Privileged Mode is Required:**
+
+After extensive testing (see TESTING-DEVICE-PLUGIN.md), we confirmed that privileged mode is required for:
+
+1. **FUSE mounting** - SELinux blocks `container_t` → `fuse_device_t` access
+   - Non-privileged containers cannot access `/dev/fuse` even with `SYS_ADMIN` capability
+   - Custom SCCs with capabilities don't grant effective capabilities to non-root containers
+   - This is by design in OpenShift's security model
+
+2. **KVM acceleration** - SELinux blocks `container_t` → `kvm_device_t` access
+   - Although device plugin works for virt-launcher, libguestfs+FUSE combination requires privileged mode
+   - Without KVM: 5+ minute wait time (TCG emulation)
+   - With KVM: ~30 second response time
+
+**Alternative Considered:**
+
+The KubeVirt team suggested using libguestfs "direct" backend with APIs instead of FUSE mounting. This would work without privileged mode, but:
+- Requires complete redesign of file access layer
+- Cannot use standard tools (filebrowser, SSH/rsync)
+- Significantly more complex to implement and maintain
+- Trade-off: complexity vs security posture
+
+**Decision:** Use privileged mode for simplicity and alignment with KubeVirt patterns.
+
 **Threat Model:**
 ```
 What can file-server pod do?
@@ -483,27 +523,27 @@ What can file-server pod do?
 ❌ Other pods' data (SELinux MCS isolation)
 ```
 
-**Comparison with KubeVirt VMs:**
+**Comparison with KubeVirt Infrastructure:**
 ```
-virt-launcher pod (runs VMs):
-- privileged: true (often, for device access)
-- Runs as qemu user
-- Access to /dev/kvm
-- Runs arbitrary guest OS code
+virt-handler pod (KubeVirt infrastructure):
+- privileged: true
+- Manages /dev/kvm access for VMs
+- System-level pod
 
 file-server pod:
-- privileged: true (for /dev/kvm only)
+- privileged: true (for /dev/kvm + /dev/fuse)
 - Runs as qemu user
-- Access to /dev/kvm
+- Read-only filesystem access
 - Runs libguestfs (trusted, signed code)
 
-Risk level: SAME or LOWER than running VMs
+Risk level: SAME or LOWER than KubeVirt infrastructure
 ```
 
-**Red Hat's position:**
-- If cluster runs OpenShift Virtualization, it already allows privileged pods for VMs
+**Red Hat's Position:**
+- If cluster runs OpenShift Virtualization, it already allows privileged pods for infrastructure
 - File restore is lower risk than running arbitrary VMs
-- Same SCC, same user, same device access pattern
+- Same security model as virt-handler pods
+- Limited scope: only accesses specific restored PVCs
 
 #### Container Image Security (UID 1001 in Dockerfile)
 
@@ -545,15 +585,17 @@ For the VMFR controller (Issue #7), when creating file-server pods:
 
 ### Building the Container
 
+**Quick Start (Upstream - Fedora 42):**
 ```bash
-# Using podman
-podman build -t oadp-vm-file-server:latest containers/file-server/
-
-# Using docker
-docker build -t oadp-vm-file-server:latest containers/file-server/
+cd containers/file-server/
+podman build -t oadp-vm-file-server:latest .
 ```
 
+**For complete build instructions** (including RHEL 9 downstream builds, CI/CD integration, and troubleshooting), see **[BUILD.md](BUILD.md)**.
+
 ### Testing
+
+**📋 Complete Testing Guide:** See [TESTING.md](TESTING.md) for comprehensive testing procedures, test results, and validation checklists.
 
 Run the included test script:
 
@@ -608,12 +650,21 @@ ls -la /mnt/filesystems/
 
 ```
 containers/file-server/
-├── Dockerfile                   # Container image definition
-├── README.md                    # This file
-├── test-container.sh            # Validation script
+├── Dockerfile                              # Upstream container (Fedora 42)
+├── Dockerfile.rhel                         # Downstream container (RHEL 9)
+├── README.md                               # This file - overview and concepts
+├── BUILD.md                                # Complete build instructions
+├── TESTING.md                              # Comprehensive testing guide
+├── CONTROLLER_INTEGRATION.md               # Integration guide for Issue #7
+├── TESTING-DEVICE-PLUGIN.md                # Detailed device plugin testing
+├── DEVICE-PLUGIN-TESTING-SUMMARY.md        # Testing summary
+├── test-container.sh                       # Automated validation script
+├── test-pod.yaml                           # Working pod spec (live tested)
+├── test-vm.yaml                            # Test VM creation manifest
+├── oadp-vm-file-server-scc.yaml            # SecurityContextConstraints
 └── scripts/
-    ├── detect-and-mount.sh      # Filesystem detection and mounting
-    └── entrypoint.sh            # Default container entrypoint
+    ├── detect-and-mount.sh                 # Filesystem detection and mounting
+    └── entrypoint.sh                       # Default container entrypoint
 ```
 
 ## Complete Workflow: VM Backup → File Restore

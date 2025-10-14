@@ -1,0 +1,86 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: test-vm-live
+  namespace: oadp-file-server-live-test
+  labels:
+    app: oadp-test
+    test: live-cluster
+spec:
+  running: false  # Start stopped, we'll start it manually
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: test-vm-live
+    spec:
+      domain:
+        devices:
+          disks:
+          - name: rootdisk
+            disk:
+              bus: virtio
+          - name: cloudinitdisk
+            disk:
+              bus: virtio
+          interfaces:
+          - name: default
+            masquerade: {}
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: 1
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: rootdisk
+        dataVolume:
+          name: test-vm-live-rootdisk
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          userData: |
+            #cloud-config
+            user: fedora
+            password: fedora
+            chpasswd: { expire: False }
+            ssh_pwauth: True
+            runcmd:
+              - echo "OADP VM File Restore Test - $(date)" > /root/test-file.txt
+              - |
+                cat > /root/oadp-validation.json <<EOF
+                {
+                  "test_name": "OADP VM File Server - Live Cluster Test",
+                  "test_date": "$(date -I)",
+                  "vm_name": "test-vm-live",
+                  "disk_format": "raw",
+                  "filesystem": "xfs",
+                  "test_files": [
+                    "/root/test-file.txt",
+                    "/root/oadp-validation.json",
+                    "/etc/oadp-test-marker",
+                    "/home/fedora/user-data.txt"
+                  ]
+                }
+                EOF
+              - touch /etc/oadp-test-marker
+              - echo "OADP Test Marker - $(date)" > /etc/oadp-test-marker
+              - echo "User data created at $(date)" > /home/fedora/user-data.txt
+              - chown fedora:fedora /home/fedora/user-data.txt
+
+---
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: test-vm-live-rootdisk
+  namespace: oadp-file-server-live-test
+spec:
+  source:
+    registry:
+      url: docker://quay.io/containerdisks/fedora:latest
+  storage:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: 10Gi
+    storageClassName: ocs-storagecluster-ceph-rbd-virtualization

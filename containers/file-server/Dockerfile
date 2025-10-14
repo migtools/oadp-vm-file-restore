@@ -1,5 +1,5 @@
-# OADP VM File Server Container
-# ================================
+# OADP VM File Server Container - UPSTREAM
+# =========================================
 # Issue #6: Design and create container with tools to access restored file systems
 #
 # Purpose:
@@ -15,18 +15,27 @@
 #   - Plugin complexity not justified for well-defined set of VM filesystem types
 #
 # Upstream/Downstream Strategy:
-#   - **Upstream** (this repo): Uses Fedora 40 for multi-arch support (ARM64 + x86_64)
-#   - **Downstream** (Red Hat product): Red Hat rebuilds with RHEL9 base + subscriptions
-#   - This follows standard Red Hat practice (e.g., Velero uses Ubuntu upstream, RHEL downstream)
+#   - **THIS FILE (Dockerfile)**: UPSTREAM - Fedora 42 base for community
+#   - **Dockerfile.rhel**: DOWNSTREAM - RHEL 9/virt-launcher base for Red Hat product
+#
+# Base Image Strategy (Upstream):
+#   - **Base**: Fedora 42 (latest stable)
+#   - **Why Fedora**:
+#     - Red Hat ecosystem (upstream for RHEL)
+#     - All required packages natively available (no subscription needed)
+#     - Full multi-arch support (ARM64 + x86_64)
+#     - Easier for community contributors to build and test
+#     - Standard Red Hat upstream/downstream pattern
+#   - **Build Requirements**: None - anyone can build
 #
 # Architecture:
-#   - Based on Fedora 40 (Red Hat ecosystem, upstream for RHEL)
-#   - Full multi-arch support (ARM64 + x86_64)
-#   - Non-root user (UID 1001) following OpenShift security best practices
+#   - Based on Fedora 42
+#   - Runs as qemu user (UID 107, GID 107) to match VM disk ownership
+#   - Privileged mode required for FUSE + KVM access (SELinux restriction)
 #   - Helper scripts for filesystem detection and read-only mounting
 #
 
-FROM registry.fedoraproject.org/fedora:40
+FROM registry.fedoraproject.org/fedora:42
 
 # Labels following OpenShift/OADP conventions
 LABEL name="oadp-vm-file-server" \
@@ -34,12 +43,15 @@ LABEL name="oadp-vm-file-server" \
       summary="OADP VM File Restore Server" \
       description="Container with tools for accessing and mounting VM disk images from OADP backups" \
       io.k8s.description="Provides filesystem tools for VM file restore in OADP" \
-      io.openshift.tags="oadp,backup,restore,vm,filesystem"
+      io.openshift.tags="oadp,backup,restore,vm,filesystem" \
+      io.k8s.display-name="OADP VM File Server" \
+      base-image="registry.fedoraproject.org/fedora:42" \
+      upstream="true"
 
 # ==============================================================================
 # Package Installation - All required tools for VM disk and filesystem access
 # ==============================================================================
-# Fedora 40 has all these packages natively available (no EPEL needed)
+# Fedora 42 has all these packages natively available (no EPEL or subscription needed)
 # Package selection based on KubeVirt research and VM filesystem requirements
 # Total size: ~1.1 GB (acceptable for a specialized tooling container)
 #
@@ -154,6 +166,12 @@ RUN dnf install -y \
     findutils \
     coreutils \
     #
+    # python3: Python interpreter for JSON parsing
+    #   - Why: detect-and-mount.sh uses Python for parsing BACKUP_PVC_MAP JSON
+    #   - What: Provides reliable JSON parsing (more robust than jq or bash)
+    #   - Use case: Parse backup-to-PVC mapping from VMFR controller
+    python3 \
+    #
     # Clean up dnf cache to reduce image size
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -173,21 +191,21 @@ RUN chmod +x /usr/local/bin/detect-and-mount.sh /usr/local/bin/entrypoint.sh
 # - /var/www/files: Working directory for the container
 RUN mkdir -p /mnt/volumes /mnt/filesystems /var/www/files
 
-# Create non-root user for running the file server
-# OpenShift Security Best Practices:
-# - UID 1001: Standard non-root user ID
-# - GID 0: Root group (OpenShift assigns arbitrary UIDs in root group)
-# - g+rwX permissions: Allow group access for OpenShift's arbitrary UID assignment
-RUN useradd -u 1001 -r -g 0 -m -d /var/www/files -s /sbin/nologin \
-    -c "File Server User" fileserver && \
-    chown -R 1001:0 /var/www/files /mnt/volumes /mnt/filesystems && \
-    chmod -R g+rwX /var/www/files /mnt/volumes /mnt/filesystems
+# Set permissions for qemu user (already exists in Fedora as UID 107)
+# OpenShift Virtualization Security Context:
+# - UID 107: qemu user (matches VM disk ownership in KubeVirt)
+# - GID 107: qemu group
+# - This matches how virt-launcher pods run
+# Note: Fedora includes qemu user by default, RHEL may not
+RUN chown -R 107:107 /var/www/files /mnt/volumes /mnt/filesystems && \
+    chmod -R u+rwX,g+rwX /var/www/files /mnt/volumes /mnt/filesystems
 
 # Set working directory
 WORKDIR /var/www/files
 
-# Run as non-root user (OpenShift requirement)
-USER 1001
+# Run as qemu user (matches KubeVirt virt-launcher)
+# Note: Pod security context will override this to 107:107 explicitly
+USER 107
 
 # Default command - keeps container alive for controller management
 # The VMFR controller (Issue #7) can override this command to:

@@ -1,0 +1,57 @@
+---
+# Custom SecurityContextConstraint for OADP VM File Server
+#
+# Purpose: Allow SYS_ADMIN capability for FUSE mounting without requiring
+#          privileged containers
+#
+# Security Rationale:
+# - SYS_ADMIN is needed specifically for mount() syscall (FUSE)
+# - Does NOT grant privileged mode (maintains SELinux, seccomp, etc.)
+# - Scoped to specific service accounts (not cluster-wide)
+# - Same security model as other system pods (CNV, CSI drivers)
+#
+apiVersion: security.openshift.io/v1
+kind: SecurityContextConstraints
+metadata:
+  name: oadp-vm-file-server
+  annotations:
+    kubernetes.io/description: >
+      SCC for OADP VM file server pods that need FUSE mounting capability.
+      Allows SYS_ADMIN for mount() syscall without requiring privileged mode.
+allowHostDirVolumePlugin: true  # Required for /dev/fuse, /dev/kvm hostPath
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegeEscalation: true  # Required for capabilities to work with non-root user
+allowPrivilegedContainer: false  # NOT privileged!
+allowedCapabilities:
+- SYS_ADMIN  # Required for FUSE mounting (mount syscall)
+allowedUnsafeSysctls: []
+defaultAddCapabilities: []
+fsGroup:
+  type: RunAsAny
+priority: 10  # Higher than restricted (0), lower than privileged (100)
+readOnlyRootFilesystem: false
+requiredDropCapabilities:
+- ALL  # Drop all, then add back only SYS_ADMIN
+runAsUser:
+  type: RunAsAny  # Allow running as qemu (107)
+seLinuxContext:
+  type: MustRunAs  # Enforce SELinux (unlike privileged mode)
+seccompProfiles:
+- runtime/default
+supplementalGroups:
+  type: RunAsAny
+volumes:
+- configMap
+- downwardAPI
+- emptyDir
+- hostPath  # Required for /dev/fuse, /dev/kvm
+- persistentVolumeClaim
+- projected
+- secret
+users: []
+groups: []
+# Usage: Grant to specific service account
+#   oc adm policy add-scc-to-user oadp-vm-file-server -z <service-account> -n <namespace>
