@@ -141,7 +141,12 @@ RUN set -x && \
         file \
         util-linux \
         findutils \
-        coreutils && \
+        coreutils \
+        # python3: Python interpreter for JSON parsing
+        #   - Why: detect-and-mount.sh uses Python for parsing BACKUP_PVC_MAP JSON
+        #   - What: Provides reliable JSON parsing (more robust than jq or bash)
+        #   - Use case: Parse backup-to-PVC mapping from VMFR controller
+        python3 && \
     # =========================================================================
     # Step 3: Clean up subscription and package cache
     # =========================================================================
