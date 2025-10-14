@@ -130,23 +130,31 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		vmfr.Status.Phase == oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress:
 		progressingCondition := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
 
-		if progressingCondition == nil || progressingCondition.Reason != "ValidationCompleted" {
-			// Still validating
-			// ensure to give reason in logger
-			// Remember there may be few conditions in the status conditions array.
-			// log all the conditions
-			logger.V(0).Info("Status conditions", "conditions", vmfr.Status.Conditions)
-			reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
-				r.validateAndDiscoverPVCs,
-			}
-		} else {
-			// Validation complete — proceed with restore
-			// ensure to give reason in logger
-			logger.V(0).Info("Executing file restore workflow (validation completed)")
+		// Check if we've completed validation and are in workflow execution phase
+		// Workflow reasons: ValidationCompleted (transition point), NamespaceReady, and future workflow steps
+		isInWorkflowPhase := progressingCondition != nil &&
+			(progressingCondition.Reason == "ValidationCompleted" ||
+				progressingCondition.Reason == "NamespaceReady")
+
+		if isInWorkflowPhase {
+			// Validation complete — proceed with restore workflow
+			logger.V(0).Info("Executing file restore workflow", "progressingReason", progressingCondition.Reason)
 			reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
 				r.executeFileRestoreWorkflow,
 			}
+		} else {
+			// Still validating or initializing
+			logger.V(0).Info("Running validation phase", "conditions", vmfr.Status.Conditions)
+			reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
+				r.validateAndDiscoverPVCs,
+			}
 		}
+
+	case vmfr.Status.Phase == oadpv1alpha1.VirtualMachineFileRestorePhaseFailed ||
+		vmfr.Status.Phase == oadpv1alpha1.VirtualMachineFileRestorePhasePartiallyFailed:
+		// Terminal states - no further action needed, reconciliation stops here
+		logger.V(0).Info("Terminal phase reached, no action needed", "phase", vmfr.Status.Phase)
+		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{}
 
 	default:
 		// Handle any unexpected phases - should not normally happen
@@ -252,6 +260,53 @@ func (r *VirtualMachineFileRestoreReconciler) failValidation(
 	}
 	// Return a sentinel error to stop reconciliation
 	return fmt.Errorf("validation failed: %s", message)
+}
+
+// failPartialValidation sets a phase + condition for partial failure and returns it as an error
+func (r *VirtualMachineFileRestoreReconciler) failPartialValidation(
+	ctx context.Context,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	reason, message string,
+	logger logr.Logger,
+) error {
+	// Set all 4 conditions for PartiallyFailed phase
+	// Some PVCs are available, but not all
+	conditions := []metav1.Condition{
+		{
+			Type:               oadptypes.ConditionTypeProgressing,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "PartialValidationFailed",
+			Message:            message,
+		},
+		{
+			Type:               oadptypes.ConditionTypeAvailable,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             reason, // Root cause (e.g., "PartialAvailability")
+			Message:            "Some PVCs are available but not all backups succeeded",
+		},
+		{
+			Type:               oadptypes.ConditionTypeDegraded,
+			Status:             metav1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "PartialFailure",
+			Message:            message,
+		},
+		{
+			Type:               oadptypes.ConditionTypeReady,
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "PartiallyFailed",
+			Message:            message,
+		},
+	}
+
+	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhasePartiallyFailed, conditions, false, logger); err != nil {
+		return err
+	}
+	// Return a sentinel error to stop reconciliation
+	return fmt.Errorf("partial validation failed: %s", message)
 }
 
 // ensureFinalizer ensures both finalizers are present on the VirtualMachineFileRestore resource.
@@ -410,6 +465,70 @@ func (r *VirtualMachineFileRestoreReconciler) validateAndDiscoverPVCs(ctx contex
 		return false, r.failValidation(ctx, vmfr, "ProcessDiscoveryFailed", err.Error(), logger)
 	}
 
+	// Step 5: Validate PVC availability and determine if we can proceed
+	// Rules:
+	// 1. If NO PVCs have available backups → Failed
+	// 2. If SOME PVCs have non-available restores → PartiallyFailed
+	// 3. If ALL PVCs have ONLY available restores → Continue
+
+	totalRealPVCs := 0
+	fullyAvailablePVCs := 0
+	partiallyAvailablePVCs := 0
+	unavailablePVCs := 0
+
+	for _, pvcRestore := range vmfr.Status.PVCRestores {
+		// Skip synthetic PVC entries created for backup-level failures
+		if pvcRestore.PVCName == "backup-level-failure" {
+			continue
+		}
+
+		totalRealPVCs++
+		allAvailable := true
+		hasAvailable := false
+
+		for _, restore := range pvcRestore.Restores {
+			if restore.State == string(oadptypes.BackupDiscoveryStateAvailable) {
+				hasAvailable = true
+			} else {
+				allAvailable = false
+			}
+		}
+
+		// Categorize this PVC
+		if allAvailable && hasAvailable {
+			fullyAvailablePVCs++
+		} else if hasAvailable {
+			partiallyAvailablePVCs++
+		} else {
+			unavailablePVCs++
+		}
+	}
+
+	logger.V(0).Info("PVC availability summary",
+		"totalPVCs", totalRealPVCs,
+		"fullyAvailable", fullyAvailablePVCs,
+		"partiallyAvailable", partiallyAvailablePVCs,
+		"unavailable", unavailablePVCs)
+
+	// Rule 1: No PVCs have any available backups → Failed
+	if fullyAvailablePVCs == 0 && partiallyAvailablePVCs == 0 {
+		failureMsg := fmt.Sprintf("No PVCs with available backups found (total: %d, unavailable: %d)",
+			totalRealPVCs, unavailablePVCs)
+		logger.V(0).Info("PVC availability validation failed - no available backups")
+		return false, r.failValidation(ctx, vmfr, "NoAvailableBackups", failureMsg, logger)
+	}
+
+	// Rule 2: Some PVCs have non-available restores → PartiallyFailed
+	if partiallyAvailablePVCs > 0 || unavailablePVCs > 0 {
+		failureMsg := fmt.Sprintf("Cannot proceed: %d PVC(s) have non-available backups (partially available: %d, unavailable: %d)",
+			partiallyAvailablePVCs+unavailablePVCs, partiallyAvailablePVCs, unavailablePVCs)
+		logger.V(0).Info("PVC availability validation failed - partial availability detected")
+		return false, r.failPartialValidation(ctx, vmfr, "PartialAvailability", failureMsg, logger)
+	}
+
+	// Rule 3: All PVCs are fully available → Continue
+	logger.V(0).Info("PVC availability validation passed - all PVCs fully available", "totalPVCs", fullyAvailablePVCs)
+
 	// All validation/discovery completed successfully - stay in InProgress, update progress reason
 	conditions := []metav1.Condition{
 		{
@@ -539,7 +658,78 @@ func (r *VirtualMachineFileRestoreReconciler) validateReferencedDiscovery(
 }
 
 func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx context.Context, logger logr.Logger, vmfr *oadpv1alpha1.VirtualMachineFileRestore) (bool, error) {
-	return false, nil
+	progressingCondition := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
+	if progressingCondition == nil {
+		return false, fmt.Errorf("progressing condition not found in workflow execution phase")
+	}
+
+	logger.V(0).Info("Executing file restore workflow", "currentReason", progressingCondition.Reason)
+
+	// Determine workflow step based on current Progressing reason
+	switch progressingCondition.Reason {
+	case "ValidationCompleted":
+		// Step 1: Create or validate the restore namespace
+		// At this point, we know all PVCs have available backups (validated in validateAndDiscoverPVCs)
+		restoreNamespace, err := r.ensureRestoreNamespace(ctx, logger, vmfr)
+		if err != nil {
+			failureMsg := fmt.Sprintf("Failed to create/validate restore namespace: %s", err.Error())
+			logger.Error(err, "Namespace creation/validation failed")
+			return false, r.failValidation(ctx, vmfr, "NamespaceCreationFailed", failureMsg, logger)
+		}
+
+		logger.V(0).Info("Restore namespace ready", "namespace", restoreNamespace)
+
+		// Update status to reflect successful namespace creation
+		// IMPORTANT: Change Progressing reason to avoid re-entering validation loop
+		conditions := []metav1.Condition{
+			{
+				Type:               oadptypes.ConditionTypeProgressing,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "NamespaceReady",
+				Message:            fmt.Sprintf("Restore namespace '%s' is ready, proceeding with Velero restore creation", restoreNamespace),
+			},
+			{
+				Type:               oadptypes.ConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "PreparingRestores",
+				Message:            "Namespace created, Velero restore creation pending",
+			},
+			{
+				Type:               oadptypes.ConditionTypeDegraded,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "NoFailures",
+				Message:            "No failures detected",
+			},
+			{
+				Type:               oadptypes.ConditionTypeReady,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "InProgress",
+				Message:            "File restore workflow in progress",
+			},
+		}
+
+		if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress, conditions, false, logger); err != nil {
+			return false, err
+		}
+
+		logger.V(0).Info("Namespace creation completed", "namespace", restoreNamespace)
+		return true, nil // Requeue to proceed to next step
+
+	case "NamespaceReady":
+		// Step 2: Create Velero restores (TODO - next implementation phase)
+		logger.V(0).Info("Namespace is ready, Velero restore creation not yet implemented")
+		// TODO: Implement Velero restore creation using vmfr.Status.PVCRestores
+		return false, nil // No requeue until next step is implemented
+
+	default:
+		// Unknown workflow state
+		logger.V(0).Info("Unknown workflow state, no action taken", "reason", progressingCondition.Reason)
+		return false, nil
+	}
 }
 
 // validateDiscoveryBackups validates selected backups and returns the list to serve
