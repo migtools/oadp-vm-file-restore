@@ -53,3 +53,15 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - velero.io
+  resources:
+  - restores
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

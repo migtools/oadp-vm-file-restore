@@ -17,119 +17,12 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"fmt"
-	"time"
-
+	"github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// BackupPVCInfo contains minimal PVC information from a backup
-type BackupPVCInfo struct {
-	// Name is the name of the PersistentVolumeClaim
-	Name string `json:"name"`
-
-	// Namespace is the namespace of the PersistentVolumeClaim
-	Namespace string `json:"namespace"`
-
-	// UID is the UID of the PersistentVolumeClaim resource
-	UID string `json:"uid"`
-
-	// Size of the PVC storage request from the backup contents in human-readable format (e.g., "5Gi", "30Gi")
-	// +optional
-	Size string `json:"size,omitempty"`
-}
-
-// VeleroBackupInfo contains information about a discovered backup
-type VeleroBackupInfo struct {
-	// Name of the backup resource.
-	Name string `json:"name"`
-	// When the backup was created.
-	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
-	// PVCs contains the list of PVCs available in this backup
-	// This field is populated during file restore processing
-	// +optional
-	PVCs []BackupPVCInfo `json:"pvcs,omitempty"`
-}
-
-// InvalidBackupInfo contains information about a backup that doesn't contain the VM
-type InvalidBackupInfo struct {
-	VeleroBackupInfo `json:",inline"`
-	// Reason why this backup doesn't contain the VM or couldn't be processed.
-	// +kubebuilder:validation:MaxLength=1024
-	Reason string `json:"reason,omitempty"`
-}
-
-// BackupDiscoveryStatus represents the status of backup discovery for a specific backup
-// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Skipped;Failed
-type BackupDiscoveryStatus string
-
-const (
-	// BackupDiscoveryStatusPending indicates the backup discovery has not started yet
-	BackupDiscoveryStatusPending BackupDiscoveryStatus = "Pending"
-
-	// BackupDiscoveryStatusInProgress indicates the backup is currently being analyzed
-	BackupDiscoveryStatusInProgress BackupDiscoveryStatus = "InProgress"
-
-	// BackupDiscoveryStatusCompleted indicates the backup analysis is complete and VM was found
-	BackupDiscoveryStatusCompleted BackupDiscoveryStatus = "Completed"
-
-	// BackupDiscoveryStatusSkipped indicates the backup was skipped (e.g., doesn't contain the VM)
-	BackupDiscoveryStatusSkipped BackupDiscoveryStatus = "Skipped"
-
-	// BackupDiscoveryStatusFailed indicates the backup analysis failed
-	BackupDiscoveryStatusFailed BackupDiscoveryStatus = "Failed"
-)
-
-// BackupDiscoveryInfo contains detailed information about backup discovery progress
-type BackupDiscoveryInfo struct {
-	VeleroBackupInfo `json:",inline"`
-	// Current status of backup discovery for this backup.
-	Status BackupDiscoveryStatus `json:"status"`
-	// Human-readable message about the discovery status.
-	// +kubebuilder:validation:MaxLength=1024
-	Message string `json:"message,omitempty"`
-	// When this backup's discovery status was last updated.
-	LastUpdated *metav1.Time `json:"lastUpdated,omitempty"`
-}
-
-// FlexibleTime supports both date-only (YYYY-MM-DD) and full RFC3339 (YYYY-MM-DDTHH:MM:SSZ) formats
-// +kubebuilder:validation:Type=string
-type FlexibleTime string
-
-// Time returns the parsed time.Time value
-func (ft FlexibleTime) Time() (time.Time, error) {
-	str := string(ft)
-	if str == "" {
-		return time.Time{}, nil
-	}
-
-	// Try RFC3339 format first
-	if t, err := time.Parse(time.RFC3339, str); err == nil {
-		return t, nil
-	}
-
-	// Try date-only format (YYYY-MM-DD)
-	if t, err := time.Parse("2006-01-02", str); err == nil {
-		return t.UTC(), nil
-	}
-
-	return time.Time{}, fmt.Errorf("unable to parse time %q: expected RFC3339 (2006-01-02T15:04:05Z) or date-only (2006-01-02) format", str)
-}
-
-// GetEndOfDay returns a FlexibleTime set to the end of the day (23:59:59.999999999Z)
-// for the same date as the receiver
-func (ft FlexibleTime) GetEndOfDay() (FlexibleTime, error) {
-	t, err := ft.Time()
-	if err != nil {
-		return "", err
-	}
-	year, month, day := t.Date()
-	endOfDay := time.Date(year, month, day, 23, 59, 59, 999999999, time.UTC)
-	return FlexibleTime(endOfDay.Format(time.RFC3339)), nil
-}
 
 // DiscoveryStatistics provides summary information about backup discovery
 type DiscoveryStatistics struct {
@@ -170,14 +63,14 @@ type VirtualMachineBackupsDiscoverySpec struct {
 	// Date-only format defaults to start of day (00:00:00Z).
 	// +optional
 	// +kubebuilder:validation:Type=string
-	StartTime *FlexibleTime `json:"startTime,omitempty"`
+	StartTime *types.FlexibleTime `json:"startTime,omitempty"`
 
 	// Only include backups created before this time (optional time range filtering).
 	// Supports both date-only (YYYY-MM-DD) and full RFC3339 (YYYY-MM-DDTHH:MM:SSZ) formats.
 	// Date-only format defaults to end of day (23:59:59Z).
 	// +optional
 	// +kubebuilder:validation:Type=string
-	EndTime *FlexibleTime `json:"endTime,omitempty"`
+	EndTime *types.FlexibleTime `json:"endTime,omitempty"`
 
 	// Specific backup names to include in addition to any time-based filtering.
 	// If specified, these backups will be included even if they fall outside the time range.
@@ -186,31 +79,32 @@ type VirtualMachineBackupsDiscoverySpec struct {
 }
 
 // VirtualMachineBackupsDiscoveryPhase represents the high-level state of backup discovery.
-// +kubebuilder:validation:Enum=New;InProgress;Completed;Failed
+// These phases match Velero's phase model for consistency with OADP's Velero foundation.
+// +kubebuilder:validation:Enum=New;InProgress;Completed;PartiallyFailed;Failed
 type VirtualMachineBackupsDiscoveryPhase string
 
 const (
-	// VirtualMachineBackupsDiscoveryPhaseNew indicates discovery has not started yet.
+	// VirtualMachineBackupsDiscoveryPhaseNew indicates the discovery request has been
+	// accepted but the controller has not yet started processing it.
 	VirtualMachineBackupsDiscoveryPhaseNew VirtualMachineBackupsDiscoveryPhase = "New"
 
-	// VirtualMachineBackupsDiscoveryPhaseInProgress indicates discovery is actively running.
+	// VirtualMachineBackupsDiscoveryPhaseInProgress indicates discovery is actively
+	// scanning backups to identify those containing the specified VM.
 	VirtualMachineBackupsDiscoveryPhaseInProgress VirtualMachineBackupsDiscoveryPhase = "InProgress"
 
-	// VirtualMachineBackupsDiscoveryPhaseCompleted indicates discovery has finished successfully.
+	// VirtualMachineBackupsDiscoveryPhaseCompleted indicates discovery finished successfully
+	// and all candidate backups were scanned without errors. Valid backups were found.
 	VirtualMachineBackupsDiscoveryPhaseCompleted VirtualMachineBackupsDiscoveryPhase = "Completed"
 
-	// VirtualMachineBackupsDiscoveryPhaseFailed indicates discovery failed due to errors.
+	// VirtualMachineBackupsDiscoveryPhasePartiallyFailed indicates discovery finished
+	// but some backups failed to scan or were invalid. At least one valid backup was found,
+	// making the discovery result usable despite partial failures.
+	VirtualMachineBackupsDiscoveryPhasePartiallyFailed VirtualMachineBackupsDiscoveryPhase = "PartiallyFailed"
+
+	// VirtualMachineBackupsDiscoveryPhaseFailed indicates discovery failed completely
+	// due to unrecoverable errors (e.g., no backup storage locations, invalid spec,
+	// or no valid backups found).
 	VirtualMachineBackupsDiscoveryPhaseFailed VirtualMachineBackupsDiscoveryPhase = "Failed"
-)
-
-// VirtualMachineBackupsDiscoveryCondition represents the state of a VirtualMachineBackupsDiscovery.
-// +kubebuilder:validation:Enum=Complete
-type VirtualMachineBackupsDiscoveryCondition string
-
-const (
-	// VirtualMachineBackupsDiscoveryConditionComplete indicates that backup
-	// discovery has completed successfully and valid backups have been identified.
-	VirtualMachineBackupsDiscoveryConditionComplete VirtualMachineBackupsDiscoveryCondition = "Complete"
 )
 
 // VirtualMachineBackupsDiscoveryStatus defines the observed state of VirtualMachineBackupsDiscovery.
@@ -221,22 +115,29 @@ type VirtualMachineBackupsDiscoveryStatus struct {
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
 
 	// Phase indicates the overall phase of the backup discovery operation.
+	// Derived from conditions for human readability. Matches Velero's phase model.
+	// Automation should rely on conditions, not phase.
 	// +optional
 	Phase VirtualMachineBackupsDiscoveryPhase `json:"phase,omitempty"`
 
-	// observedGeneration represents the .metadata.generation that the status was set based upon.
+	// ObservedGeneration represents the .metadata.generation that the status was set based upon.
 	// For instance, if .metadata.generation is currently 12, but the .status.observedGeneration is 9,
 	// the status is out of date with respect to the current state of the instance.
+	//
+	// IMPORTANT: Controllers must set this at the START of reconciliation, not at the end.
+	// This prevents race conditions where clients see updated conditions but stale observedGeneration.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// conditions represent the current state of the VirtualMachineBackupsDiscovery resource.
+	// Conditions represent the current state of the VirtualMachineBackupsDiscovery resource.
+	// This is the PRIMARY source of truth for resource state.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
+	// Standard condition types for this resource (defined in types package):
+	// - types.ConditionTypeProgressing: Discovery is actively running
+	// - types.ConditionTypeAvailable: Valid backups are available for use
+	// - types.ConditionTypeDegraded: Partial failures occurred (may still be usable)
+	// - types.ConditionTypeReady: Summary condition (resource is usable)
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
@@ -246,21 +147,22 @@ type VirtualMachineBackupsDiscoveryStatus struct {
 
 	// Backups that contain the specified virtual machine and are ready for file serving.
 	// +optional
-	ValidBackups []VeleroBackupInfo `json:"validBackups,omitempty"`
+	ValidBackups []types.VeleroBackupInfo `json:"validBackups,omitempty"`
 
 	// Requested backups that don't contain the VM (only populated when RequestedBackups is used).
 	// +optional
-	InvalidBackups []InvalidBackupInfo `json:"invalidBackups,omitempty"`
+	InvalidBackups []types.InvalidBackupInfo `json:"invalidBackups,omitempty"`
 
 	// Detailed discovery progress for each candidate backup.
 	// +optional
-	BackupDiscoveryProgress []BackupDiscoveryInfo `json:"backupDiscoveryProgress,omitempty"`
+	BackupDiscoveryProgress []types.BackupDiscoveryProgress `json:"backupDiscoveryProgress,omitempty"`
 
 	// Summary statistics about the backup discovery process.
 	// +optional
 	DiscoveryStats *DiscoveryStatistics `json:"discoveryStats,omitempty"`
 }
 
+// +kubebuilder:storageversion
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=vmbd,scope=Namespaced
 // +kubebuilder:subresource:status

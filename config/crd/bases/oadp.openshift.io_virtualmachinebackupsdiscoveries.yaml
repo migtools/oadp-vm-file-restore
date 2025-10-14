@@ -95,8 +95,8 @@ spec:
               backupDiscoveryProgress:
                 description: Detailed discovery progress for each candidate backup.
                 items:
-                  description: BackupDiscoveryInfo contains detailed information about
-                    backup discovery progress
+                  description: BackupDiscoveryProgress contains detailed information
+                    about backup discovery progress
                   properties:
                     createdAt:
                       description: When the backup was created.
@@ -113,39 +113,42 @@ spec:
                     name:
                       description: Name of the backup resource.
                       type: string
+                    namespace:
+                      description: Namespace is the namespace of the backup resource
+                      type: string
                     pvcs:
                       description: |-
                         PVCs contains the list of PVCs available in this backup
+                        For a given VM
                         This field is populated during file restore processing
                       items:
-                        description: BackupPVCInfo contains minimal PVC information
-                          from a backup
+                        description: |-
+                          PVCInfo represents a PVC from a backup and all restores associated with it.
+                          The combination of PVCUID + PVCName ensures uniqueness across multiple backups.
                         properties:
-                          name:
-                            description: Name is the name of the PersistentVolumeClaim
+                          pvcName:
+                            description: Name of the PVC at the time of the backup
                             type: string
-                          namespace:
-                            description: Namespace is the namespace of the PersistentVolumeClaim
+                          pvcNamespace:
+                            description: Namespace of the PVC at the time of the backup
+                            type: string
+                          pvcUID:
+                            description: UID of the PVC at the time of the backup
                             type: string
                           size:
-                            description: Size of the PVC storage request from the
-                              backup contents in human-readable format (e.g., "5Gi",
-                              "30Gi")
-                            type: string
-                          uid:
-                            description: UID is the UID of the PersistentVolumeClaim
-                              resource
+                            description: Size of the PVC in human-readable format
+                              (e.g., "5Gi", "30Gi")
                             type: string
                         required:
-                        - name
-                        - namespace
-                        - uid
+                        - pvcName
+                        - pvcNamespace
+                        - pvcUID
                         type: object
                       type: array
                     status:
                       description: Current status of backup discovery for this backup.
                       enum:
-                      - Pending
+                      - New
                       - InProgress
                       - Completed
                       - Skipped
@@ -153,18 +156,21 @@ spec:
                       type: string
                   required:
                   - name
+                  - namespace
                   - status
                   type: object
                 type: array
               conditions:
                 description: |-
-                  conditions represent the current state of the VirtualMachineBackupsDiscovery resource.
+                  Conditions represent the current state of the VirtualMachineBackupsDiscovery resource.
+                  This is the PRIMARY source of truth for resource state.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
+                  Standard condition types for this resource (defined in types package):
+                  - types.ConditionTypeProgressing: Discovery is actively running
+                  - types.ConditionTypeAvailable: Valid backups are available for use
+                  - types.ConditionTypeDegraded: Partial failures occurred (may still be usable)
+                  - types.ConditionTypeReady: Summary condition (resource is usable)
 
                   The status of each condition is one of True, False, or Unknown.
                 items:
@@ -274,33 +280,36 @@ spec:
                     name:
                       description: Name of the backup resource.
                       type: string
+                    namespace:
+                      description: Namespace is the namespace of the backup resource
+                      type: string
                     pvcs:
                       description: |-
                         PVCs contains the list of PVCs available in this backup
+                        For a given VM
                         This field is populated during file restore processing
                       items:
-                        description: BackupPVCInfo contains minimal PVC information
-                          from a backup
+                        description: |-
+                          PVCInfo represents a PVC from a backup and all restores associated with it.
+                          The combination of PVCUID + PVCName ensures uniqueness across multiple backups.
                         properties:
-                          name:
-                            description: Name is the name of the PersistentVolumeClaim
+                          pvcName:
+                            description: Name of the PVC at the time of the backup
                             type: string
-                          namespace:
-                            description: Namespace is the namespace of the PersistentVolumeClaim
+                          pvcNamespace:
+                            description: Namespace of the PVC at the time of the backup
+                            type: string
+                          pvcUID:
+                            description: UID of the PVC at the time of the backup
                             type: string
                           size:
-                            description: Size of the PVC storage request from the
-                              backup contents in human-readable format (e.g., "5Gi",
-                              "30Gi")
-                            type: string
-                          uid:
-                            description: UID is the UID of the PersistentVolumeClaim
-                              resource
+                            description: Size of the PVC in human-readable format
+                              (e.g., "5Gi", "30Gi")
                             type: string
                         required:
-                        - name
-                        - namespace
-                        - uid
+                        - pvcName
+                        - pvcNamespace
+                        - pvcUID
                         type: object
                       type: array
                     reason:
@@ -310,22 +319,29 @@ spec:
                       type: string
                   required:
                   - name
+                  - namespace
                   type: object
                 type: array
               observedGeneration:
                 description: |-
-                  observedGeneration represents the .metadata.generation that the status was set based upon.
+                  ObservedGeneration represents the .metadata.generation that the status was set based upon.
                   For instance, if .metadata.generation is currently 12, but the .status.observedGeneration is 9,
                   the status is out of date with respect to the current state of the instance.
+
+                  IMPORTANT: Controllers must set this at the START of reconciliation, not at the end.
+                  This prevents race conditions where clients see updated conditions but stale observedGeneration.
                 format: int64
                 type: integer
               phase:
-                description: Phase indicates the overall phase of the backup discovery
-                  operation.
+                description: |-
+                  Phase indicates the overall phase of the backup discovery operation.
+                  Derived from conditions for human readability. Matches Velero's phase model.
+                  Automation should rely on conditions, not phase.
                 enum:
                 - New
                 - InProgress
                 - Completed
+                - PartiallyFailed
                 - Failed
                 type: string
               validBackups:
@@ -342,37 +358,41 @@ spec:
                     name:
                       description: Name of the backup resource.
                       type: string
+                    namespace:
+                      description: Namespace is the namespace of the backup resource
+                      type: string
                     pvcs:
                       description: |-
                         PVCs contains the list of PVCs available in this backup
+                        For a given VM
                         This field is populated during file restore processing
                       items:
-                        description: BackupPVCInfo contains minimal PVC information
-                          from a backup
+                        description: |-
+                          PVCInfo represents a PVC from a backup and all restores associated with it.
+                          The combination of PVCUID + PVCName ensures uniqueness across multiple backups.
                         properties:
-                          name:
-                            description: Name is the name of the PersistentVolumeClaim
+                          pvcName:
+                            description: Name of the PVC at the time of the backup
                             type: string
-                          namespace:
-                            description: Namespace is the namespace of the PersistentVolumeClaim
+                          pvcNamespace:
+                            description: Namespace of the PVC at the time of the backup
+                            type: string
+                          pvcUID:
+                            description: UID of the PVC at the time of the backup
                             type: string
                           size:
-                            description: Size of the PVC storage request from the
-                              backup contents in human-readable format (e.g., "5Gi",
-                              "30Gi")
-                            type: string
-                          uid:
-                            description: UID is the UID of the PersistentVolumeClaim
-                              resource
+                            description: Size of the PVC in human-readable format
+                              (e.g., "5Gi", "30Gi")
                             type: string
                         required:
-                        - name
-                        - namespace
-                        - uid
+                        - pvcName
+                        - pvcNamespace
+                        - pvcUID
                         type: object
                       type: array
                   required:
                   - name
+                  - namespace
                   type: object
                 type: array
             type: object

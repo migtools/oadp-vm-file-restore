@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
+	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -24,8 +26,8 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // VirtualMachineFileRestorePhase is a high-level summary of the lifecycle of a VirtualMachineFileRestore.
-// It describes the current state of the file-serving workflow — not actual restore in the VM.
-// +kubebuilder:validation:Enum=New;BackingOff;Created;Deleting
+// These phases match Velero's phase model for consistency with OADP's Velero foundation.
+// +kubebuilder:validation:Enum=New;InProgress;Completed;PartiallyFailed;Failed;Deleting
 type VirtualMachineFileRestorePhase string
 
 const (
@@ -33,32 +35,27 @@ const (
 	// but the controller has not yet started processing it.
 	VirtualMachineFileRestorePhaseNew VirtualMachineFileRestorePhase = "New"
 
-	// VirtualMachineFileRestorePhaseBackingOff indicates that processing failed temporarily,
-	// for example due to configuration issues or resource unavailability.
-	// The controller may retry automatically.
-	VirtualMachineFileRestorePhaseBackingOff VirtualMachineFileRestorePhase = "BackingOff"
+	// VirtualMachineFileRestorePhaseInProgress indicates the controller is actively
+	// working on creating file serving resources (validating, creating restores, etc.).
+	VirtualMachineFileRestorePhaseInProgress VirtualMachineFileRestorePhase = "InProgress"
 
-	// VirtualMachineFileRestorePhaseCreated indicates that the necessary resources (e.g., pods)
-	// have been created and the requested files are now accessible to the user.
-	VirtualMachineFileRestorePhaseCreated VirtualMachineFileRestorePhase = "Created"
+	// VirtualMachineFileRestorePhaseCompleted indicates the restore finished successfully
+	// and all file serving resources are ready. All Velero Restores succeeded.
+	VirtualMachineFileRestorePhaseCompleted VirtualMachineFileRestorePhase = "Completed"
+
+	// VirtualMachineFileRestorePhasePartiallyFailed indicates the restore finished
+	// but some Velero Restores failed. File serving is available for successful restores,
+	// making the resource usable despite partial failures.
+	VirtualMachineFileRestorePhasePartiallyFailed VirtualMachineFileRestorePhase = "PartiallyFailed"
+
+	// VirtualMachineFileRestorePhaseFailed indicates the file restore failed completely
+	// due to unrecoverable errors (e.g., validation failure, all restores failed).
+	// The controller will not retry automatically.
+	VirtualMachineFileRestorePhaseFailed VirtualMachineFileRestorePhase = "Failed"
 
 	// VirtualMachineFileRestorePhaseDeleting indicates that the VirtualMachineFileRestore
 	// resource is pending deletion and cleanup of associated resources is in progress.
 	VirtualMachineFileRestorePhaseDeleting VirtualMachineFileRestorePhase = "Deleting"
-)
-
-// VirtualMachineFileRestoreCondition represents the state of a VirtualMachineFileRestore.
-// +kubebuilder:validation:Enum=Ready;PVCsDiscovered
-type VirtualMachineFileRestoreCondition string
-
-const (
-	// VirtualMachineFileRestoreConditionReady indicates that file serving resources
-	// have been created and files are accessible to the user.
-	VirtualMachineFileRestoreConditionReady VirtualMachineFileRestoreCondition = "Ready"
-
-	// VirtualMachineFileRestoreConditionPVCsDiscovered indicates that PVC information
-	// has been successfully discovered from the selected backups.
-	VirtualMachineFileRestoreConditionPVCsDiscovered VirtualMachineFileRestoreCondition = "PVCsDiscovered"
 )
 
 // VirtualMachineFileRestoreSpec defines the desired state of VirtualMachineFileRestore
@@ -100,27 +97,33 @@ type VirtualMachineFileRestoreStatus struct {
 	// For Kubernetes API conventions, see:
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
 
-	// conditions represent the current state of the VirtualMachineFileRestore resource.
+	// Phase indicates the overall phase of the file restore operation.
+	// Derived from conditions for human readability. Matches Velero's phase model.
+	// Automation should rely on conditions, not phase.
+	// +optional
+	Phase VirtualMachineFileRestorePhase `json:"phase,omitempty"`
+
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// IMPORTANT: Controllers must set this at the START of reconciliation, not at the end.
+	// This prevents race conditions where clients see updated conditions but stale observedGeneration.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions represent the current state of the VirtualMachineFileRestore resource.
+	// This is the PRIMARY source of truth for resource state.
 	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
 	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
+	// Standard condition types for this resource (defined in types package):
+	// - types.ConditionTypeProgressing: Restore is actively running
+	// - types.ConditionTypeAvailable: File serving resources are ready and accessible
+	// - types.ConditionTypeDegraded: Partial failures occurred (may still be usable)
+	// - types.ConditionTypeReady: Summary condition (resource is usable)
 	//
 	// The status of each condition is one of True, False, or Unknown.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-
-	// Phase indicates the overall phase of the file-serving operation
-	// +optional
-	Phase VirtualMachineFileRestorePhase `json:"phase,omitempty"`
-
-	// ObservedGeneration is the most recent generation observed by the controller.
-	// +optional
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// Information about the file serving resources that have been created.
 	// +optional
@@ -137,34 +140,56 @@ type VirtualMachineFileRestoreStatus struct {
 	CreatedNamespace string `json:"createdNamespace,omitempty"`
 }
 
-// PVCRestoreInfo contains information about a PVC and all backups it has been restored from
+// PVCRestoreInfo combines PVC metadata with restores.
+// PVC metadata is inlined for simplicity in JSON output.
 type PVCRestoreInfo struct {
-	// Name of the PVC
-	PVC string `json:"pvc"`
-
-	// Namespace of the PVC
-	Namespace string `json:"namespace"`
-
-	// Size of the PVC in human-readable format (e.g., "5Gi", "30Gi")
-	// +optional
-	Size string `json:"size,omitempty"`
-
-	// UID of the PVC from the backup
-	UID string `json:"uid"`
+	types.PVCInfo `json:",inline"`
 
 	// Restores contains all backup restores for this PVC
 	// +optional
 	Restores []RestoreInfo `json:"restores,omitempty"`
 }
 
-// RestoreInfo contains information about a specific backup restore for a PVC
+// RestoreInfo contains information about a specific restore of a PVC from a backup.
 type RestoreInfo struct {
-	// BackupName is the name of the backup this restore came from
-	BackupName string `json:"backupName"`
+	// Name of the backup this restore came from
+	VeleroBackupName string `json:"veleroBackupName"`
+
+	// Namespace of the backup this restore came from
+	VeleroBackupNamespace string `json:"veleroBackupNamespace"`
 
 	// Timestamp indicates when the backup was created
 	// +optional
 	Timestamp *metav1.Time `json:"timestamp,omitempty"`
+
+	// State indicates the compatibility and processing state of this backup
+	// Values: "available", "backup-deleted", "backup-missing", "unsupported-plugin", "extraction-failed", "processing", "failed"
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// Name of the Velero Restore object
+	// +optional
+	VeleroRestoreName string `json:"veleroRestoreName,omitempty"`
+
+	// Namespace of the Velero Restore object
+	// +optional
+	VeleroRestoreNamespace string `json:"veleroRestoreNamespace,omitempty"`
+
+	// Phase of the Velero Restore object
+	// +optional
+	Phase veleroapi.RestorePhase `json:"phase,omitempty"`
+
+	// When the Velero Restore object was created
+	// +optional
+	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
+
+	// When the Velero Restore completed
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+
+	// Reason for failure if the restore failed
+	// +optional
+	FailureReason string `json:"failureReason,omitempty"`
 }
 
 // FileServingInfo contains information about file serving resources
@@ -179,6 +204,7 @@ type FileServingInfo struct {
 	// - User instructions for file access
 }
 
+// +kubebuilder:storageversion
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=vmfr,scope=Namespaced
 // +kubebuilder:subresource:status

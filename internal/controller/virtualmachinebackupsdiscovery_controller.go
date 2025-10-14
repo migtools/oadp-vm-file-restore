@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
+	"github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
 	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 )
@@ -333,22 +334,23 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 	})
 
 	// Initialize discovery progress tracking
-	discoveryProgress := make([]oadpv1alpha1.BackupDiscoveryInfo, len(candidates))
+	discoveryProgress := make([]types.BackupDiscoveryProgress, len(candidates))
 	for i, backup := range candidates {
-		discoveryProgress[i] = oadpv1alpha1.BackupDiscoveryInfo{
-			VeleroBackupInfo: oadpv1alpha1.VeleroBackupInfo{
+		discoveryProgress[i] = types.BackupDiscoveryProgress{
+			VeleroBackupInfo: types.VeleroBackupInfo{
 				Name:      backup.Name,
+				Namespace: r.OADPNamespace,
 				CreatedAt: &backup.CreationTimestamp,
 			},
-			Status:      oadpv1alpha1.BackupDiscoveryStatusPending,
+			Status:      types.BackupDiscoveryStatusNew,
 			LastUpdated: &metav1.Time{Time: time.Now()},
 		}
 	}
 
 	// Handle missing and filtered backups when explicit list is provided
-	var invalidBackups []oadpv1alpha1.InvalidBackupInfo
+	var invalidBackups []types.InvalidBackupInfo
 	var missingBackupsCount int
-	var filteredOutBackups []oadpv1alpha1.BackupDiscoveryInfo
+	var filteredOutBackups []types.BackupDiscoveryProgress
 
 	if len(vmbd.Spec.RequestedBackups) > 0 {
 		// Check which requested backups exist and classify them
@@ -381,9 +383,10 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 		for requestedName, status := range requestedBackupsStatus {
 			switch status {
 			case "missing":
-				invalidBackups = append(invalidBackups, oadpv1alpha1.InvalidBackupInfo{
-					VeleroBackupInfo: oadpv1alpha1.VeleroBackupInfo{
-						Name: requestedName,
+				invalidBackups = append(invalidBackups, types.InvalidBackupInfo{
+					VeleroBackupInfo: types.VeleroBackupInfo{
+						Name:      requestedName,
+						Namespace: r.OADPNamespace,
 					},
 					Reason: "Backup not found in cluster",
 				})
@@ -391,12 +394,13 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 
 			case "filtered":
 				// Add to filtered out backups that will show in backupDiscoveryProgress
-				filteredOutBackups = append(filteredOutBackups, oadpv1alpha1.BackupDiscoveryInfo{
-					VeleroBackupInfo: oadpv1alpha1.VeleroBackupInfo{
-						Name: requestedName,
+				filteredOutBackups = append(filteredOutBackups, types.BackupDiscoveryProgress{
+					VeleroBackupInfo: types.VeleroBackupInfo{
+						Name:      requestedName,
+						Namespace: r.OADPNamespace,
 						// Note: We can't easily get CreatedAt for filtered backups here without another lookup
 					},
-					Status:      oadpv1alpha1.BackupDiscoveryStatusSkipped,
+					Status:      types.BackupDiscoveryStatusSkipped,
 					Message:     "Backup doesn't include target VM namespace",
 					LastUpdated: &metav1.Time{Time: time.Now()},
 				})
@@ -450,14 +454,14 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 	// Find pending backups to process
 	var pendingBackups []struct {
 		idx    int
-		backup oadpv1alpha1.BackupDiscoveryInfo
+		backup types.BackupDiscoveryProgress
 	}
 
 	for i, backup := range vmbd.Status.BackupDiscoveryProgress {
-		if backup.Status == oadpv1alpha1.BackupDiscoveryStatusPending {
+		if backup.Status == types.BackupDiscoveryStatusNew {
 			pendingBackups = append(pendingBackups, struct {
 				idx    int
-				backup oadpv1alpha1.BackupDiscoveryInfo
+				backup types.BackupDiscoveryProgress
 			}{i, backup})
 		}
 	}
@@ -470,12 +474,12 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 
 		// Look for InProgress backups that might be stuck
 		for i, backup := range vmbd.Status.BackupDiscoveryProgress {
-			if backup.Status == oadpv1alpha1.BackupDiscoveryStatusInProgress {
+			if backup.Status == types.BackupDiscoveryStatusInProgress {
 				logger.V(3).Info("Found stuck InProgress backup, resetting to Pending",
 					"backup", backup.Name)
 
 				// Reset stuck InProgress backup to Pending for retry
-				vmbd.Status.BackupDiscoveryProgress[i].Status = oadpv1alpha1.BackupDiscoveryStatusPending
+				vmbd.Status.BackupDiscoveryProgress[i].Status = types.BackupDiscoveryStatusNew
 				vmbd.Status.BackupDiscoveryProgress[i].Message = "Retrying stuck backup analysis"
 				now := metav1.Time{Time: time.Now()}
 				vmbd.Status.BackupDiscoveryProgress[i].LastUpdated = &now
@@ -510,7 +514,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 	now := metav1.Time{Time: time.Now()}
 	for i := 0; i < batchSize; i++ {
 		idx := pendingBackups[i].idx
-		vmbd.Status.BackupDiscoveryProgress[idx].Status = oadpv1alpha1.BackupDiscoveryStatusInProgress
+		vmbd.Status.BackupDiscoveryProgress[idx].Status = types.BackupDiscoveryStatusInProgress
 		vmbd.Status.BackupDiscoveryProgress[idx].Message = "Analyzing backup contents"
 		vmbd.Status.BackupDiscoveryProgress[idx].LastUpdated = &now
 	}
@@ -528,7 +532,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 	var wg sync.WaitGroup
 	results := make([]struct {
 		idx     int
-		status  oadpv1alpha1.BackupDiscoveryStatus
+		status  types.BackupDiscoveryStatus
 		message string
 	}, batchSize)
 
@@ -537,7 +541,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 		idx := pendingBackups[i].idx
 		backup := vmbd.Status.BackupDiscoveryProgress[idx]
 
-		go func(idx int, backup oadpv1alpha1.BackupDiscoveryInfo) {
+		go func(idx int, backup types.BackupDiscoveryProgress) {
 			defer wg.Done()
 
 			// Check if backup contains the VM
@@ -551,11 +555,11 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 			if r.BackupContentsReader == nil {
 				results[idx%batchSize] = struct {
 					idx     int
-					status  oadpv1alpha1.BackupDiscoveryStatus
+					status  types.BackupDiscoveryStatus
 					message string
 				}{
 					idx:     idx,
-					status:  oadpv1alpha1.BackupDiscoveryStatusFailed,
+					status:  types.BackupDiscoveryStatusFailed,
 					message: "Backup contents reader not configured",
 				}
 				return
@@ -571,22 +575,22 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 				if errors.IsNotFound(err) {
 					results[idx%batchSize] = struct {
 						idx     int
-						status  oadpv1alpha1.BackupDiscoveryStatus
+						status  types.BackupDiscoveryStatus
 						message string
 					}{
 						idx:     idx,
-						status:  oadpv1alpha1.BackupDiscoveryStatusFailed,
+						status:  types.BackupDiscoveryStatusFailed,
 						message: "Backup not found in cluster",
 					}
 					return
 				}
 				results[idx%batchSize] = struct {
 					idx     int
-					status  oadpv1alpha1.BackupDiscoveryStatus
+					status  types.BackupDiscoveryStatus
 					message string
 				}{
 					idx:     idx,
-					status:  oadpv1alpha1.BackupDiscoveryStatusFailed,
+					status:  types.BackupDiscoveryStatusFailed,
 					message: fmt.Sprintf("Failed to fetch backup: %v", err),
 				}
 				return
@@ -596,11 +600,11 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 			if err != nil {
 				results[idx%batchSize] = struct {
 					idx     int
-					status  oadpv1alpha1.BackupDiscoveryStatus
+					status  types.BackupDiscoveryStatus
 					message string
 				}{
 					idx:     idx,
-					status:  oadpv1alpha1.BackupDiscoveryStatusFailed,
+					status:  types.BackupDiscoveryStatusFailed,
 					message: fmt.Sprintf("Failed to check backup contents: %v", err),
 				}
 				return
@@ -609,21 +613,21 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 			if contains {
 				results[idx%batchSize] = struct {
 					idx     int
-					status  oadpv1alpha1.BackupDiscoveryStatus
+					status  types.BackupDiscoveryStatus
 					message string
 				}{
 					idx:     idx,
-					status:  oadpv1alpha1.BackupDiscoveryStatusCompleted,
+					status:  types.BackupDiscoveryStatusCompleted,
 					message: "VM found in backup",
 				}
 			} else {
 				results[idx%batchSize] = struct {
 					idx     int
-					status  oadpv1alpha1.BackupDiscoveryStatus
+					status  types.BackupDiscoveryStatus
 					message string
 				}{
 					idx:     idx,
-					status:  oadpv1alpha1.BackupDiscoveryStatusSkipped,
+					status:  types.BackupDiscoveryStatusSkipped,
 					message: "VM not found in backup",
 				}
 			}
@@ -633,7 +637,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 	wg.Wait()
 
 	// Update results
-	var foundBackups []oadpv1alpha1.VeleroBackupInfo
+	var foundBackups []types.VeleroBackupInfo
 	now = metav1.Time{Time: time.Now()}
 	for i := 0; i < batchSize; i++ {
 		result := results[i]
@@ -643,7 +647,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 		vmbd.Status.BackupDiscoveryProgress[idx].LastUpdated = &now
 
 		// Add to ValidBackups if completed successfully
-		if result.status == oadpv1alpha1.BackupDiscoveryStatusCompleted {
+		if result.status == types.BackupDiscoveryStatusCompleted {
 			foundBackups = append(foundBackups, vmbd.Status.BackupDiscoveryProgress[idx].VeleroBackupInfo)
 		}
 	}
@@ -655,11 +659,11 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) processDiscoveryBatch(ctx con
 	// Update counts based on results
 	for _, result := range results {
 		switch result.status {
-		case oadpv1alpha1.BackupDiscoveryStatusCompleted:
+		case types.BackupDiscoveryStatusCompleted:
 			vmbd.Status.DiscoveryStats.Completed++
-		case oadpv1alpha1.BackupDiscoveryStatusSkipped:
+		case types.BackupDiscoveryStatusSkipped:
 			vmbd.Status.DiscoveryStats.Skipped++
-		case oadpv1alpha1.BackupDiscoveryStatusFailed:
+		case types.BackupDiscoveryStatusFailed:
 			vmbd.Status.DiscoveryStats.Failed++
 		}
 	}
@@ -685,8 +689,8 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 	vmbd.Status.DiscoveryStats.CompletionTime = &now
 
 	// Separate valid and invalid backups for ExplicitList mode
-	var validBackups []oadpv1alpha1.VeleroBackupInfo
-	var invalidBackups []oadpv1alpha1.InvalidBackupInfo
+	var validBackups []types.VeleroBackupInfo
+	var invalidBackups []types.InvalidBackupInfo
 
 	// Track which requested backups we've found during discovery
 	foundRequestedBackups := make(map[string]bool)
@@ -697,12 +701,12 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 	}
 
 	for _, backup := range vmbd.Status.BackupDiscoveryProgress {
-		if backup.Status == oadpv1alpha1.BackupDiscoveryStatusCompleted {
+		if backup.Status == types.BackupDiscoveryStatusCompleted {
 			validBackups = append(validBackups, backup.VeleroBackupInfo)
 		} else {
 			// Add both failed and skipped backups to invalidBackups
 			// (both are invalid for VM file restoration purposes)
-			invalidBackups = append(invalidBackups, oadpv1alpha1.InvalidBackupInfo{
+			invalidBackups = append(invalidBackups, types.InvalidBackupInfo{
 				VeleroBackupInfo: backup.VeleroBackupInfo,
 				Reason:           backup.Message,
 			})
@@ -721,7 +725,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 
 	// Preserve existing invalid backups that are still in the requested list
 	// This includes missing backups that were detected during initialization
-	var relevantExistingInvalidBackups []oadpv1alpha1.InvalidBackupInfo
+	var relevantExistingInvalidBackups []types.InvalidBackupInfo
 	if len(vmbd.Spec.RequestedBackups) > 0 {
 		requestedBackupsSet := make(map[string]bool)
 		for _, requestedName := range vmbd.Spec.RequestedBackups {
@@ -737,7 +741,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 	}
 
 	// Add any missing requested backups that weren't processed during discovery
-	missingBackups := []oadpv1alpha1.InvalidBackupInfo{}
+	missingBackups := []types.InvalidBackupInfo{}
 	if len(vmbd.Spec.RequestedBackups) > 0 {
 		// Track which requested backups were found during discovery
 		processedBackups := make(map[string]bool)
@@ -754,9 +758,10 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 		// Add missing requested backups to invalidBackups (only if not already preserved)
 		for _, requestedName := range vmbd.Spec.RequestedBackups {
 			if !processedBackups[requestedName] && !existingInvalidBackups[requestedName] {
-				missingBackups = append(missingBackups, oadpv1alpha1.InvalidBackupInfo{
-					VeleroBackupInfo: oadpv1alpha1.VeleroBackupInfo{
-						Name: requestedName,
+				missingBackups = append(missingBackups, types.InvalidBackupInfo{
+					VeleroBackupInfo: types.VeleroBackupInfo{
+						Name:      requestedName,
+						Namespace: r.OADPNamespace,
 					},
 					Reason: "Backup not found in cluster",
 				})
@@ -770,7 +775,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 		existingInvalidBackupsSet[existingInvalid.Name] = true
 	}
 
-	var dedupedInvalidBackups []oadpv1alpha1.InvalidBackupInfo
+	var dedupedInvalidBackups []types.InvalidBackupInfo
 	for _, invalid := range invalidBackups {
 		if !existingInvalidBackupsSet[invalid.Name] {
 			dedupedInvalidBackups = append(dedupedInvalidBackups, invalid)
@@ -792,7 +797,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 	// Set discovery condition without calling Status().Update()
 	if len(validBackups) > 0 {
 		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineBackupsDiscoveryConditionComplete),
+			Type:               types.ConditionTypeReady,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "DiscoverySuccessful",
@@ -802,7 +807,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 		logger.V(4).Info("Discovery completed successfully", "validBackups", len(validBackups))
 	} else {
 		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineBackupsDiscoveryConditionComplete),
+			Type:               types.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "NoValidBackups",
@@ -831,7 +836,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 	// Set discovery condition on fresh object
 	if len(validBackups) > 0 {
 		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineBackupsDiscoveryConditionComplete),
+			Type:               types.ConditionTypeReady,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "DiscoverySuccessful",
@@ -841,7 +846,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) finalizeDiscoveryProcess(ctx 
 		logger.V(4).Info("Discovery completed successfully", "validBackups", len(validBackups))
 	} else {
 		condition := metav1.Condition{
-			Type:               string(oadpv1alpha1.VirtualMachineBackupsDiscoveryConditionComplete),
+			Type:               types.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			Reason:             "NoValidBackups",
