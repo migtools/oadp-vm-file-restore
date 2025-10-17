@@ -722,32 +722,12 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		return true, nil // Requeue to proceed to next step
 
 	case "NamespaceReady":
-		// Step 2: Populate PVCRestores metadata and create Velero Restores for available backups
-		logger.V(0).Info("Preparing PVCRestores metadata and creating Velero Restores")
+		// Step 2: Create Velero Restores for available backups
+		logger.V(0).Info("Creating Velero Restores")
 
-		// Task: Populate PVCRestores with Velero Restore names and create Velero Restores
-		// IMPORTANT: We populate PVCRestores metadata BEFORE creating Velero Restores to avoid race conditions
-		// If we create Velero Restores first, Velero will immediately update their phase ("" -> "New"),
-		// triggering our watcher which starts a new reconciliation with a fresh vmfr object that doesn't
-		// have the in-memory PVCRestores updates, causing those updates to be lost.
-		err := r.populatePVCRestoresMetadata(ctx, logger, vmfr)
-		if err != nil {
-			failureMsg := fmt.Sprintf("Failed to populate PVCRestores metadata: %s", err.Error())
-			logger.Error(err, "PVCRestores metadata population failed")
-			return false, r.failValidation(ctx, vmfr, "MetadataPopulationFailed", failureMsg, logger)
-		}
-
-		// NOTE: We do NOT re-fetch the vmfr object here because:
-		// 1. The in-memory vmfr already has the correct metadata (just patched it)
-		// 2. Re-fetching immediately can cause a race condition where the informer cache
-		//    hasn't been updated yet, returning stale data
-		// 3. The Status().Patch() operation already updated vmfr.Status in place
-		logger.V(1).Info("Metadata populated and persisted, proceeding with Velero Restore creation")
-
-		// Now create the actual Velero Restore objects
-		// The PVCRestores metadata is already persisted, so even if Velero triggers
-		// a new reconciliation via watcher, the metadata will be preserved
-		err = r.createVeleroRestoresFromMetadata(ctx, logger, vmfr)
+		// Task: Create Velero Restore objects using generateName
+		// K8s will assign unique names, then we update PVCRestores status with actual names
+		err := r.createVeleroRestores(ctx, logger, vmfr)
 		if err != nil {
 			failureMsg := fmt.Sprintf("Failed to create Velero Restores: %s", err.Error())
 			logger.Error(err, "Velero Restore creation failed")
@@ -1715,9 +1695,9 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 	return namespaceName, nil
 }
 
-// populatePVCRestoresMetadata populates PVCRestores with Velero Restore names and initial phases,
-// then directly updates the status. This MUST be done BEFORE creating Velero Restores to avoid race conditions.
-func (r *VirtualMachineFileRestoreReconciler) populatePVCRestoresMetadata(
+// createVeleroRestores creates Velero Restore objects using generateName and updates PVCRestores status with actual names.
+// Uses Kubernetes generateName to let K8s assign unique names automatically.
+func (r *VirtualMachineFileRestoreReconciler) createVeleroRestores(
 	ctx context.Context,
 	logger logr.Logger,
 	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
@@ -1729,9 +1709,15 @@ func (r *VirtualMachineFileRestoreReconciler) populatePVCRestoresMetadata(
 		return fmt.Errorf("restore namespace not found in status - namespace creation may have failed")
 	}
 
-	logger.V(0).Info("Populating PVCRestores metadata", "targetNamespace", restoreNamespace)
+	// Get VM name and namespace from discovery resource for annotations
+	vmbd, err := r.getDiscoveryResource(ctx, vmfr)
+	if err != nil {
+		return fmt.Errorf("failed to get discovery resource for VM metadata: %w", err)
+	}
 
-	// Group PVCs by backup name
+	logger.V(0).Info("Creating Velero Restores with generateName", "targetNamespace", restoreNamespace)
+
+	// Group PVCs by backup name to create one Restore per backup
 	// Map: backup name -> list of PVC UIDs
 	backupToPVCUIDs := make(map[string][]string)
 
@@ -1765,245 +1751,119 @@ func (r *VirtualMachineFileRestoreReconciler) populatePVCRestoresMetadata(
 		return fmt.Errorf("no available backups found to restore - this should have been caught in validation")
 	}
 
-	logger.V(0).Info("Grouped PVCs by backup for metadata population",
+	logger.V(0).Info("Grouped PVCs by backup for Velero Restore creation",
 		"backupCount", len(backupToPVCUIDs),
 		"targetNamespace", restoreNamespace)
 
-	// Create patch baseline BEFORE modifying vmfr
-	patch := client.MergeFrom(vmfr.DeepCopy())
-
-	// Update PVCRestores in vmfr with Velero Restore metadata (restore names and initial phase)
-	for backupName, pvcUIDs := range backupToPVCUIDs {
-		// Generate the restore name (same logic as above)
-		restoreName := fmt.Sprintf("vmfr-%s-%s-%s",
-			vmfr.Name,
-			backupName,
-			string(vmfr.UID[:8]))
-
-		// Ensure name is DNS-1123 compliant
-		if len(restoreName) > 253 {
-			maxMiddleLen := 253 - len("vmfr-") - len(string(vmfr.UID[:8])) - 2
-			if maxMiddleLen > 0 {
-				middlePart := vmfr.Name + "-" + backupName
-				if len(middlePart) > maxMiddleLen {
-					middlePart = middlePart[:maxMiddleLen]
-				}
-				restoreName = fmt.Sprintf("vmfr-%s-%s", middlePart, string(vmfr.UID[:8]))
-			}
-		}
-		restoreName = strings.ToLower(restoreName)
-
-		// Update all PVCs that are part of this backup
-		for i := range vmfr.Status.PVCRestores {
-			pvcRestore := &vmfr.Status.PVCRestores[i]
-
-			// Skip synthetic entries
-			if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
-				continue
-			}
-
-			// Check if this PVC was part of this backup
-			isPVCInBackup := false
-			for _, pvcUID := range pvcUIDs {
-				if pvcRestore.PVCUID == pvcUID {
-					isPVCInBackup = true
-					break
-				}
-			}
-
-			if !isPVCInBackup {
-				continue
-			}
-
-			// Find and update the RestoreInfo for this backup
-			for j := range pvcRestore.Restores {
-				restoreInfo := &pvcRestore.Restores[j]
-
-				if restoreInfo.VeleroBackupName == backupName &&
-					restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
-
-					// Update with Velero Restore metadata
-					restoreInfo.VeleroRestoreName = restoreName
-					restoreInfo.VeleroRestoreNamespace = r.OADPNamespace
-					restoreInfo.Phase = veleroapi.RestorePhaseNew
-
-					logger.V(1).Info("Populated RestoreInfo with Velero Restore metadata",
-						"pvcUID", pvcRestore.PVCUID,
-						"backupName", backupName,
-						"restoreName", restoreName)
-				}
-			}
-		}
-	}
-
-	// PVCRestores have been updated in-place on vmfr.Status
-	// Now use Status().Patch() to persist the PVCRestores field changes
-	if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
-		logger.Error(err, "Failed to patch status with PVCRestores metadata")
-		return fmt.Errorf("failed to persist PVCRestores metadata: %w", err)
-	}
-
-	logger.V(0).Info("Successfully populated and persisted PVCRestores metadata",
-		"restoreCount", len(backupToPVCUIDs),
-		"targetNamespace", restoreNamespace)
-
-	return nil
-}
-
-// createVeleroRestoresFromMetadata creates Velero Restore objects using metadata already persisted in PVCRestores.
-// This function reads the metadata (restore names, namespaces) from VMFR status and creates the actual Velero Restore objects.
-// IMPORTANT: This must be called AFTER populatePVCRestoresMetadata() to ensure metadata is already persisted.
-func (r *VirtualMachineFileRestoreReconciler) createVeleroRestoresFromMetadata(
-	ctx context.Context,
-	logger logr.Logger,
-	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
-) error {
-
-	// Get the restore namespace from status
-	restoreNamespace := vmfr.Status.CreatedNamespace
-	if restoreNamespace == "" {
-		return fmt.Errorf("restore namespace not found in status - namespace creation may have failed")
-	}
-
-	logger.V(0).Info("Creating Velero Restores from persisted metadata", "targetNamespace", restoreNamespace)
-
-	// Group PVCs by their Velero Restore name to avoid creating duplicate restores
-	// Map: restore name -> backup name (for annotation)
-	restoreNameToBackup := make(map[string]string)
-
-	// Scan PVCRestores to find all unique Velero Restore names
-	for _, pvcRestore := range vmfr.Status.PVCRestores {
-		// Skip synthetic PVC entries
-		if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
-			continue
-		}
-
-		for _, restoreInfo := range pvcRestore.Restores {
-			// Only process available backups that have restore metadata populated
-			if restoreInfo.State != string(oadptypes.BackupDiscoveryStateAvailable) {
-				continue
-			}
-
-			// Check if restore metadata was populated
-			if restoreInfo.VeleroRestoreName == "" || restoreInfo.VeleroRestoreNamespace == "" {
-				logger.V(1).Info("Skipping restore with missing metadata",
-					"pvcUID", pvcRestore.PVCUID,
-					"backup", restoreInfo.VeleroBackupName)
-				continue
-			}
-
-			// Track this restore (multiple PVCs may share the same restore)
-			restoreNameToBackup[restoreInfo.VeleroRestoreName] = restoreInfo.VeleroBackupName
-		}
-	}
-
-	if len(restoreNameToBackup) == 0 {
-		return fmt.Errorf("no restore metadata found in PVCRestores - metadata population may have failed")
-	}
-
-	logger.V(0).Info("Found unique Velero Restores to create", "count", len(restoreNameToBackup))
-
-	// Create Velero Restore objects
+	// Create Velero Restore objects and track created restore names
+	// Map: backup name -> actual restore name (assigned by K8s)
+	backupToRestoreName := make(map[string]string)
 	createdCount := 0
-	for restoreName, backupName := range restoreNameToBackup {
-		// Check if restore already exists
-		existingRestore := &veleroapi.Restore{}
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      restoreName,
-			Namespace: r.OADPNamespace,
-		}, existingRestore)
 
-		if err == nil {
-			// Restore already exists
-			logger.V(1).Info("Velero Restore already exists, skipping creation",
-				"restoreName", restoreName,
-				"backupName", backupName)
-			continue
-		} else if !apierrors.IsNotFound(err) {
-			// Unexpected error
-			logger.Error(err, "Failed to check if Velero Restore exists", "restoreName", restoreName)
-			return fmt.Errorf("failed to check if Velero Restore %s exists: %w", restoreName, err)
-		}
+	for backupName, pvcUIDs := range backupToPVCUIDs {
+		// Generate restore name prefix (K8s will append random suffix)
+		restoreNamePrefix := function.GenerateVeleroRestorePrefix(vmfr.Name, backupName, logger)
 
-		// Create the Velero Restore object
-		// Build restore spec with labelSelector to restore only the specific PVC(s)
+		// Build label selector for PVC UIDs
 		labelSelector := &metav1.LabelSelector{
 			MatchExpressions: []metav1.LabelSelectorRequirement{
 				{
 					Key:      constant.PVCUIDLabel,
 					Operator: metav1.LabelSelectorOpIn,
-					Values:   r.getPVCUIDsForRestore(vmfr, restoreName),
+					Values:   pvcUIDs,
 				},
 			},
 		}
 
+		// Create Velero Restore object with generateName
 		restore := &veleroapi.Restore{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      restoreName,
-				Namespace: r.OADPNamespace,
+				GenerateName: restoreNamePrefix, // K8s will append random suffix
+				Namespace:    r.OADPNamespace,
 				Labels: map[string]string{
 					"oadp.openshift.io/vm-file-restore":    vmfr.Name,
 					"oadp.openshift.io/vm-file-restore-ns": vmfr.Namespace,
 				},
 				Annotations: map[string]string{
-					constant.BackupNameAnnotation: backupName,
+					constant.VirtualMachineNameAnnotation:      vmbd.Spec.VirtualMachineName,
+					constant.VirtualMachineNamespaceAnnotation: vmbd.Spec.VirtualMachineNamespace,
+					constant.BackupNameAnnotation:              backupName,
+					"oadp.openshift.io/vmfr-restore":           "true",
 				},
 			},
 			Spec: veleroapi.RestoreSpec{
 				BackupName:         backupName,
 				LabelSelector:      labelSelector,
 				IncludedNamespaces: []string{restoreNamespace},
+				IncludedResources: []string{
+					"persistentvolumeclaims",
+					"volumesnapshots",
+				},
 			},
 		}
 
-		// Create the Velero Restore
+		// Create the Velero Restore (K8s assigns actual name)
 		if err := r.Create(ctx, restore); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				logger.V(1).Info("Velero Restore already exists (race condition), continuing",
-					"restoreName", restoreName)
-				continue
-			}
-			logger.Error(err, "Failed to create Velero Restore", "restoreName", restoreName, "backupName", backupName)
-			return fmt.Errorf("failed to create Velero Restore %s: %w", restoreName, err)
+			logger.Error(err, "Failed to create Velero Restore", "generateNamePrefix", restoreNamePrefix, "backupName", backupName)
+			return fmt.Errorf("failed to create Velero Restore with prefix %s: %w", restoreNamePrefix, err)
 		}
 
+		// Get the actual name assigned by K8s (available in restore.Name after Create)
+		actualRestoreName := restore.Name
+		backupToRestoreName[backupName] = actualRestoreName
 		createdCount++
+
 		logger.V(0).Info("Created Velero Restore",
-			"restoreName", restoreName,
+			"restoreName", actualRestoreName,
 			"backupName", backupName,
 			"targetNamespace", restoreNamespace)
 	}
 
 	logger.V(0).Info("Velero Restore creation completed",
 		"createdCount", createdCount,
-		"totalRestores", len(restoreNameToBackup))
+		"totalBackups", len(backupToPVCUIDs))
 
-	return nil
-}
+	// Update PVCRestores status with actual Velero Restore names
+	patch := client.MergeFrom(vmfr.DeepCopy())
 
-// getPVCUIDsForRestore returns the list of PVC UIDs associated with a specific Velero Restore
-func (r *VirtualMachineFileRestoreReconciler) getPVCUIDsForRestore(
-	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
-	restoreName string,
-) []string {
-	var pvcUIDs []string
+	for i := range vmfr.Status.PVCRestores {
+		pvcRestore := &vmfr.Status.PVCRestores[i]
 
-	for _, pvcRestore := range vmfr.Status.PVCRestores {
 		// Skip synthetic entries
-		if pvcRestore.PVCName == "backup-level-failure" {
+		if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
 			continue
 		}
 
-		for _, restoreInfo := range pvcRestore.Restores {
-			if restoreInfo.VeleroRestoreName == restoreName &&
-				restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
-				pvcUIDs = append(pvcUIDs, pvcRestore.PVCUID)
-				break // Each PVC should only be added once
+		// Update each RestoreInfo with actual Velero Restore name
+		for j := range pvcRestore.Restores {
+			restoreInfo := &pvcRestore.Restores[j]
+
+			if restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
+				// Get actual restore name for this backup
+				if actualRestoreName, exists := backupToRestoreName[restoreInfo.VeleroBackupName]; exists {
+					restoreInfo.VeleroRestoreName = actualRestoreName
+					restoreInfo.VeleroRestoreNamespace = r.OADPNamespace
+					restoreInfo.Phase = veleroapi.RestorePhaseNew
+
+					logger.V(1).Info("Updated RestoreInfo with Velero Restore name",
+						"pvcUID", pvcRestore.PVCUID,
+						"backupName", restoreInfo.VeleroBackupName,
+						"restoreName", actualRestoreName)
+				}
 			}
 		}
 	}
 
-	return pvcUIDs
+	// Patch status with updated PVCRestores
+	if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to patch status with Velero Restore names")
+		return fmt.Errorf("failed to update PVCRestores with Velero Restore names: %w", err)
+	}
+
+	logger.V(0).Info("Successfully updated PVCRestores with Velero Restore names",
+		"restoreCount", len(backupToRestoreName))
+
+	return nil
 }
 
 // monitorVeleroRestores monitors all Velero Restore objects associated with this VMFR
