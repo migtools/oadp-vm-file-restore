@@ -23,7 +23,6 @@ import (
 
 	"github.com/migtools/oadp-vm-file-restore/internal/common/function"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
