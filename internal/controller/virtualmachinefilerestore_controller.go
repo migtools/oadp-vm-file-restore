@@ -480,7 +480,7 @@ func (r *VirtualMachineFileRestoreReconciler) validateAndDiscoverPVCs(ctx contex
 
 	for _, pvcRestore := range vmfr.Status.PVCRestores {
 		// Skip synthetic PVC entries created for backup-level failures
-		if pvcRestore.PVCName == "backup-level-failure" {
+		if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
 			continue
 		}
 
@@ -1416,7 +1416,7 @@ func (r *VirtualMachineFileRestoreReconciler) processDiscoveryResults(
 			// Add synthetic PVC entry for backup-level failures
 			pvcMap[syntheticUID] = &oadpv1alpha1.PVCRestoreInfo{
 				PVCInfo: oadptypes.PVCInfo{
-					PVCName:      "backup-level-failure",
+					PVCName:      constant.BackupLevelFailurePVCName,
 					PVCNamespace: backupProgress.Namespace,
 					PVCUID:       syntheticUID,
 					Size:         "N/A",
@@ -1737,7 +1737,7 @@ func (r *VirtualMachineFileRestoreReconciler) populatePVCRestoresMetadata(
 
 	for _, pvcRestore := range vmfr.Status.PVCRestores {
 		// Skip synthetic PVC entries (backup-level failures)
-		if pvcRestore.PVCName == "backup-level-failure" {
+		if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
 			continue
 		}
 
@@ -1798,7 +1798,7 @@ func (r *VirtualMachineFileRestoreReconciler) populatePVCRestoresMetadata(
 			pvcRestore := &vmfr.Status.PVCRestores[i]
 
 			// Skip synthetic entries
-			if pvcRestore.PVCName == "backup-level-failure" {
+			if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
 				continue
 			}
 
@@ -1874,7 +1874,7 @@ func (r *VirtualMachineFileRestoreReconciler) createVeleroRestoresFromMetadata(
 	// Scan PVCRestores to find all unique Velero Restore names
 	for _, pvcRestore := range vmfr.Status.PVCRestores {
 		// Skip synthetic PVC entries
-		if pvcRestore.PVCName == "backup-level-failure" {
+		if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
 			continue
 		}
 
@@ -2076,7 +2076,7 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 			pvcRestore := &vmfr.Status.PVCRestores[i]
 
 			// Skip synthetic entries
-			if pvcRestore.PVCName == "backup-level-failure" {
+			if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
 				continue
 			}
 
@@ -2133,146 +2133,4 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 	}
 
 	return completed, failed, inProgress, statusUpdated, nil
-}
-
-// transitionToCompleted transitions VMFR to Completed phase (all restores succeeded)
-func (r *VirtualMachineFileRestoreReconciler) transitionToCompleted(
-	ctx context.Context,
-	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
-	totalRestores int,
-	logger logr.Logger,
-) error {
-
-	conditions := []metav1.Condition{
-		{
-			Type:               oadptypes.ConditionTypeProgressing,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "RestoresCompleted",
-			Message:            fmt.Sprintf("All %d Velero Restores completed successfully", totalRestores),
-		},
-		{
-			Type:               oadptypes.ConditionTypeAvailable,
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "AllRestoresSucceeded",
-			Message:            fmt.Sprintf("Successfully restored PVCs from %d backups", totalRestores),
-		},
-		{
-			Type:               oadptypes.ConditionTypeDegraded,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "NoFailures",
-			Message:            "All Velero Restores completed without errors",
-		},
-		{
-			Type:               oadptypes.ConditionTypeReady,
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "Completed",
-			Message:            "File restore completed successfully",
-		},
-	}
-
-	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseCompleted, conditions, false, logger); err != nil {
-		return err
-	}
-
-	logger.V(0).Info("Successfully transitioned to Completed phase")
-	return nil
-}
-
-// transitionToPartiallyFailed transitions VMFR to PartiallyFailed phase (some restores succeeded, some failed)
-func (r *VirtualMachineFileRestoreReconciler) transitionToPartiallyFailed(
-	ctx context.Context,
-	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
-	succeeded int,
-	failed int,
-	logger logr.Logger,
-) error {
-
-	conditions := []metav1.Condition{
-		{
-			Type:               oadptypes.ConditionTypeProgressing,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "RestoresCompletedWithFailures",
-			Message:            fmt.Sprintf("Velero Restores completed: %d succeeded, %d failed", succeeded, failed),
-		},
-		{
-			Type:               oadptypes.ConditionTypeAvailable,
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "PartialRestoreSuccess",
-			Message:            fmt.Sprintf("Successfully restored %d PVCs, %d failed", succeeded, failed),
-		},
-		{
-			Type:               oadptypes.ConditionTypeDegraded,
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "SomeRestoresFailed",
-			Message:            fmt.Sprintf("%d of %d Velero Restores failed", failed, succeeded+failed),
-		},
-		{
-			Type:               oadptypes.ConditionTypeReady,
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "PartiallyFailed",
-			Message:            "File restore completed with partial failures",
-		},
-	}
-
-	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhasePartiallyFailed, conditions, false, logger); err != nil {
-		return err
-	}
-
-	logger.V(0).Info("Successfully transitioned to PartiallyFailed phase")
-	return nil
-}
-
-// transitionToFailed transitions VMFR to Failed phase (all restores failed)
-func (r *VirtualMachineFileRestoreReconciler) transitionToFailed(
-	ctx context.Context,
-	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
-	totalRestores int,
-	logger logr.Logger,
-) error {
-
-	conditions := []metav1.Condition{
-		{
-			Type:               oadptypes.ConditionTypeProgressing,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "RestoresFailed",
-			Message:            fmt.Sprintf("All %d Velero Restores failed", totalRestores),
-		},
-		{
-			Type:               oadptypes.ConditionTypeAvailable,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "AllRestoresFailed",
-			Message:            "No PVCs were successfully restored",
-		},
-		{
-			Type:               oadptypes.ConditionTypeDegraded,
-			Status:             metav1.ConditionTrue,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "CriticalFailure",
-			Message:            "All Velero Restores failed",
-		},
-		{
-			Type:               oadptypes.ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.Now(),
-			Reason:             "Failed",
-			Message:            "File restore failed completely",
-		},
-	}
-
-	if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseFailed, conditions, false, logger); err != nil {
-		return err
-	}
-
-	logger.V(0).Info("Successfully transitioned to Failed phase")
-	return nil
 }

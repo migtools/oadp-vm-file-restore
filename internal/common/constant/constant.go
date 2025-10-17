@@ -96,6 +96,11 @@ const (
 	MaxBackupDiscoveryParallel     = 10
 	BackupDiscoveryBatchSize       = 3
 	MaxRetryAttempts               = 5
+
+	// BackupLevelFailurePVCName is a synthetic PVC name used in status to track
+	// backup-level failures (e.g., backup deleted, backup files missing) where
+	// no PVC metadata is available
+	BackupLevelFailurePVCName = "backup-level-failure"
 )
 
 // Backup discovery phases and reasons
