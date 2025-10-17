@@ -8,6 +8,8 @@ rules:
   - ""
   resources:
   - namespaces
+  - pods
+  - services
   verbs:
   - create
   - delete
@@ -15,6 +17,14 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - oadp.openshift.io
