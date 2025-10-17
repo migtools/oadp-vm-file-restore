@@ -99,3 +99,24 @@ func GenerateTemporaryVMFRNamespaceName(prefix, vmNamespace, vmName, uid string,
 
 	return namespaceName
 }
+
+// GenerateVeleroRestorePrefix generates a prefix for Velero Restore generateName field.
+// Kubernetes will automatically append a random suffix (5 chars) to ensure uniqueness.
+// Format: vmfr-<vmfr-name>-<backup-name>-
+// - vmfrName: Name of the VirtualMachineFileRestore resource
+// - backupName: Name of the Velero backup
+func GenerateVeleroRestorePrefix(vmfrName, backupName string, logger logr.Logger) string {
+	// Build restore prefix: vmfr-<name>-<backup>-
+	// K8s will append random 5-char suffix like "x7k2j"
+	restorePrefix := "vmfr-" + vmfrName + "-" + backupName + "-"
+
+	// Convert to lowercase (DNS-1123 requirement)
+	restorePrefix = strings.ToLower(restorePrefix)
+
+	logger.V(1).Info("Generated Velero Restore prefix for generateName",
+		"restorePrefix", restorePrefix,
+		"vmfrName", vmfrName,
+		"backupName", backupName)
+
+	return restorePrefix
+}

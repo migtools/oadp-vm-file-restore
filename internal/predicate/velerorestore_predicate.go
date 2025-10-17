@@ -23,7 +23,6 @@ import (
 
 	"github.com/migtools/oadp-vm-file-restore/internal/common/function"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
@@ -45,23 +44,20 @@ func (p VeleroRestorePredicate) Update(evt event.TypedUpdateEvent[client.Object]
 
 	namespace := evt.ObjectNew.GetNamespace()
 	if namespace == p.OADPNamespace {
-		// Only accept update events where the Restore Status actually changed
+		// Only accept update events where the Restore Phase actually changed
 		oldRestore, okOld := evt.ObjectOld.(*veleroapi.Restore)
-		// Ignore if the status is veleroapi.RestorePhaseNew or empty
-		if oldRestore.Status.Phase == veleroapi.RestorePhaseNew || oldRestore.Status.Phase == "" {
-			logger.V(1).Info("Filtered Restore Update event with Status New or empty")
-			return false
-		}
-
 		newRestore, okNew := evt.ObjectNew.(*veleroapi.Restore)
 		if !okOld || !okNew {
 			logger.V(1).Info("Rejected Restore Update event due to type assertion failure")
 			return false
 		}
 
-		// Only accept update events where the Restore Status actually changed
-		if function.CheckVeleroRestoreMetadata(evt.ObjectNew) && !equality.Semantic.DeepEqual(oldRestore.Status, newRestore.Status) {
-			logger.V(1).Info("Accepted Restore Update event due to Status change")
+		// Only trigger reconciliation when phase changes to avoid unnecessary reconciliations
+		// during active restore (progress updates, item counts, etc.)
+		if function.CheckVeleroRestoreMetadata(evt.ObjectNew) && oldRestore.Status.Phase != newRestore.Status.Phase {
+			logger.V(1).Info("Accepted Restore Update event due to Phase change",
+				"oldPhase", oldRestore.Status.Phase,
+				"newPhase", newRestore.Status.Phase)
 			return true
 		}
 	}
