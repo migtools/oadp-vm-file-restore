@@ -88,6 +88,84 @@ type VirtualMachineFileRestoreSpec struct {
 	// The final namespace name will be: <prefix>-<vm-namespace>-<vm-name>-<suffix>
 	// +optional
 	NamespacePrefix string `json:"namespacePrefix,omitempty"`
+
+	// FileAccess defines which file access methods are enabled for this restore.
+	// If not specified, defaults to HTTP file browser only.
+	// +optional
+	FileAccess *FileAccessSpec `json:"fileAccess,omitempty"`
+}
+
+// FileAccessSpec defines the file access methods available for the restored files
+type FileAccessSpec struct {
+	// SSH enables SSH/SFTP/SCP/rsync access to restored files
+	// If present (non-nil), SSH access is enabled
+	// +optional
+	SSH *SSHAccessSpec `json:"ssh,omitempty"`
+
+	// FileBrowser enables HTTPS web-based file browser access
+	// If present (non-nil), FileBrowser access is enabled
+	// +optional
+	FileBrowser *FileBrowserAccessSpec `json:"fileBrowser,omitempty"`
+}
+
+// SSHAccessSpec configures SSH access to restored files
+type SSHAccessSpec struct {
+	// Username for SSH access
+	// Defaults to "restore-user" if not specified
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// PublicKey for SSH key-based authentication
+	// Public keys are not sensitive and can be specified inline
+	// If both PublicKey and CredentialsSecretRef are empty, controller generates keypair
+	// +optional
+	PublicKey string `json:"publicKey,omitempty"`
+
+	// CredentialsSecretRef references a Secret containing authentication credentials
+	// Use this when you want to provide credentials via Secret instead of inline
+	// Secret may contain: username, publicKey, password
+	// Takes precedence over inline Username and PublicKey fields
+	// The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+	// +optional
+	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
+
+	// Port for SSH service
+	// Defaults to 22 if not specified
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port *int32 `json:"port,omitempty"`
+}
+
+// FileBrowserAccessSpec configures HTTPS file browser access
+type FileBrowserAccessSpec struct {
+	// CredentialsSecretRef references a Secret containing username and password
+	// The Secret must have keys "username" and "password"
+	// If not specified, controller generates credentials and stores them in a Secret
+	// in the temporary restore namespace
+	// The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+	// +optional
+	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
+
+	// Port for FileBrowser HTTPS service
+	// Defaults to 443 if not specified
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port *int32 `json:"port,omitempty"`
+}
+
+// SecretReference identifies a Secret by name and optional namespace
+type SecretReference struct {
+	// Name of the Secret
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Name string `json:"name"`
+
+	// Namespace of the Secret
+	// If not specified, defaults to the VirtualMachineFileRestore's namespace
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // VirtualMachineFileRestoreStatus defines the observed state of VirtualMachineFileRestore.

@@ -58,6 +58,91 @@ spec:
                   that contains the discovered backups to serve files from.
                 minLength: 1
                 type: string
+              fileAccess:
+                description: |-
+                  FileAccess defines which file access methods are enabled for this restore.
+                  If not specified, defaults to HTTP file browser only.
+                properties:
+                  fileBrowser:
+                    description: |-
+                      FileBrowser enables HTTPS web-based file browser access
+                      If present (non-nil), FileBrowser access is enabled
+                    properties:
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a Secret containing username and password
+                          The Secret must have keys "username" and "password"
+                          If not specified, controller generates credentials and stores them in a Secret
+                          in the temporary restore namespace
+                          The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+                        properties:
+                          name:
+                            description: Name of the Secret
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace of the Secret
+                              If not specified, defaults to the VirtualMachineFileRestore's namespace
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      port:
+                        description: |-
+                          Port for FileBrowser HTTPS service
+                          Defaults to 443 if not specified
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                    type: object
+                  ssh:
+                    description: |-
+                      SSH enables SSH/SFTP/SCP/rsync access to restored files
+                      If present (non-nil), SSH access is enabled
+                    properties:
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a Secret containing authentication credentials
+                          Use this when you want to provide credentials via Secret instead of inline
+                          Secret may contain: username, publicKey, password
+                          Takes precedence over inline Username and PublicKey fields
+                          The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+                        properties:
+                          name:
+                            description: Name of the Secret
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace of the Secret
+                              If not specified, defaults to the VirtualMachineFileRestore's namespace
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      port:
+                        description: |-
+                          Port for SSH service
+                          Defaults to 22 if not specified
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      publicKey:
+                        description: |-
+                          PublicKey for SSH key-based authentication
+                          Public keys are not sensitive and can be specified inline
+                          If both PublicKey and CredentialsSecretRef are empty, controller generates keypair
+                        type: string
+                      username:
+                        description: |-
+                          Username for SSH access
+                          Defaults to "restore-user" if not specified
+                        type: string
+                    type: object
+                type: object
               namespacePrefix:
                 description: |-
                   NamespacePrefix specifies a prefix for automatically generated temporary namespaces.

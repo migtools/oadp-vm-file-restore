@@ -84,6 +84,9 @@ func (e ErrUnsupportedBackup) Error() string {
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinefilerestores/finalizers,verbs=update
 // +kubebuilder:rbac:groups=oadp.openshift.io,resources=virtualmachinebackupsdiscoveries,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch
 
@@ -774,9 +777,9 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		return true, nil // Requeue - next reconciliation will monitor restores
 
 	case "WaitingForRestores":
-		// Step 3: Monitor Velero Restore progress and transition to final phase
-		// vmfr is already fresh from the reconciliation fetch at line 98
-		logger.V(0).Info("Monitoring Velero Restore progress")
+		// Step 3: Monitor Velero Restore progress AND validate PVCs
+		// Only transition when BOTH Velero Restores are complete AND PVCs exist
+		logger.V(0).Info("Monitoring Velero Restore progress and PVC creation")
 
 		// Task: Monitor Velero Restores and update PVCRestores phases
 		// monitorVeleroRestores updates phases in-memory and returns statusUpdated flag
@@ -829,28 +832,53 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 			return true, nil // Requeue for periodic status checking (watcher provides immediate updates)
 		}
 
-		// All restores have reached terminal state - update workflow conditions to final phase
+		// All Velero Restore CRs have reached terminal state
+		// Now check if PVCs have been created by Velero before transitioning
+		logger.V(0).Info("All Velero Restore CRs completed, checking PVC creation")
+
+		// Validate PVCs exist for successful restores
+		if completed > 0 {
+			allPVCsReady, err := r.validateRestoredPVCs(ctx, logger, vmfr)
+			if err != nil {
+				// Hard error (e.g., PVC in Lost state)
+				failureMsg := fmt.Sprintf("PVC validation failed: %s", err.Error())
+				logger.Error(err, "PVC validation encountered error")
+				return false, r.failValidation(ctx, vmfr, "PVCValidationFailed", failureMsg, logger)
+			}
+
+			if !allPVCsReady {
+				logger.V(1).Info("Velero Restores completed but PVCs not yet created, waiting")
+				// Requeue to wait for Velero to create the PVCs
+				return true, nil
+			}
+
+			logger.V(0).Info("All PVCs created and ready for mounting")
+		}
+
+		// Both Velero Restores AND PVCs are ready - determine final phase
 		var conditions []metav1.Condition
 		var finalPhase oadpv1alpha1.VirtualMachineFileRestorePhase
+		var progressingReason string
 
 		if failed == 0 {
-			// All restores completed successfully
-			logger.V(0).Info("All Velero Restores completed successfully, transitioning to Completed phase")
-			finalPhase = oadpv1alpha1.VirtualMachineFileRestorePhaseCompleted
+			// All restores completed successfully and PVCs are ready
+			logger.V(0).Info("All Velero Restores completed successfully, ready to create file server")
+			finalPhase = oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress // Stay in InProgress
+			progressingReason = "RestoresCompleted"
 			conditions = []metav1.Condition{
 				{
 					Type:               oadptypes.ConditionTypeProgressing,
-					Status:             metav1.ConditionFalse,
+					Status:             metav1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "RestoresCompleted",
-					Message:            fmt.Sprintf("All %d Velero Restores completed successfully", totalRestores),
+					Reason:             progressingReason,
+					Message:            fmt.Sprintf("All %d Velero Restores and PVCs ready, proceeding to file server creation", totalRestores),
 				},
 				{
 					Type:               oadptypes.ConditionTypeAvailable,
-					Status:             metav1.ConditionTrue,
+					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "AllRestoresSucceeded",
-					Message:            fmt.Sprintf("Successfully restored PVCs from %d backups", totalRestores),
+					Reason:             "FileServerPending",
+					Message:            "PVCs restored, file server creation pending",
 				},
 				{
 					Type:               oadptypes.ConditionTypeDegraded,
@@ -861,10 +889,10 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 				},
 				{
 					Type:               oadptypes.ConditionTypeReady,
-					Status:             metav1.ConditionTrue,
+					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "Completed",
-					Message:            "File restore completed successfully",
+					Reason:             "InProgress",
+					Message:            "File server creation pending",
 				},
 			}
 		} else if completed > 0 {
@@ -938,20 +966,75 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 			}
 		}
 
-		// Update workflow conditions to terminal phase
+		// Update workflow conditions
 		if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, finalPhase, conditions, false, logger); err != nil {
 			return false, err
+		}
+
+		if finalPhase == oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress {
+			logger.V(0).Info("Transitioning to file server creation phase")
+			return true, nil // Requeue to enter RestoresCompleted case
 		}
 
 		logger.V(0).Info("Successfully transitioned to terminal phase", "phase", finalPhase)
 		return false, nil // Terminal state - no requeue
 
-	// Step 4: Deploy file server pods (TODO - will be implemented in next PR for issue #7)
-	// case "RestoresCompleted":
-	//     - Validate restored PVCs are bound and healthy
-	//     - Create file server pods/services to expose PVC contents
-	//     - Update FileServingInfo with access details
-	//     - Transition to final Available state
+	// Step 4: Deploy file server pod (pure action step - no validation)
+	// This case is only reached after WaitingForRestores has verified:
+	// - All Velero Restore CRs completed successfully
+	// - All PVCs exist and are ready for mounting
+	case "RestoresCompleted":
+		logger.V(0).Info("Creating file server pod and service (PVCs already validated)")
+
+		// Create file server pod and service
+		// PVCs are in Pending state - they will bind when the pod is created
+		err := r.createFileServerResources(ctx, logger, vmfr)
+		if err != nil {
+			failureMsg := fmt.Sprintf("Failed to create file server resources: %s", err.Error())
+			logger.Error(err, "File server creation failed")
+			return false, r.failValidation(ctx, vmfr, "FileServerCreationFailed", failureMsg, logger)
+		}
+
+		logger.V(0).Info("File server resources created successfully")
+
+		// Update to final Completed phase with Available status
+		conditions := []metav1.Condition{
+			{
+				Type:               oadptypes.ConditionTypeProgressing,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "FileServerCreated",
+				Message:            "File server pod and service created, PVCs binding in progress",
+			},
+			{
+				Type:               oadptypes.ConditionTypeAvailable,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "FileServerAvailable",
+				Message:            "File server is accessible and serving files",
+			},
+			{
+				Type:               oadptypes.ConditionTypeDegraded,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "NoFailures",
+				Message:            "All operations completed successfully",
+			},
+			{
+				Type:               oadptypes.ConditionTypeReady,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             "Completed",
+				Message:            "File restore completed, files accessible via file server",
+			},
+		}
+
+		if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseCompleted, conditions, false, logger); err != nil {
+			return false, err
+		}
+
+		logger.V(0).Info("Successfully transitioned to Completed phase with file server available")
+		return false, nil // Terminal state - no requeue
 
 	default:
 		// Unknown workflow state
@@ -1993,4 +2076,351 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 	}
 
 	return completed, failed, inProgress, statusUpdated, nil
+}
+
+// validateRestoredPVCs validates that all restored PVCs exist and are in valid states
+// Returns true if all PVCs are ready for mounting, false if any are missing
+// Note: PVCs can be in Pending state - they will bind when the pod is created
+func (r *VirtualMachineFileRestoreReconciler) validateRestoredPVCs(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (bool, error) {
+
+	// Get restore namespace where PVCs were created
+	restoreNamespace := vmfr.Status.CreatedNamespace
+	if restoreNamespace == "" {
+		return false, fmt.Errorf("restore namespace not found in status")
+	}
+
+	// Extract PVC names from VMFR status (only completed restores)
+	pvcMounts := extractPVCMountsFromVMFR(vmfr)
+	if len(pvcMounts) == 0 {
+		return false, fmt.Errorf("no completed PVC restores found")
+	}
+
+	logger.V(1).Info("Validating restored PVCs", "count", len(pvcMounts), "namespace", restoreNamespace)
+
+	// Check each PVC exists and is in a valid state
+	allValid := true
+	for _, pvcMount := range pvcMounts {
+		pvc := &corev1.PersistentVolumeClaim{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      pvcMount.PVCName,
+			Namespace: restoreNamespace,
+		}, pvc)
+
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("PVC not yet created by Velero restore",
+					"pvcName", pvcMount.PVCName,
+					"namespace", restoreNamespace)
+				allValid = false
+				continue
+			}
+			return false, fmt.Errorf("failed to get PVC %s: %w", pvcMount.PVCName, err)
+		}
+
+		// Check PVC is in a valid state
+		// Pending is OK - PVC will bind when the pod is created and scheduled
+		// Bound is OK - PVC is already bound (e.g., from previous pod creation attempt)
+		// Lost is NOT OK - indicates permanent failure
+		switch pvc.Status.Phase {
+		case corev1.ClaimPending:
+			logger.V(1).Info("PVC is pending (waiting for pod to trigger binding)",
+				"pvcName", pvcMount.PVCName,
+				"namespace", restoreNamespace)
+		case corev1.ClaimBound:
+			logger.V(1).Info("PVC is already bound",
+				"pvcName", pvcMount.PVCName,
+				"volumeName", pvc.Spec.VolumeName,
+				"namespace", restoreNamespace)
+		case corev1.ClaimLost:
+			logger.Error(nil, "PVC is in Lost state - cannot be used",
+				"pvcName", pvcMount.PVCName,
+				"namespace", restoreNamespace)
+			return false, fmt.Errorf("PVC %s is in Lost state", pvcMount.PVCName)
+		default:
+			logger.V(1).Info("PVC has unknown phase, will attempt to use",
+				"pvcName", pvcMount.PVCName,
+				"phase", pvc.Status.Phase,
+				"namespace", restoreNamespace)
+		}
+
+		logger.V(1).Info("PVC validated successfully",
+			"pvcName", pvcMount.PVCName,
+			"phase", pvc.Status.Phase)
+	}
+
+	if allValid {
+		logger.V(0).Info("All restored PVCs exist and are ready for mounting", "count", len(pvcMounts))
+	} else {
+		logger.V(0).Info("Some PVCs are not yet created, will retry", "totalPVCs", len(pvcMounts))
+	}
+
+	return allValid, nil
+}
+
+// createFileServerResources creates the file server pod and service
+func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) error {
+
+	// Get restore namespace
+	restoreNamespace := vmfr.Status.CreatedNamespace
+	if restoreNamespace == "" {
+		return fmt.Errorf("restore namespace not found in status")
+	}
+
+	// Extract PVC mount information from VMFR status
+	pvcMounts := extractPVCMountsFromVMFR(vmfr)
+	if len(pvcMounts) == 0 {
+		return fmt.Errorf("no PVC mounts found in status")
+	}
+
+	logger.V(0).Info("Creating file server resources",
+		"pvcCount", len(pvcMounts),
+		"namespace", restoreNamespace)
+
+	// Parse FileAccess spec and build SSH/FileBrowser configurations
+	var sshConfig *SSHAccessConfig
+	var fileBrowserConfig *FileBrowserAccessConfig
+
+	// Configure SSH access if enabled
+	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil {
+		sshSpec := vmfr.Spec.FileAccess.SSH
+
+		// Determine username (default: "restore-user")
+		username := sshSpec.Username
+		if username == "" {
+			username = "restore-user"
+		}
+
+		// Determine port (default: 22)
+		port := int32(22)
+		if sshSpec.Port != nil {
+			port = *sshSpec.Port
+		}
+
+		// Handle three credential scenarios:
+		// 1. Secret reference provided
+		// 2. Inline publicKey provided
+		// 3. Neither (generate credentials)
+		if sshSpec.CredentialsSecretRef != nil {
+			// Scenario 1: Use existing Secret
+			secretName := sshSpec.CredentialsSecretRef.Name
+			secretNamespace := sshSpec.CredentialsSecretRef.Namespace
+			if secretNamespace == "" {
+				secretNamespace = vmfr.Namespace
+			}
+
+			// Validate that secret exists
+			secret := &corev1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret); err != nil {
+				return fmt.Errorf("failed to get SSH credentials secret %s/%s: %w", secretNamespace, secretName, err)
+			}
+
+			logger.V(0).Info("Using existing SSH credentials secret", "secretName", secretName, "secretNamespace", secretNamespace)
+
+			sshConfig = &SSHAccessConfig{
+				Username:                   username,
+				PublicKey:                  "", // Will be read from secret
+				CredentialsSecretName:      secretName,
+				CredentialsSecretNamespace: secretNamespace,
+				Port:                       port,
+			}
+		} else if sshSpec.PublicKey != "" {
+			// Scenario 2: Inline publicKey
+			logger.V(0).Info("Using inline SSH public key", "username", username)
+
+			sshConfig = &SSHAccessConfig{
+				Username:  username,
+				PublicKey: sshSpec.PublicKey,
+				Port:      port,
+			}
+		} else {
+			// Scenario 3: Generate SSH keypair and create secret
+			logger.V(0).Info("Generating SSH keypair (no publicKey or secret provided)", "username", username)
+
+			keyPair, err := function.GenerateSSHKeyPair(logger)
+			if err != nil {
+				return fmt.Errorf("failed to generate SSH keypair: %w", err)
+			}
+
+			// Create secret with generated credentials in restore namespace
+			secretName := fmt.Sprintf("%s-ssh-creds", vmfr.Name)
+			secret := function.CreateSSHCredentialsSecret(
+				secretName,
+				restoreNamespace,
+				username,
+				keyPair,
+				vmfr.Name,
+				vmfr.Namespace,
+				vmfr.UID,
+				logger,
+			)
+
+			if err := r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("failed to create SSH credentials secret: %w", err)
+			}
+
+			logger.V(0).Info("Created SSH credentials secret", "secretName", secretName, "namespace", restoreNamespace)
+
+			sshConfig = &SSHAccessConfig{
+				Username:                   username,
+				PublicKey:                  "", // Will be read from secret
+				CredentialsSecretName:      secretName,
+				CredentialsSecretNamespace: restoreNamespace,
+				Port:                       port,
+			}
+		}
+	}
+
+	// Configure FileBrowser access if enabled
+	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.FileBrowser != nil {
+		fbSpec := vmfr.Spec.FileAccess.FileBrowser
+
+		// Determine port (default: 443)
+		port := int32(443)
+		if fbSpec.Port != nil {
+			port = *fbSpec.Port
+		}
+
+		// Handle credentials: either from secret or generated
+		if fbSpec.CredentialsSecretRef != nil {
+			// Use existing Secret
+			secretName := fbSpec.CredentialsSecretRef.Name
+			secretNamespace := fbSpec.CredentialsSecretRef.Namespace
+			if secretNamespace == "" {
+				secretNamespace = vmfr.Namespace
+			}
+
+			// Validate that secret exists
+			secret := &corev1.Secret{}
+			if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret); err != nil {
+				return fmt.Errorf("failed to get FileBrowser credentials secret %s/%s: %w", secretNamespace, secretName, err)
+			}
+
+			logger.V(0).Info("Using existing FileBrowser credentials secret", "secretName", secretName, "secretNamespace", secretNamespace)
+
+			fileBrowserConfig = &FileBrowserAccessConfig{
+				CredentialsSecretName:      secretName,
+				CredentialsSecretNamespace: secretNamespace,
+				Port:                       port,
+			}
+		} else {
+			// Generate FileBrowser credentials and create secret
+			logger.V(0).Info("Generating FileBrowser credentials (no secret provided)")
+
+			credentials, err := function.GenerateFileBrowserCredentials("", logger) // Use default username
+			if err != nil {
+				return fmt.Errorf("failed to generate FileBrowser credentials: %w", err)
+			}
+
+			// Create secret with generated credentials in restore namespace
+			secretName := fmt.Sprintf("%s-filebrowser-creds", vmfr.Name)
+			secret := function.CreateFileBrowserCredentialsSecret(
+				secretName,
+				restoreNamespace,
+				credentials,
+				vmfr.Name,
+				vmfr.Namespace,
+				vmfr.UID,
+				logger,
+			)
+
+			if err := r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("failed to create FileBrowser credentials secret: %w", err)
+			}
+
+			logger.V(0).Info("Created FileBrowser credentials secret", "secretName", secretName, "namespace", restoreNamespace, "username", credentials.Username)
+
+			fileBrowserConfig = &FileBrowserAccessConfig{
+				CredentialsSecretName:      secretName,
+				CredentialsSecretNamespace: restoreNamespace,
+				Port:                       port,
+			}
+		}
+	}
+
+	// Build pod configuration with parsed access methods
+	podConfig := FileServerPodConfig{
+		PodName:              fmt.Sprintf("%s-fileserver", vmfr.Name),
+		PodNamespace:         restoreNamespace,
+		VMFRName:             vmfr.Name,
+		VMFRNamespace:        vmfr.Namespace,
+		VMFRUID:              string(vmfr.UID),
+		PVCMounts:            pvcMounts,
+		MainContainer:        nil,               // Use default busybox HTTP server
+		SSHAccess:            sshConfig,         // Configured SSH access (or nil)
+		FileBrowserAccess:    fileBrowserConfig, // Configured FileBrowser access (or nil)
+		EnableDualPathAccess: true,              // Enable dual-path symlinks
+		UseInternalMounts:    false,             // Use Kubernetes-managed PVC mounts
+	}
+
+	logger.V(0).Info("File server configuration prepared",
+		"sshEnabled", sshConfig != nil,
+		"fileBrowserEnabled", fileBrowserConfig != nil)
+
+	// Build pod spec
+	pod, err := buildFileServerPodSpec(podConfig)
+	if err != nil {
+		return fmt.Errorf("failed to build pod spec: %w", err)
+	}
+
+	// Create the pod
+	err = r.Create(ctx, pod)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			logger.V(1).Info("File server pod already exists", "podName", pod.Name)
+		} else {
+			return fmt.Errorf("failed to create file server pod: %w", err)
+		}
+	} else {
+		logger.V(0).Info("Created file server pod", "podName", pod.Name, "namespace", pod.Namespace)
+	}
+
+	// Build service configuration
+	// Gather service ports based on enabled access methods
+	servicePorts := gatherServicePorts(podConfig.SSHAccess, podConfig.FileBrowserAccess)
+
+	serviceConfig := ServiceConfig{
+		ServiceName:      fmt.Sprintf("%s-fileserver-svc", vmfr.Name),
+		ServiceNamespace: restoreNamespace,
+		VMFRName:         vmfr.Name,
+		VMFRNamespace:    vmfr.Namespace,
+		VMFRUID:          string(vmfr.UID),
+		Ports:            servicePorts,
+		ServiceType:      corev1.ServiceTypeClusterIP,
+	}
+
+	// Build service spec
+	service, err := buildFileServerService(serviceConfig)
+	if err != nil {
+		return fmt.Errorf("failed to build service spec: %w", err)
+	}
+
+	// Create the service
+	err = r.Create(ctx, service)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			logger.V(1).Info("File server service already exists", "serviceName", service.Name)
+		} else {
+			return fmt.Errorf("failed to create file server service: %w", err)
+		}
+	} else {
+		logger.V(0).Info("Created file server service",
+			"serviceName", service.Name,
+			"namespace", service.Namespace,
+			"port", servicePorts[0].Port)
+	}
+
+	logger.V(0).Info("File server resources created successfully",
+		"podName", pod.Name,
+		"serviceName", service.Name,
+		"namespace", restoreNamespace)
+
+	return nil
 }
