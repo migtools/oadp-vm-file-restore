@@ -1,0 +1,45 @@
+---
+# Simulate Backup 1 - Clone current VM disk (Jan 15 snapshot)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-20240115-rootdisk
+  namespace: oadp-file-server-live-test
+  labels:
+    backup: "20240115"
+    vm: test-vm-live
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Block
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ocs-storagecluster-ceph-rbd-virtualization
+  dataSource:
+    kind: PersistentVolumeClaim
+    name: test-vm-live-rootdisk
+
+---
+# Simulate Backup 2 - Another clone (Jan 20 snapshot)
+# Note: For this test, data is identical to Backup 1
+# In real scenario, this would be a different backup timepoint
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-20240120-rootdisk
+  namespace: oadp-file-server-live-test
+  labels:
+    backup: "20240120"
+    vm: test-vm-live
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Block
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ocs-storagecluster-ceph-rbd-virtualization
+  dataSource:
+    kind: PersistentVolumeClaim
+    name: test-vm-live-rootdisk

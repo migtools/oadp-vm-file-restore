@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: file-server-multi-backup
+  namespace: oadp-file-server-live-test
+  labels:
+    app: oadp-file-server
+    test: multi-backup
+spec:
+  securityContext:
+    fsGroup: 107
+    supplementalGroups: [107]
+
+  containers:
+  - name: file-server
+    image: quay.io/spampatt/oadp-vm-file-server:amd64-multibackup
+    imagePullPolicy: Always
+
+    # Run detect-and-mount.sh with BACKUP_PVC_MAP
+    command: ["/usr/local/bin/detect-and-mount.sh"]
+
+    env:
+    - name: HOME
+      value: /tmp
+
+    # BACKUP_PVC_MAP - Maps backup names to PVC paths
+    - name: BACKUP_PVC_MAP
+      value: |
+        {
+          "backup-20240115": [
+            {"name": "rootdisk", "path": "/mnt/volumes/backup-20240115/rootdisk"}
+          ],
+          "backup-20240120": [
+            {"name": "rootdisk", "path": "/mnt/volumes/backup-20240120/rootdisk"}
+          ]
+        }
+
+    securityContext:
+      privileged: true
+      runAsUser: 107
+      runAsGroup: 107
+
+    volumeDevices:
+    # Backup 1 - rootdisk
+    - name: backup1-rootdisk
+      devicePath: /mnt/volumes/backup-20240115/rootdisk/disk.img
+
+    # Backup 2 - rootdisk
+    - name: backup2-rootdisk
+      devicePath: /mnt/volumes/backup-20240120/rootdisk/disk.img
+
+    volumeMounts:
+    - name: fuse-device
+      mountPath: /dev/fuse
+    - name: kvm-device
+      mountPath: /dev/kvm
+    - name: filesystems
+      mountPath: /mnt/filesystems
+
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "3Gi"
+        cpu: "2000m"
+
+  volumes:
+  - name: fuse-device
+    hostPath:
+      path: /dev/fuse
+      type: CharDevice
+
+  - name: kvm-device
+    hostPath:
+      path: /dev/kvm
+      type: CharDevice
+
+  # Backup 1 PVC
+  - name: backup1-rootdisk
+    persistentVolumeClaim:
+      claimName: backup-20240115-rootdisk
+
+  # Backup 2 PVC
+  - name: backup2-rootdisk
+    persistentVolumeClaim:
+      claimName: backup-20240120-rootdisk
+
+  - name: filesystems
+    emptyDir: {}
+
+  restartPolicy: Never

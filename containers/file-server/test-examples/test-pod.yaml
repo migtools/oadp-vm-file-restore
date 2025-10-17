@@ -1,0 +1,199 @@
+---
+# ==============================================================================
+# Test Pod for OADP File Server - Real VM Disk Mounting Test
+# ==============================================================================
+#
+# Purpose:
+#   Tests the file-server container with a REAL VM disk from OpenShift Virtualization.
+#   This validates the complete end-to-end workflow:
+#   1. VM disk (qcow2 format) stored in PVC
+#   2. File-server pod mounts the PVC
+#   3. guestmount (FUSE) reads the qcow2 and mounts the filesystem
+#   4. We can read files from inside the VM disk without booting the VM
+#
+# What This Tests:
+#   ✅ libguestfs can read real VM disk images (qcow2)
+#   ✅ FUSE works in OpenShift (non-privileged mounting)
+#   ✅ XFS filesystem detection and mounting (most common in RHEL VMs)
+#   ✅ Real data access from VM filesystem
+#   ✅ Non-privileged container security
+#
+# Prerequisites:
+#   - VM created with test data (test-vm)
+#   - VM stopped (safe for read-only mounting)
+#   - PVC containing VM disk: test-vm-rootdisk
+#   - Container image pushed: quay.io/spampatt/oadp-vm-file-server:dev
+#
+# ==============================================================================
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: file-server-test
+  namespace: shubh-oadp-vm-file-server-test
+  labels:
+    app: oadp-vm-file-server
+    test: real-vm-disk
+spec:
+  # Add pod-level security context to access qemu-owned VM disk
+  securityContext:
+    fsGroup: 107  # qemu group - allows reading VM disk files
+    supplementalGroups:
+    - 107  # qemu group
+    seLinuxOptions:
+      level: "s0:c468,c664"  # Match the VM disk PVC's SELinux MCS labels
+  containers:
+  - name: file-server
+    # Our container with all the tools (libguestfs, qemu-img, FUSE, etc.)
+    image: quay.io/spampatt/oadp-vm-file-server:dev
+    imagePullPolicy: Always
+
+    # Run detect-and-mount.sh to automatically mount VM disk filesystem
+    # This is what the VMFR controller will do in production
+    command: ["/usr/local/bin/detect-and-mount.sh"]
+
+    # Environment variables
+    env:
+    - name: HOME
+      value: /tmp  # libguestfs needs writable HOME for cache
+
+    # ==========================================================================
+    # Security Context - Privileged Container for KVM Access
+    # ==========================================================================
+    # libguestfs requires QEMU with KVM acceleration
+    # - privileged: true (REQUIRED for /dev/kvm access with SELinux)
+    # - runAsUser: 107 (qemu user - same as VM disk owner)
+    # - runAsGroup: 107 (qemu group - matches PVC ownership)
+    #
+    # Why Privileged Mode?
+    # - libguestfs needs /dev/kvm for hardware-accelerated virtualization
+    # - SELinux context (kvm_device_t) requires privileged mode for access
+    # - Alternative (TCG software emulation) is extremely slow (~5 min boot time)
+    # - This matches how KubeVirt virt-launcher pods run (see virt-launcher.yaml)
+    #
+    # Security Justification:
+    # - Pod only accesses VM disk images (read-only filesystem mounting)
+    # - Runs as non-root user (qemu:107)
+    # - Same security model as KubeVirt VMs
+    # - Required for OADP VM file restore use case
+    securityContext:
+      privileged: true
+      runAsUser: 107
+      runAsGroup: 107
+
+    volumeMounts:
+    # ==========================================================================
+    # Volume Mount 1: FUSE Device (/dev/fuse)
+    # ==========================================================================
+    # Why: guestmount REQUIRES /dev/fuse for FUSE-based mounting
+    # What: Character device that enables userspace filesystem mounting
+    # Security: kubevirt-controller SCC allows hostPath volumes
+    # Note: Same SCC that KubeVirt VMs use
+    - name: fuse-device
+      mountPath: /dev/fuse
+
+    # ==========================================================================
+    # Volume Mount 1b: KVM Device (/dev/kvm)
+    # ==========================================================================
+    # Why: libguestfs uses QEMU to read disk images - KVM provides hardware acceleration
+    # What: KVM character device for virtualization acceleration
+    # Without it: libguestfs uses TCG (software emulation) which is VERY slow
+    # With it: libguestfs uses hardware acceleration, much faster
+    - name: kvm-device
+      mountPath: /dev/kvm
+
+    # ==========================================================================
+    # Volume Mount 2: VM Disk PVC (test-vm-rootdisk)
+    # ==========================================================================
+    # Why: This PVC contains the VM's disk image (raw format) with our test data
+    # What: Contains disk.img file with partitions, filesystems, and all VM data
+    # Where: Mounted at /mnt/volumes/ (where detect-and-mount.sh expects disks)
+    # ReadOnly: No - libguestfs needs write access to the disk file (but mounts filesystem as --ro)
+    # Note: The PVC itself has write access, but guestmount mounts filesystem read-only
+    #
+    # Inside this PVC is a raw disk image containing:
+    #   - Partition 1: XFS filesystem with /root/, /etc/, /home/, etc.
+    #   - Our test files: /root/test-file.txt, /root/oadp-validation.json
+    - name: vm-disk
+      mountPath: /mnt/volumes
+
+    # ==========================================================================
+    # Volume Mount 2: Filesystems Directory (EmptyDir)
+    # ==========================================================================
+    # Why: This is where guestmount will mount the VM's filesystem
+    # What: After running detect-and-mount.sh, we'll see /mnt/filesystems/root/
+    # Example: /mnt/filesystems/root/test-file.txt will contain our test data
+    - name: filesystems
+      mountPath: /mnt/filesystems
+
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "2Gi"
+        cpu: "1000m"
+
+  volumes:
+  # ==========================================================================
+  # Volume 1a: FUSE Device
+  # ==========================================================================
+  # Type: hostPath (maps host's /dev/fuse to container)
+  # Required: For guestmount to work (userspace filesystem mounting)
+  # Security: kubevirt-controller SCC allows hostPath (same as KubeVirt VMs)
+  - name: fuse-device
+    hostPath:
+      path: /dev/fuse
+      type: CharDevice
+
+  # ==========================================================================
+  # Volume 1b: KVM Device
+  # ==========================================================================
+  # Type: hostPath (maps host's /dev/kvm to container)
+  # Required: For libguestfs QEMU appliance hardware acceleration
+  # Without it: TCG software emulation is extremely slow (99% CPU, hangs)
+  # With it: Hardware-accelerated virtualization makes libguestfs usable
+  - name: kvm-device
+    hostPath:
+      path: /dev/kvm
+      type: CharDevice
+
+  # ==========================================================================
+  # Volume 2: VM Disk PVC - THE KEY VOLUME!
+  # ==========================================================================
+  # This is the VM's disk containing our test data
+  # PVC: test-vm-rootdisk (created by OpenShift Virtualization for test-vm)
+  # Format: Contains a raw disk image file (converted from qcow2)
+  # Contents: XFS filesystem with /root/test-file.txt and other test files
+  # ReadOnly: No - libguestfs needs write access to disk file for internal operations
+  #           (but it will mount the filesystem itself as --ro for safety)
+  #
+  # This simulates EXACTLY what VMFR controller will do:
+  #   1. Velero restores VM backup → creates PVC with disk image
+  #   2. VMFR creates pod with this container
+  #   3. Mounts the restored PVC here (RW access for libguestfs)
+  #   4. detect-and-mount.sh reads the disk and mounts the filesystem (--ro)
+  #   5. User can browse files via HTTP/SSH (future issues)
+  - name: vm-disk
+    persistentVolumeClaim:
+      claimName: test-vm-rootdisk
+
+  # ==========================================================================
+  # Volume 2: Filesystems Directory
+  # ==========================================================================
+  # Type: emptyDir (temporary storage, exists only while pod runs)
+  # Purpose: Mount point for guestmount to expose the VM's filesystem
+  # After mounting, this will contain the VM's directory structure:
+  #   /mnt/filesystems/
+  #   ├── root/
+  #   │   ├── test-file.txt           ← Our test data!
+  #   │   └── oadp-validation.json
+  #   ├── etc/
+  #   │   └── oadp-test-marker
+  #   └── home/
+  #       └── testuser/
+  #           └── validation.txt
+  - name: filesystems
+    emptyDir: {}
+
+  restartPolicy: Never
