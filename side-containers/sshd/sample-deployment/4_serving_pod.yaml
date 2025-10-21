@@ -1,0 +1,197 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: file-serving-pod
+  namespace: vmfr-pod-test
+  labels:
+    app: file-serving-pod
+spec:
+  # Share process namespace to allow containers to work together
+  shareProcessNamespace: true
+
+  # Pod-level security context to set fsGroup for volume ownership
+  securityContext:
+    fsGroup: 1001  # Files created in emptyDir volumes will be owned by GID 1001
+
+  initContainers:
+  # Privileged init container to create sample data and perform any mounts
+  - name: setup-data
+    image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -ex
+        # OADP user will have UID 1001
+        OADP_UID=1001
+        OADP_GID=1001
+
+        # Create sample directory structure
+        mkdir -p /restores/sampledata/vm1/disk1
+        mkdir -p /restores/sampledata/vm1/disk2
+        mkdir -p /restores/sampledata/vm2/disk1
+
+        # Create some sample files
+        echo "Sample data for VM1 disk1" > /restores/sampledata/vm1/disk1/data.txt
+        echo "Sample data for VM1 disk2" > /restores/sampledata/vm1/disk2/data.txt
+        echo "Sample data for VM2 disk1" > /restores/sampledata/vm2/disk1/data.txt
+
+        # Create a test directory to verify write permissions work
+        mkdir -p /restores/sampledata/test-write
+
+        # Set ownership to oadp user (UID 1001)
+        chown -R ${OADP_UID}:${OADP_GID} /restores/sampledata
+
+        # Set permissions to allow oadp user full access
+        chmod -R 755 /restores/sampledata
+
+        echo "Sample data setup complete - owned by UID ${OADP_UID}"
+        ls -lan /restores/sampledata/
+    volumeMounts:
+    - name: restores-volume
+      mountPath: /restores
+    securityContext:
+      privileged: true
+      runAsUser: 0
+
+  containers:
+  # Main container - non-privileged, just keeps pod running and provides access to data
+  - name: main
+    image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "Main container started - data is available at /restores/"
+        echo "Listing /restores/sampledata/ contents:"
+        ls -la /restores/sampledata/ 2>/dev/null || echo "Cannot list (running as non-root)"
+        # Keep container running
+        tail -f /dev/null
+    volumeMounts:
+    - name: restores-volume
+      mountPath: /restores
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      runAsUser: 1000
+      capabilities:
+        drop:
+        - ALL
+
+  # SSHD sidecar container - provides read-only access via rsync/sftp with chroot
+  # Uses custom pre-built image with chroot environment
+  - name: sshd
+    image: quay.io/migtools/oadp-vmfr-sshd:latest
+    ports:
+    - containerPort: 2222
+      name: ssh
+      protocol: TCP
+    volumeMounts:
+    - name: restores-volume
+      mountPath: /oadp/restores
+      readOnly: true  # Read-only access for security
+    - name: ssh-secret
+      mountPath: /ssh-config
+      readOnly: true
+    # Mount authorized_keys directly from secret to avoid permission issues
+    - name: ssh-secret
+      mountPath: /oadp/.ssh/authorized_keys
+      subPath: authorized_keys
+      readOnly: true
+    - name: ssh-etc
+      mountPath: /etc
+    - name: ssh-run
+      mountPath: /run
+    - name: ssh-tmp
+      mountPath: /tmp
+    - name: ssh-dev
+      mountPath: /oadp/dev
+    - name: ssh-oadp-etc
+      mountPath: /oadp/etc
+    securityContext:
+      # SSHD needs to run as root for authentication and chroot
+      runAsUser: 0
+      # Read-only root filesystem for additional security
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      # Minimal capabilities - only what's absolutely needed
+      capabilities:
+        add:
+        - AUDIT_WRITE      # Required for PAM audit logging (RHEL requirement)
+        - CHOWN            # Required to set ownership of SSH directory at startup
+        - DAC_READ_SEARCH  # Allows reading files regardless of ownership/permissions
+        - MKNOD            # Required to create device nodes in /oadp/dev
+        - SETGID           # Required for sshd to drop privileges
+        - SETUID           # Required for sshd to drop privileges
+        - SYS_CHROOT       # Required for ChrootDirectory
+        drop:
+        - ALL
+
+  volumes:
+  - name: restores-volume
+    persistentVolumeClaim:
+      claimName: restores-pvc
+  - name: ssh-secret
+    secret:
+      secretName: ssh-oadp
+      defaultMode: 0400
+  # Tmpfs volumes for read-only root filesystem and runtime directories
+  - name: ssh-etc
+    emptyDir:
+      medium: Memory
+      sizeLimit: 10Mi  # For /etc files and user/group databases
+  - name: ssh-run
+    emptyDir:
+      medium: Memory
+      sizeLimit: 10Mi
+  - name: ssh-tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 50Mi
+  - name: ssh-dev
+    emptyDir:
+      medium: Memory
+      sizeLimit: 1Mi  # For device nodes in chroot
+  - name: ssh-oadp-etc
+    emptyDir:
+      medium: Memory
+      sizeLimit: 1Mi  # For passwd/group files in chroot
+
+  restartPolicy: Always
+---
+# Service to expose SSH port
+apiVersion: v1
+kind: Service
+metadata:
+  name: file-serving-ssh
+  namespace: vmfr-pod-test
+  labels:
+    app: file-serving-pod
+spec:
+  selector:
+    # Add this label to the pod metadata.labels if using selector-based service
+    app: file-serving-pod
+  type: ClusterIP
+  ports:
+  - name: ssh
+    port: 2222
+    targetPort: 2222
+    protocol: TCP
+---
+# Optional: Route for external SSH access (OpenShift specific)
+# Uncomment if you need external access via OpenShift route
+# Note: SSH over Route requires passthrough
+# apiVersion: route.openshift.io/v1
+# kind: Route
+# metadata:
+#   name: file-serving-ssh
+#   namespace: vmfr-pod-test
+# spec:
+#   to:
+#     kind: Service
+#     name: file-serving-ssh
+#   port:
+#     targetPort: ssh
+#   tls:
+#     termination: passthrough

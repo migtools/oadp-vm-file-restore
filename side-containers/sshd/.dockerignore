@@ -1,0 +1,36 @@
+# Ignore all markdown files except README.md in root
+*.md
+!README.md
+
+# Ignore git files
+.git
+.gitignore
+.gitattributes
+
+# Ignore CI/CD files
+.github
+.gitlab-ci.yml
+
+# Ignore test files
+test-*
+*_test.sh
+
+# Ignore build artifacts
+*.tar
+*.tar.gz
+*.zip
+
+# Ignore editor/IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore oadp sample keys
+oadp-key
+oadp-key.pub
