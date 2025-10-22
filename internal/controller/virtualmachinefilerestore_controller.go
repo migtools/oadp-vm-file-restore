@@ -1876,9 +1876,15 @@ func (r *VirtualMachineFileRestoreReconciler) createVeleroRestores(
 				},
 			},
 			Spec: veleroapi.RestoreSpec{
-				BackupName:         backupName,
-				LabelSelector:      labelSelector,
-				IncludedNamespaces: []string{restoreNamespace},
+				BackupName:    backupName,
+				LabelSelector: labelSelector,
+				// Use original VM namespace for filtering backed-up resources
+				IncludedNamespaces: []string{vmbd.Spec.VirtualMachineNamespace},
+				// Map original namespace to restore namespace
+				NamespaceMapping: map[string]string{
+					vmbd.Spec.VirtualMachineNamespace: restoreNamespace,
+				},
+				// Only restore PVCs and VolumeSnapshots
 				IncludedResources: []string{
 					"persistentvolumeclaims",
 					"volumesnapshots",
