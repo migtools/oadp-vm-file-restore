@@ -27,7 +27,10 @@ import (
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
 )
 
-const testUsername = "testuser"
+const (
+	testUsername = "testuser"
+	testVMFRName = "test-vmfr"
+)
 
 func TestGenerateSSHKeyPair(t *testing.T) {
 	logger := logr.Discard()
@@ -145,7 +148,7 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 		"test-namespace",
 		testUsername,
 		keyPair,
-		"test-vmfr",
+		testVMFRName,
 		"vmfr-namespace",
 		apitypes.UID("test-uid"),
 		logger,
@@ -168,7 +171,7 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 		}
 
 		// Check annotations
-		if secret.Annotations[constant.VMFROriginNameAnnotation] != "test-vmfr" {
+		if secret.Annotations[constant.VMFROriginNameAnnotation] != testVMFRName {
 			t.Errorf("Expected name annotation 'test-vmfr', got '%s'", secret.Annotations[constant.VMFROriginNameAnnotation])
 		}
 		if secret.Annotations[constant.VMFROriginNamespaceAnnotation] != "vmfr-namespace" {
@@ -194,7 +197,7 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 		}
 
 		owner := secret.OwnerReferences[0]
-		if owner.Name != "test-vmfr" {
+		if owner.Name != testVMFRName {
 			t.Errorf("Expected owner name 'test-vmfr', got '%s'", owner.Name)
 		}
 		if owner.Kind != "VirtualMachineFileRestore" {
@@ -218,7 +221,7 @@ func TestCreateFileBrowserCredentialsSecret(t *testing.T) {
 		"fb-secret",
 		"test-namespace",
 		creds,
-		"test-vmfr",
+		testVMFRName,
 		"vmfr-namespace",
 		apitypes.UID("test-uid"),
 		logger,
@@ -238,7 +241,7 @@ func TestCreateFileBrowserCredentialsSecret(t *testing.T) {
 		}
 
 		// Check annotations
-		if secret.Annotations[constant.VMFROriginNameAnnotation] != "test-vmfr" {
+		if secret.Annotations[constant.VMFROriginNameAnnotation] != testVMFRName {
 			t.Errorf("Expected name annotation 'test-vmfr', got '%s'", secret.Annotations[constant.VMFROriginNameAnnotation])
 		}
 		if secret.Annotations[constant.VMFROriginNamespaceAnnotation] != "vmfr-namespace" {
@@ -341,7 +344,7 @@ func TestGenerateVeleroRestorePrefix(t *testing.T) {
 
 	t.Run("generates correct prefix", func(t *testing.T) {
 		prefix := GenerateVeleroRestorePrefix(
-			"test-vmfr",
+			testVMFRName,
 			"test-backup",
 			logger,
 		)
