@@ -88,6 +88,76 @@ type VirtualMachineFileRestoreSpec struct {
 	// The final namespace name will be: <prefix>-<vm-namespace>-<vm-name>-<suffix>
 	// +optional
 	NamespacePrefix string `json:"namespacePrefix,omitempty"`
+
+	// FileAccess defines which file access methods are enabled for this restore.
+	// If not specified, defaults to HTTP file browser only.
+	// +optional
+	FileAccess *FileAccessSpec `json:"fileAccess,omitempty"`
+}
+
+// FileAccessSpec defines the file access methods available for the restored files
+type FileAccessSpec struct {
+	// SSH provides read-only access to restored files via chrooted OpenSSH.
+	// Supports SFTP, SCP, and rsync for file transfer only (no interactive shell access).
+	// The SSH server runs in a chroot environment for security isolation.
+	// +optional
+	SSH *SSHAccessSpec `json:"ssh,omitempty"`
+
+	// FileBrowser enables HTTPS web-based file browser access
+	// If present (non-nil), FileBrowser access is enabled
+	// +optional
+	FileBrowser *FileBrowserAccessSpec `json:"fileBrowser,omitempty"`
+}
+
+// SSHAccessSpec configures read-only SSH file access to restored files.
+// Only SFTP, SCP, and rsync protocols are supported in a chrooted environment.
+// Interactive shell access is disabled for security.
+type SSHAccessSpec struct {
+	// Username for SSH access
+	// Defaults to "oadp" if not specified
+	// +optional
+	Username string `json:"username,omitempty"`
+
+	// PublicKey for SSH key-based authentication
+	// Public keys are not sensitive and can be specified inline
+	// If both PublicKey and CredentialsSecretRef are empty, controller generates keypair
+	// +optional
+	PublicKey string `json:"publicKey,omitempty"`
+
+	// CredentialsSecretRef references a Secret containing SSH authentication credentials.
+	// The Secret must have a "publicKey" key for SSH key-based authentication.
+	// The "username" key is optional and defaults to "oadp" if not provided.
+	// Note: Only SSH key-based authentication is supported; password authentication is not available.
+	// Takes precedence over inline Username and PublicKey fields.
+	// +optional
+	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// FileBrowserAccessSpec configures HTTPS file browser access
+type FileBrowserAccessSpec struct {
+	// CredentialsSecretRef references a Secret containing FileBrowser credentials.
+	// The Secret must have a "password" key and optionally a "username" key.
+	// If "username" is not provided in the Secret, it defaults to "oadp".
+	// If CredentialsSecretRef is not specified, the controller generates both
+	// username (defaults to "oadp") and password, storing them in a Secret
+	// in the temporary restore namespace.
+	// +optional
+	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// SecretReference identifies a Secret by name and optional namespace
+type SecretReference struct {
+	// Name of the Secret
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Name string `json:"name"`
+
+	// Namespace where the Secret is located.
+	// Defaults to the OADP namespace when not specified.
+	// Note: Secrets outside TemporaryRestoreNamespace are automatically
+	// copied to that namespace for mounting in the serving pod.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // VirtualMachineFileRestoreStatus defines the observed state of VirtualMachineFileRestore.

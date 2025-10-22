@@ -91,3 +91,53 @@ const (
 	// Use Case: Simple readiness check for automation
 	ConditionTypeReady = "Ready"
 )
+
+// Common condition reasons used across both VirtualMachineBackupsDiscovery and VirtualMachineFileRestore
+const (
+	// Shared Progressing reasons
+	ReasonInProgress = "InProgress"
+	ReasonFailed     = "Failed"
+
+	// Shared Available reasons
+	ReasonNotStarted = "NotStarted"
+
+	// Shared Degraded reasons
+	ReasonNoFailures      = "NoFailures"
+	ReasonCriticalFailure = "CriticalFailure"
+	ReasonPartialFailure  = "PartialFailure"
+
+	// Shared Ready reasons
+	ReasonNotReady        = "NotReady"
+	ReasonCompleted       = "Completed"
+	ReasonPartiallyFailed = "PartiallyFailed"
+)
+
+// VirtualMachineFileRestore specific condition reasons
+const (
+	// Progressing condition reasons
+	ReasonInitialized                   = "Initialized"
+	ReasonValidating                    = "Validating"
+	ReasonValidationCompleted           = "ValidationCompleted"
+	ReasonValidationFailed              = "ValidationFailed"
+	ReasonPartialValidationFailed       = "PartialValidationFailed"
+	ReasonDiscoveringPVCs               = "DiscoveringPVCs"
+	ReasonWaitingForDiscovery           = "WaitingForDiscovery"
+	ReasonNamespaceReady                = "NamespaceReady"
+	ReasonWaitingForRestores            = "WaitingForRestores"
+	ReasonRestoresCompleted             = "RestoresCompleted"
+	ReasonRestoresCompletedWithFailures = "RestoresCompletedWithFailures"
+	ReasonRestoresFailed                = "RestoresFailed"
+	ReasonFileServerCreated             = "FileServerCreated"
+
+	// Available condition reasons
+	ReasonDiscoveryInProgress   = "DiscoveryInProgress"
+	ReasonPreparingRestores     = "PreparingRestores"
+	ReasonRestoresInProgress    = "RestoresInProgress"
+	ReasonFileServerPending     = "FileServerPending"
+	ReasonFileServerAvailable   = "FileServerAvailable"
+	ReasonPartialRestoreSuccess = "PartialRestoreSuccess"
+	ReasonAllRestoresFailed     = "AllRestoresFailed"
+
+	// Degraded condition reasons
+	ReasonSomeRestoresFailed = "SomeRestoresFailed"
+)
