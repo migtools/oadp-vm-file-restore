@@ -2193,17 +2193,14 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil {
 		sshSpec := vmfr.Spec.FileAccess.SSH
 
-		// Determine username (default: "restore-user")
+		// Determine username (default: constant.DefaultSSHUsername = "oadp")
 		username := sshSpec.Username
 		if username == "" {
-			username = "restore-user"
+			username = constant.DefaultSSHUsername
 		}
 
-		// Determine port (default: 22)
-		port := int32(22)
-		if sshSpec.Port != nil {
-			port = *sshSpec.Port
-		}
+		// Use default SSH port
+		port := int32(constant.DefaultSSHPort)
 
 		// Handle three credential scenarios:
 		// 1. Secret reference provided
@@ -2283,11 +2280,8 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.FileBrowser != nil {
 		fbSpec := vmfr.Spec.FileAccess.FileBrowser
 
-		// Determine port (default: 443)
-		port := int32(443)
-		if fbSpec.Port != nil {
-			port = *fbSpec.Port
-		}
+		// Use default FileBrowser port
+		port := int32(constant.DefaultFileBrowserPort)
 
 		// Handle credentials: either from secret or generated
 		if fbSpec.CredentialsSecretRef != nil {
@@ -2354,11 +2348,11 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		VMFRNamespace:        vmfr.Namespace,
 		VMFRUID:              string(vmfr.UID),
 		PVCMounts:            pvcMounts,
-		MainContainer:        ptr.To(buildVMFileServerMainContainer(pvcMounts)), // Use VM file server for disk mounting
-		SSHAccess:            sshConfig,                                         // Configured SSH access (or nil)
-		FileBrowserAccess:    fileBrowserConfig,                                 // Configured FileBrowser access (or nil)
-		EnableDualPathAccess: true,                                              // Enable dual-path symlinks
-		UseInternalMounts:    false,                                             // Use Kubernetes-managed PVC mounts
+		MainContainer:        ptr.To(buildVMFileServerMainContainer()), // Use VM file server for disk mounting
+		SSHAccess:            sshConfig,                                // Configured SSH access (or nil)
+		FileBrowserAccess:    fileBrowserConfig,                        // Configured FileBrowser access (or nil)
+		EnableDualPathAccess: true,                                     // Enable dual-path symlinks
+		UseInternalMounts:    false,                                    // Use Kubernetes-managed PVC mounts
 	}
 
 	logger.V(0).Info("File server configuration prepared",

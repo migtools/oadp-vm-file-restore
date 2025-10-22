@@ -70,11 +70,12 @@ spec:
                     properties:
                       credentialsSecretRef:
                         description: |-
-                          CredentialsSecretRef references a Secret containing username and password
-                          The Secret must have keys "username" and "password"
-                          If not specified, controller generates credentials and stores them in a Secret
-                          in the temporary restore namespace
-                          The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+                          CredentialsSecretRef references a Secret containing FileBrowser credentials.
+                          The Secret must have a "password" key and optionally a "username" key.
+                          If "username" is not provided in the Secret, it defaults to "oadp".
+                          If CredentialsSecretRef is not specified, the controller generates both
+                          username (defaults to "oadp") and password, storing them in a Secret
+                          in the temporary restore namespace.
                         properties:
                           name:
                             description: Name of the Secret
@@ -82,33 +83,28 @@ spec:
                             type: string
                           namespace:
                             description: |-
-                              Namespace of the Secret
-                              If not specified, defaults to the VirtualMachineFileRestore's namespace
+                              Namespace where the Secret is located.
+                              Defaults to the OADP namespace when not specified.
+                              Note: Secrets outside TemporaryRestoreNamespace are automatically
+                              copied to that namespace for mounting in the serving pod.
                             type: string
                         required:
                         - name
                         type: object
-                      port:
-                        description: |-
-                          Port for FileBrowser HTTPS service
-                          Defaults to 443 if not specified
-                        format: int32
-                        maximum: 65535
-                        minimum: 1
-                        type: integer
                     type: object
                   ssh:
                     description: |-
-                      SSH enables SSH/SFTP/SCP/rsync access to restored files
-                      If present (non-nil), SSH access is enabled
+                      SSH provides read-only access to restored files via chrooted OpenSSH.
+                      Supports SFTP, SCP, and rsync for file transfer only (no interactive shell access).
+                      The SSH server runs in a chroot environment for security isolation.
                     properties:
                       credentialsSecretRef:
                         description: |-
-                          CredentialsSecretRef references a Secret containing authentication credentials
-                          Use this when you want to provide credentials via Secret instead of inline
-                          Secret may contain: username, publicKey, password
-                          Takes precedence over inline Username and PublicKey fields
-                          The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+                          CredentialsSecretRef references a Secret containing SSH authentication credentials.
+                          The Secret must have a "publicKey" key for SSH key-based authentication.
+                          The "username" key is optional and defaults to "oadp" if not provided.
+                          Note: Only SSH key-based authentication is supported; password authentication is not available.
+                          Takes precedence over inline Username and PublicKey fields.
                         properties:
                           name:
                             description: Name of the Secret
@@ -116,20 +112,14 @@ spec:
                             type: string
                           namespace:
                             description: |-
-                              Namespace of the Secret
-                              If not specified, defaults to the VirtualMachineFileRestore's namespace
+                              Namespace where the Secret is located.
+                              Defaults to the OADP namespace when not specified.
+                              Note: Secrets outside TemporaryRestoreNamespace are automatically
+                              copied to that namespace for mounting in the serving pod.
                             type: string
                         required:
                         - name
                         type: object
-                      port:
-                        description: |-
-                          Port for SSH service
-                          Defaults to 22 if not specified
-                        format: int32
-                        maximum: 65535
-                        minimum: 1
-                        type: integer
                       publicKey:
                         description: |-
                           PublicKey for SSH key-based authentication
@@ -139,7 +129,7 @@ spec:
                       username:
                         description: |-
                           Username for SSH access
-                          Defaults to "restore-user" if not specified
+                          Defaults to "oadp" if not specified
                         type: string
                     type: object
                 type: object

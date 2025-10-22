@@ -21,10 +21,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
 )
 
-func TestBuildFileServerPodSpec(t *testing.T) {
-	pvcMounts := []PVCMountInfo{
+func getTestPVCMounts() []PVCMountInfo {
+	return []PVCMountInfo{
 		{
 			PVCName:         "test-pvc-1",
 			PVCNamespace:    "test-ns",
@@ -33,6 +35,10 @@ func TestBuildFileServerPodSpec(t *testing.T) {
 			BackupTimestamp: &metav1.Time{},
 		},
 	}
+}
+
+func TestBuildFileServerPodSpec_DefaultMainContainer(t *testing.T) {
+	pvcMounts := getTestPVCMounts()
 
 	t.Run("builds pod with default main container", func(t *testing.T) {
 		config := FileServerPodConfig{
@@ -87,12 +93,16 @@ func TestBuildFileServerPodSpec(t *testing.T) {
 			t.Errorf("Expected init container 'setup-dual-path-symlinks', got '%s'", initContainer.Name)
 		}
 	})
+}
+
+func TestBuildFileServerPodSpec_SSHSidecar(t *testing.T) {
+	pvcMounts := getTestPVCMounts()
 
 	t.Run("builds pod with SSH sidecar", func(t *testing.T) {
 		sshConfig := &SSHAccessConfig{
 			Username:  "testuser",
 			PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
-			Port:      22,
+			Port:      constant.DefaultSSHPort,
 		}
 
 		config := FileServerPodConfig{
@@ -148,12 +158,16 @@ func TestBuildFileServerPodSpec(t *testing.T) {
 			t.Fatal("SSH init container not found")
 		}
 	})
+}
+
+func TestBuildFileServerPodSpec_FileBrowserSidecar(t *testing.T) {
+	pvcMounts := getTestPVCMounts()
 
 	t.Run("builds pod with FileBrowser sidecar", func(t *testing.T) {
 		fbConfig := &FileBrowserAccessConfig{
 			CredentialsSecretName:      "fb-secret",
 			CredentialsSecretNamespace: "test-ns",
-			Port:                       443,
+			Port:                       constant.DefaultFileBrowserPort,
 		}
 
 		config := FileServerPodConfig{
@@ -209,18 +223,22 @@ func TestBuildFileServerPodSpec(t *testing.T) {
 			t.Fatal("FileBrowser init container not found")
 		}
 	})
+}
+
+func TestBuildFileServerPodSpec_BothSidecars(t *testing.T) {
+	pvcMounts := getTestPVCMounts()
 
 	t.Run("builds pod with both SSH and FileBrowser sidecars", func(t *testing.T) {
 		sshConfig := &SSHAccessConfig{
 			Username:  "testuser",
 			PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
-			Port:      22,
+			Port:      constant.DefaultSSHPort,
 		}
 
 		fbConfig := &FileBrowserAccessConfig{
 			CredentialsSecretName:      "fb-secret",
 			CredentialsSecretNamespace: "test-ns",
-			Port:                       443,
+			Port:                       constant.DefaultFileBrowserPort,
 		}
 
 		config := FileServerPodConfig{
@@ -259,6 +277,10 @@ func TestBuildFileServerPodSpec(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestBuildFileServerPodSpec_Validation(t *testing.T) {
+	pvcMounts := getTestPVCMounts()
 
 	t.Run("validates required config fields", func(t *testing.T) {
 		testCases := []struct {
@@ -458,7 +480,7 @@ func TestGatherServicePorts(t *testing.T) {
 	})
 
 	t.Run("HTTP + SSH", func(t *testing.T) {
-		sshConfig := &SSHAccessConfig{Port: 22}
+		sshConfig := &SSHAccessConfig{Port: constant.DefaultSSHPort}
 		ports := gatherServicePorts(sshConfig, nil)
 
 		if len(ports) != 2 {
@@ -479,7 +501,7 @@ func TestGatherServicePorts(t *testing.T) {
 	})
 
 	t.Run("HTTP + FileBrowser", func(t *testing.T) {
-		fbConfig := &FileBrowserAccessConfig{Port: 443}
+		fbConfig := &FileBrowserAccessConfig{Port: constant.DefaultFileBrowserPort}
 		ports := gatherServicePorts(nil, fbConfig)
 
 		if len(ports) != 2 {
@@ -500,8 +522,8 @@ func TestGatherServicePorts(t *testing.T) {
 	})
 
 	t.Run("HTTP + SSH + FileBrowser", func(t *testing.T) {
-		sshConfig := &SSHAccessConfig{Port: 22}
-		fbConfig := &FileBrowserAccessConfig{Port: 443}
+		sshConfig := &SSHAccessConfig{Port: constant.DefaultSSHPort}
+		fbConfig := &FileBrowserAccessConfig{Port: constant.DefaultFileBrowserPort}
 		ports := gatherServicePorts(sshConfig, fbConfig)
 
 		if len(ports) != 3 {

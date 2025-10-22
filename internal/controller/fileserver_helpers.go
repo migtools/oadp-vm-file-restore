@@ -60,7 +60,7 @@ type SSHAccessConfig struct {
 	// +optional
 	CredentialsSecretNamespace string
 
-	// Port for SSH service (defaults to 22)
+	// Port for SSH service (hardcoded to constant.DefaultSSHPort)
 	Port int32
 }
 
@@ -73,7 +73,7 @@ type FileBrowserAccessConfig struct {
 	// CredentialsSecretNamespace is the namespace of the Secret
 	CredentialsSecretNamespace string
 
-	// Port for FileBrowser HTTPS service (defaults to 443)
+	// Port for FileBrowser HTTPS service (hardcoded to constant.DefaultFileBrowserPort)
 	Port int32
 }
 
@@ -526,7 +526,7 @@ func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualP
 
 // buildVMFileServerMainContainer creates a VM file server container for mounting VM disk images
 // This container uses libguestfs/QEMU to mount VM disks and provide file-level access
-func buildVMFileServerMainContainer(pvcMounts []PVCMountInfo) corev1.Container {
+func buildVMFileServerMainContainer() corev1.Container {
 	return corev1.Container{
 		Name:  "vm-file-server",
 		Image: constant.VMFileServerImage,

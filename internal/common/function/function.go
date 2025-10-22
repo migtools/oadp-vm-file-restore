@@ -195,11 +195,11 @@ func GenerateSSHKeyPair(logger logr.Logger) (*SSHKeyPair, error) {
 
 // GenerateFileBrowserCredentials generates random FileBrowser credentials.
 // The password is a cryptographically secure random string (32 bytes, base64 encoded).
-// Uses the provided username or defaults to "admin".
+// Uses the provided username or defaults to constant.DefaultFileBrowserUsername ("oadp").
 func GenerateFileBrowserCredentials(username string, logger logr.Logger) (*FileBrowserCredentials, error) {
 	// Use default username if not provided
 	if username == "" {
-		username = "admin"
+		username = constant.DefaultFileBrowserUsername
 	}
 
 	// Generate 32 bytes of cryptographically secure random data for password

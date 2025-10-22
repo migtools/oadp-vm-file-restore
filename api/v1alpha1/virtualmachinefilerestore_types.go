@@ -97,8 +97,9 @@ type VirtualMachineFileRestoreSpec struct {
 
 // FileAccessSpec defines the file access methods available for the restored files
 type FileAccessSpec struct {
-	// SSH enables SSH/SFTP/SCP/rsync access to restored files
-	// If present (non-nil), SSH access is enabled
+	// SSH provides read-only access to restored files via chrooted OpenSSH.
+	// Supports SFTP, SCP, and rsync for file transfer only (no interactive shell access).
+	// The SSH server runs in a chroot environment for security isolation.
 	// +optional
 	SSH *SSHAccessSpec `json:"ssh,omitempty"`
 
@@ -108,10 +109,12 @@ type FileAccessSpec struct {
 	FileBrowser *FileBrowserAccessSpec `json:"fileBrowser,omitempty"`
 }
 
-// SSHAccessSpec configures SSH access to restored files
+// SSHAccessSpec configures read-only SSH file access to restored files.
+// Only SFTP, SCP, and rsync protocols are supported in a chrooted environment.
+// Interactive shell access is disabled for security.
 type SSHAccessSpec struct {
 	// Username for SSH access
-	// Defaults to "restore-user" if not specified
+	// Defaults to "oadp" if not specified
 	// +optional
 	Username string `json:"username,omitempty"`
 
@@ -121,38 +124,25 @@ type SSHAccessSpec struct {
 	// +optional
 	PublicKey string `json:"publicKey,omitempty"`
 
-	// CredentialsSecretRef references a Secret containing authentication credentials
-	// Use this when you want to provide credentials via Secret instead of inline
-	// Secret may contain: username, publicKey, password
-	// Takes precedence over inline Username and PublicKey fields
-	// The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+	// CredentialsSecretRef references a Secret containing SSH authentication credentials.
+	// The Secret must have a "publicKey" key for SSH key-based authentication.
+	// The "username" key is optional and defaults to "oadp" if not provided.
+	// Note: Only SSH key-based authentication is supported; password authentication is not available.
+	// Takes precedence over inline Username and PublicKey fields.
 	// +optional
 	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
-
-	// Port for SSH service
-	// Defaults to 22 if not specified
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	Port *int32 `json:"port,omitempty"`
 }
 
 // FileBrowserAccessSpec configures HTTPS file browser access
 type FileBrowserAccessSpec struct {
-	// CredentialsSecretRef references a Secret containing username and password
-	// The Secret must have keys "username" and "password"
-	// If not specified, controller generates credentials and stores them in a Secret
-	// in the temporary restore namespace
-	// The Secret namespace defaults to the VirtualMachineFileRestore namespace if not specified
+	// CredentialsSecretRef references a Secret containing FileBrowser credentials.
+	// The Secret must have a "password" key and optionally a "username" key.
+	// If "username" is not provided in the Secret, it defaults to "oadp".
+	// If CredentialsSecretRef is not specified, the controller generates both
+	// username (defaults to "oadp") and password, storing them in a Secret
+	// in the temporary restore namespace.
 	// +optional
 	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
-
-	// Port for FileBrowser HTTPS service
-	// Defaults to 443 if not specified
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	Port *int32 `json:"port,omitempty"`
 }
 
 // SecretReference identifies a Secret by name and optional namespace
@@ -162,8 +152,10 @@ type SecretReference struct {
 	// +required
 	Name string `json:"name"`
 
-	// Namespace of the Secret
-	// If not specified, defaults to the VirtualMachineFileRestore's namespace
+	// Namespace where the Secret is located.
+	// Defaults to the OADP namespace when not specified.
+	// Note: Secrets outside TemporaryRestoreNamespace are automatically
+	// copied to that namespace for mounting in the serving pod.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }

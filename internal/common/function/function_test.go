@@ -25,6 +25,8 @@ import (
 	apitypes "k8s.io/apimachinery/pkg/types"
 )
 
+const testUsername = "testuser"
+
 func TestGenerateSSHKeyPair(t *testing.T) {
 	logger := logr.Discard()
 
@@ -84,8 +86,8 @@ func TestGenerateFileBrowserCredentials(t *testing.T) {
 			t.Fatalf("GenerateFileBrowserCredentials() error = %v", err)
 		}
 
-		if creds.Username != "admin" {
-			t.Errorf("Expected default username 'admin', got '%s'", creds.Username)
+		if creds.Username != "oadp" {
+			t.Errorf("Expected default username 'oadp', got '%s'", creds.Username)
 		}
 
 		// Password should be non-empty
@@ -100,12 +102,12 @@ func TestGenerateFileBrowserCredentials(t *testing.T) {
 	})
 
 	t.Run("generates credentials with custom username", func(t *testing.T) {
-		creds, err := GenerateFileBrowserCredentials("testuser", logger)
+		creds, err := GenerateFileBrowserCredentials(testUsername, logger)
 		if err != nil {
 			t.Fatalf("GenerateFileBrowserCredentials() error = %v", err)
 		}
 
-		if creds.Username != "testuser" {
+		if creds.Username != testUsername {
 			t.Errorf("Expected username 'testuser', got '%s'", creds.Username)
 		}
 	})
@@ -139,7 +141,7 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 	secret := CreateSSHCredentialsSecret(
 		"test-secret",
 		"test-namespace",
-		"testuser",
+		testUsername,
 		keyPair,
 		"test-vmfr",
 		"vmfr-namespace",
@@ -165,7 +167,7 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 	})
 
 	t.Run("creates secret with correct data", func(t *testing.T) {
-		if secret.StringData["username"] != "testuser" {
+		if secret.StringData["username"] != testUsername {
 			t.Errorf("Expected username 'testuser', got '%s'", secret.StringData["username"])
 		}
 		if secret.StringData["privateKey"] != "test-private-key" {
@@ -198,7 +200,7 @@ func TestCreateFileBrowserCredentialsSecret(t *testing.T) {
 	logger := logr.Discard()
 
 	creds := &FileBrowserCredentials{
-		Username: "testuser",
+		Username: testUsername,
 		Password: "testpassword",
 	}
 
@@ -224,7 +226,7 @@ func TestCreateFileBrowserCredentialsSecret(t *testing.T) {
 	})
 
 	t.Run("creates secret with correct data", func(t *testing.T) {
-		if secret.StringData["username"] != "testuser" {
+		if secret.StringData["username"] != testUsername {
 			t.Errorf("Expected username 'testuser', got '%s'", secret.StringData["username"])
 		}
 		if secret.StringData["password"] != "testpassword" {

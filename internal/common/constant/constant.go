@@ -126,6 +126,14 @@ const (
 
 	// VM file server container image for mounting VM disk images
 	VMFileServerImage = "quay.io/spampatt/oadp-vm-file-server:dev"
+
+	// Default ports for file access methods
+	DefaultSSHPort         = 22
+	DefaultFileBrowserPort = 443
+
+	// Default usernames for file access methods
+	DefaultSSHUsername         = "oadp"
+	DefaultFileBrowserUsername = "oadp"
 )
 
 // Magic numbers
