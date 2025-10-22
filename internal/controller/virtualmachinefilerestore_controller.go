@@ -135,11 +135,12 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		progressingCondition := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
 
 		// Check if we've completed validation and are in workflow execution phase
-		// Workflow reasons: ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), and future workflow steps
+		// Workflow reasons: ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), RestoresCompleted (file server creation), and future workflow steps
 		isInWorkflowPhase := progressingCondition != nil &&
-			(progressingCondition.Reason == "ValidationCompleted" ||
-				progressingCondition.Reason == "NamespaceReady" ||
-				progressingCondition.Reason == "WaitingForRestores")
+			(progressingCondition.Reason == oadptypes.ReasonValidationCompleted ||
+				progressingCondition.Reason == oadptypes.ReasonNamespaceReady ||
+				progressingCondition.Reason == oadptypes.ReasonWaitingForRestores ||
+				progressingCondition.Reason == oadptypes.ReasonRestoresCompleted)
 
 		if isInWorkflowPhase {
 			// Validation complete — proceed with restore workflow
@@ -235,7 +236,7 @@ func (r *VirtualMachineFileRestoreReconciler) failValidation(
 			Type:               oadptypes.ConditionTypeProgressing,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "ValidationFailed",
+			Reason:             oadptypes.ReasonValidationFailed,
 			Message:            message,
 		},
 		{
@@ -249,14 +250,14 @@ func (r *VirtualMachineFileRestoreReconciler) failValidation(
 			Type:               oadptypes.ConditionTypeDegraded,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "CriticalFailure",
+			Reason:             oadptypes.ReasonCriticalFailure,
 			Message:            message,
 		},
 		{
 			Type:               oadptypes.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "Failed",
+			Reason:             oadptypes.ReasonFailed,
 			Message:            message,
 		},
 	}
@@ -282,7 +283,7 @@ func (r *VirtualMachineFileRestoreReconciler) failPartialValidation(
 			Type:               oadptypes.ConditionTypeProgressing,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "PartialValidationFailed",
+			Reason:             oadptypes.ReasonPartialValidationFailed,
 			Message:            message,
 		},
 		{
@@ -296,14 +297,14 @@ func (r *VirtualMachineFileRestoreReconciler) failPartialValidation(
 			Type:               oadptypes.ConditionTypeDegraded,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "PartialFailure",
+			Reason:             oadptypes.ReasonPartialFailure,
 			Message:            message,
 		},
 		{
 			Type:               oadptypes.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "PartiallyFailed",
+			Reason:             oadptypes.ReasonPartiallyFailed,
 			Message:            message,
 		},
 	}
@@ -351,28 +352,28 @@ func (r *VirtualMachineFileRestoreReconciler) initializePhaseForFileRestore(ctx 
 			Type:               oadptypes.ConditionTypeProgressing,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
-			Reason:             "Initialized",
+			Reason:             oadptypes.ReasonInitialized,
 			Message:            "File restore request has been accepted",
 		},
 		{
 			Type:               oadptypes.ConditionTypeAvailable,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
-			Reason:             "NotStarted",
+			Reason:             oadptypes.ReasonNotStarted,
 			Message:            "File serving resources not yet created",
 		},
 		{
 			Type:               oadptypes.ConditionTypeDegraded,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
-			Reason:             "NoFailures",
+			Reason:             oadptypes.ReasonNoFailures,
 			Message:            "No errors have occurred",
 		},
 		{
 			Type:               oadptypes.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
-			Reason:             "NotReady",
+			Reason:             oadptypes.ReasonNotReady,
 			Message:            "File restore has not started processing",
 		},
 	}
@@ -392,25 +393,25 @@ func (r *VirtualMachineFileRestoreReconciler) validateAndDiscoverPVCs(ctx contex
 			{
 				Type:    oadptypes.ConditionTypeProgressing,
 				Status:  metav1.ConditionTrue,
-				Reason:  "Validating",
+				Reason:  oadptypes.ReasonValidating,
 				Message: "Validating discovery reference and discovering PVCs from backups",
 			},
 			{
 				Type:    oadptypes.ConditionTypeAvailable,
 				Status:  metav1.ConditionFalse,
-				Reason:  "InProgress",
+				Reason:  oadptypes.ReasonInProgress,
 				Message: "Validation in progress",
 			},
 			{
 				Type:    oadptypes.ConditionTypeDegraded,
 				Status:  metav1.ConditionFalse,
-				Reason:  "NoFailures",
+				Reason:  oadptypes.ReasonNoFailures,
 				Message: "No failures detected yet",
 			},
 			{
 				Type:    oadptypes.ConditionTypeReady,
 				Status:  metav1.ConditionFalse,
-				Reason:  "InProgress",
+				Reason:  oadptypes.ReasonInProgress,
 				Message: "Validation in progress",
 			},
 		}
@@ -450,7 +451,7 @@ func (r *VirtualMachineFileRestoreReconciler) validateAndDiscoverPVCs(ctx contex
 			Type:               oadptypes.ConditionTypeProgressing,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "DiscoveringPVCs",
+			Reason:             oadptypes.ReasonDiscoveringPVCs,
 			Message:            fmt.Sprintf("Discovering PVCs from %d backups", len(backupsToServe)),
 		}},
 		false,
@@ -541,28 +542,28 @@ func (r *VirtualMachineFileRestoreReconciler) validateAndDiscoverPVCs(ctx contex
 			Type:               oadptypes.ConditionTypeProgressing,
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "ValidationCompleted",
+			Reason:             oadptypes.ReasonValidationCompleted,
 			Message:            fmt.Sprintf("PVC discovery completed for %d backups, ready to create restores", len(backupsToServe)),
 		},
 		{
 			Type:               oadptypes.ConditionTypeAvailable,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "InProgress",
+			Reason:             oadptypes.ReasonInProgress,
 			Message:            "Validation completed, restore creation pending",
 		},
 		{
 			Type:               oadptypes.ConditionTypeDegraded,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "NoFailures",
+			Reason:             oadptypes.ReasonNoFailures,
 			Message:            "No failures detected during validation",
 		},
 		{
 			Type:               oadptypes.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             "InProgress",
+			Reason:             oadptypes.ReasonInProgress,
 			Message:            "File restore in progress",
 		},
 	}
@@ -623,28 +624,28 @@ func (r *VirtualMachineFileRestoreReconciler) validateReferencedDiscovery(
 				Type:               oadptypes.ConditionTypeProgressing,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "WaitingForDiscovery",
+				Reason:             oadptypes.ReasonWaitingForDiscovery,
 				Message:            "Waiting for backup discovery to complete",
 			},
 			{
 				Type:               oadptypes.ConditionTypeAvailable,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "DiscoveryInProgress",
+				Reason:             oadptypes.ReasonDiscoveryInProgress,
 				Message:            "Discovery not yet completed",
 			},
 			{
 				Type:               oadptypes.ConditionTypeDegraded,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "NoFailures",
+				Reason:             oadptypes.ReasonNoFailures,
 				Message:            "No failures detected",
 			},
 			{
 				Type:               oadptypes.ConditionTypeReady,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "DiscoveryInProgress",
+				Reason:             oadptypes.ReasonDiscoveryInProgress,
 				Message:            "Waiting for backup discovery to complete",
 			},
 		}
@@ -692,28 +693,28 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 				Type:               oadptypes.ConditionTypeProgressing,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "NamespaceReady",
+				Reason:             oadptypes.ReasonNamespaceReady,
 				Message:            fmt.Sprintf("Restore namespace '%s' is ready, proceeding with Velero restore creation", restoreNamespace),
 			},
 			{
 				Type:               oadptypes.ConditionTypeAvailable,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "PreparingRestores",
+				Reason:             oadptypes.ReasonPreparingRestores,
 				Message:            "Namespace created, Velero restore creation pending",
 			},
 			{
 				Type:               oadptypes.ConditionTypeDegraded,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "NoFailures",
+				Reason:             oadptypes.ReasonNoFailures,
 				Message:            "No failures detected",
 			},
 			{
 				Type:               oadptypes.ConditionTypeReady,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "InProgress",
+				Reason:             oadptypes.ReasonInProgress,
 				Message:            "File restore workflow in progress",
 			},
 		}
@@ -727,15 +728,24 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 
 	case "NamespaceReady":
 		// Step 2: Create Velero Restores for available backups
-		logger.V(0).Info("Creating Velero Restores")
+		logger.V(0).Info("Preparing to create Velero Restores")
 
-		// Task: Create Velero Restore objects using generateName
-		// K8s will assign unique names, then we update PVCRestores status with actual names
-		err := r.createVeleroRestores(ctx, logger, vmfr)
-		if err != nil {
-			failureMsg := fmt.Sprintf("Failed to create Velero Restores: %s", err.Error())
-			logger.Error(err, "Velero Restore creation failed")
-			return false, r.failValidation(ctx, vmfr, "RestoreCreationFailed", failureMsg, logger)
+		// IDEMPOTENCY CHECK: Check if Velero Restores have already been created
+		// by examining if VeleroRestoreName is populated in status for all available backups
+		alreadyCreated := r.checkVeleroRestoresAlreadyCreated(vmfr)
+
+		if alreadyCreated {
+			logger.V(0).Info("Velero Restores already created, skipping creation step")
+		} else {
+			// Task: Create Velero Restore objects using generateName
+			// K8s will assign unique names, then we update PVCRestores status with actual names
+			logger.V(0).Info("Creating Velero Restores")
+			err := r.createVeleroRestores(ctx, logger, vmfr)
+			if err != nil {
+				failureMsg := fmt.Sprintf("Failed to create Velero Restores: %s", err.Error())
+				logger.Error(err, "Velero Restore creation failed")
+				return false, r.failValidation(ctx, vmfr, "RestoreCreationFailed", failureMsg, logger)
+			}
 		}
 
 		// Update workflow conditions to transition to WaitingForRestores state
@@ -744,28 +754,28 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 				Type:               oadptypes.ConditionTypeProgressing,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "WaitingForRestores",
+				Reason:             oadptypes.ReasonWaitingForRestores,
 				Message:            "Waiting for Velero Restore(s) to complete",
 			},
 			{
 				Type:               oadptypes.ConditionTypeAvailable,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "RestoresInProgress",
+				Reason:             oadptypes.ReasonRestoresInProgress,
 				Message:            "Velero Restores are in progress",
 			},
 			{
 				Type:               oadptypes.ConditionTypeDegraded,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "NoFailures",
+				Reason:             oadptypes.ReasonNoFailures,
 				Message:            "No failures detected",
 			},
 			{
 				Type:               oadptypes.ConditionTypeReady,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "InProgress",
+				Reason:             oadptypes.ReasonInProgress,
 				Message:            "File restore workflow in progress",
 			},
 		}
@@ -865,7 +875,7 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 			// All restores completed successfully and PVCs are ready
 			logger.V(0).Info("All Velero Restores completed successfully, ready to create file server")
 			finalPhase = oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress // Stay in InProgress
-			progressingReason = "RestoresCompleted"
+			progressingReason = oadptypes.ReasonRestoresCompleted
 			conditions = []metav1.Condition{
 				{
 					Type:               oadptypes.ConditionTypeProgressing,
@@ -878,21 +888,21 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 					Type:               oadptypes.ConditionTypeAvailable,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "FileServerPending",
+					Reason:             oadptypes.ReasonFileServerPending,
 					Message:            "PVCs restored, file server creation pending",
 				},
 				{
 					Type:               oadptypes.ConditionTypeDegraded,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "NoFailures",
+					Reason:             oadptypes.ReasonNoFailures,
 					Message:            "All Velero Restores completed without errors",
 				},
 				{
 					Type:               oadptypes.ConditionTypeReady,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "InProgress",
+					Reason:             oadptypes.ReasonInProgress,
 					Message:            "File server creation pending",
 				},
 			}
@@ -906,28 +916,28 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 					Type:               oadptypes.ConditionTypeProgressing,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "RestoresCompletedWithFailures",
+					Reason:             oadptypes.ReasonRestoresCompletedWithFailures,
 					Message:            fmt.Sprintf("Velero Restores completed: %d succeeded, %d failed", completed, failed),
 				},
 				{
 					Type:               oadptypes.ConditionTypeAvailable,
 					Status:             metav1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "PartialRestoreSuccess",
+					Reason:             oadptypes.ReasonPartialRestoreSuccess,
 					Message:            fmt.Sprintf("Successfully restored %d PVCs, %d failed", completed, failed),
 				},
 				{
 					Type:               oadptypes.ConditionTypeDegraded,
 					Status:             metav1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "SomeRestoresFailed",
+					Reason:             oadptypes.ReasonSomeRestoresFailed,
 					Message:            fmt.Sprintf("%d of %d Velero Restores failed", failed, totalRestores),
 				},
 				{
 					Type:               oadptypes.ConditionTypeReady,
 					Status:             metav1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "PartiallyFailed",
+					Reason:             oadptypes.ReasonPartiallyFailed,
 					Message:            "File restore completed with partial failures",
 				},
 			}
@@ -940,28 +950,28 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 					Type:               oadptypes.ConditionTypeProgressing,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "RestoresFailed",
+					Reason:             oadptypes.ReasonRestoresFailed,
 					Message:            fmt.Sprintf("All %d Velero Restores failed", totalRestores),
 				},
 				{
 					Type:               oadptypes.ConditionTypeAvailable,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "AllRestoresFailed",
+					Reason:             oadptypes.ReasonAllRestoresFailed,
 					Message:            "No PVCs were successfully restored",
 				},
 				{
 					Type:               oadptypes.ConditionTypeDegraded,
 					Status:             metav1.ConditionTrue,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "CriticalFailure",
+					Reason:             oadptypes.ReasonCriticalFailure,
 					Message:            "All Velero Restores failed",
 				},
 				{
 					Type:               oadptypes.ConditionTypeReady,
 					Status:             metav1.ConditionFalse,
 					LastTransitionTime: metav1.Now(),
-					Reason:             "Failed",
+					Reason:             oadptypes.ReasonFailed,
 					Message:            "File restore failed completely",
 				},
 			}
@@ -1004,28 +1014,28 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 				Type:               oadptypes.ConditionTypeProgressing,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "FileServerCreated",
+				Reason:             oadptypes.ReasonFileServerCreated,
 				Message:            "File server pod and service created, PVCs binding in progress",
 			},
 			{
 				Type:               oadptypes.ConditionTypeAvailable,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "FileServerAvailable",
+				Reason:             oadptypes.ReasonFileServerAvailable,
 				Message:            "File server is accessible and serving files",
 			},
 			{
 				Type:               oadptypes.ConditionTypeDegraded,
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "NoFailures",
+				Reason:             oadptypes.ReasonNoFailures,
 				Message:            "All operations completed successfully",
 			},
 			{
 				Type:               oadptypes.ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: metav1.Now(),
-				Reason:             "Completed",
+				Reason:             oadptypes.ReasonCompleted,
 				Message:            "File restore completed, files accessible via file server",
 			},
 		}
@@ -1781,6 +1791,65 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 	return namespaceName, nil
 }
 
+// findExistingVeleroRestore finds an existing Velero Restore for the given backup and VMFR.
+// Searches by VMFR UID label and backup name annotation.
+func (r *VirtualMachineFileRestoreReconciler) findExistingVeleroRestore(
+	ctx context.Context,
+	backupName string,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (*veleroapi.Restore, error) {
+	// List all Velero Restores owned by this VMFR
+	restoreList := &veleroapi.RestoreList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(r.OADPNamespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		},
+	}
+
+	if err := r.List(ctx, restoreList, listOpts...); err != nil {
+		return nil, fmt.Errorf("failed to list Velero Restores: %w", err)
+	}
+
+	// Find the restore for this specific backup by checking the annotation
+	for i := range restoreList.Items {
+		if restoreList.Items[i].Annotations[constant.BackupNameAnnotation] == backupName {
+			return &restoreList.Items[i], nil
+		}
+	}
+
+	return nil, fmt.Errorf("no existing Velero Restore found for backup %s", backupName)
+}
+
+// checkVeleroRestoresAlreadyCreated checks if Velero Restores have already been created
+// by examining if VeleroRestoreName is populated for all available backups in status.
+// Returns true if all available backups have VeleroRestoreName set, false otherwise.
+func (r *VirtualMachineFileRestoreReconciler) checkVeleroRestoresAlreadyCreated(
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) bool {
+	// Check if any available restore is missing a VeleroRestoreName
+	for _, pvcRestore := range vmfr.Status.PVCRestores {
+		// Skip synthetic entries (backup-level failures)
+		if pvcRestore.PVCName == constant.BackupLevelFailurePVCName {
+			continue
+		}
+
+		// Check each RestoreInfo for this PVC
+		for _, restoreInfo := range pvcRestore.Restores {
+			// Only check available backups (those that should have restores created)
+			if restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
+				// If VeleroRestoreName is empty, restores haven't been created yet
+				if restoreInfo.VeleroRestoreName == "" {
+					return false
+				}
+			}
+		}
+	}
+
+	// All available backups have VeleroRestoreName populated
+	return true
+}
+
 // createVeleroRestores creates Velero Restore objects using generateName and updates PVCRestores status with actual names.
 // Uses Kubernetes generateName to let K8s assign unique names automatically.
 func (r *VirtualMachineFileRestoreReconciler) createVeleroRestores(
@@ -1897,19 +1966,42 @@ func (r *VirtualMachineFileRestoreReconciler) createVeleroRestores(
 
 		// Create the Velero Restore (K8s assigns actual name)
 		if err := r.Create(ctx, restore); err != nil {
-			logger.Error(err, "Failed to create Velero Restore", "generateNamePrefix", restoreNamePrefix, "backupName", backupName)
-			return fmt.Errorf("failed to create Velero Restore with prefix %s: %w", restoreNamePrefix, err)
+			// Handle the case where restore already exists (idempotency)
+			if apierrors.IsAlreadyExists(err) {
+				logger.V(1).Info("Velero Restore already exists, finding existing restore",
+					"generateNamePrefix", restoreNamePrefix, "backupName", backupName)
+
+				// Find the existing restore by listing with labels
+				existingRestore, findErr := r.findExistingVeleroRestore(ctx, backupName, vmfr)
+				if findErr != nil {
+					logger.Error(findErr, "Failed to find existing Velero Restore", "backupName", backupName)
+					return fmt.Errorf("failed to find existing Velero Restore for backup %s: %w", backupName, findErr)
+				}
+
+				// Use the existing restore's name
+				actualRestoreName := existingRestore.Name
+				backupToRestoreName[backupName] = actualRestoreName
+				createdCount++
+
+				logger.V(0).Info("Using existing Velero Restore",
+					"restoreName", actualRestoreName,
+					"backupName", backupName,
+					"targetNamespace", restoreNamespace)
+			} else {
+				logger.Error(err, "Failed to create Velero Restore", "generateNamePrefix", restoreNamePrefix, "backupName", backupName)
+				return fmt.Errorf("failed to create Velero Restore with prefix %s: %w", restoreNamePrefix, err)
+			}
+		} else {
+			// Get the actual name assigned by K8s (available in restore.Name after Create)
+			actualRestoreName := restore.Name
+			backupToRestoreName[backupName] = actualRestoreName
+			createdCount++
+
+			logger.V(0).Info("Created Velero Restore",
+				"restoreName", actualRestoreName,
+				"backupName", backupName,
+				"targetNamespace", restoreNamespace)
 		}
-
-		// Get the actual name assigned by K8s (available in restore.Name after Create)
-		actualRestoreName := restore.Name
-		backupToRestoreName[backupName] = actualRestoreName
-		createdCount++
-
-		logger.V(0).Info("Created Velero Restore",
-			"restoreName", actualRestoreName,
-			"backupName", backupName,
-			"targetNamespace", restoreNamespace)
 	}
 
 	logger.V(0).Info("Velero Restore creation completed",
@@ -2113,21 +2205,32 @@ func (r *VirtualMachineFileRestoreReconciler) validateRestoredPVCs(
 	// Check each PVC exists and is in a valid state
 	allValid := true
 	for _, pvcMount := range pvcMounts {
+		// The kubevirt-velero plugin restores PVCs with generated names (not original names).
+		// Find the actual restored PVC by searching for the Velero Restore label and original name annotation.
+		restoredPVCName, err := r.findRestoredPVCName(ctx, restoreNamespace, pvcMount.VeleroRestoreName, pvcMount.PVCName)
+		if err != nil {
+			logger.V(1).Info("PVC not yet created by Velero restore",
+				"originalPVCName", pvcMount.PVCName,
+				"veleroRestoreName", pvcMount.VeleroRestoreName,
+				"namespace", restoreNamespace,
+				"error", err.Error())
+			allValid = false
+			continue
+		}
+
+		logger.V(1).Info("Found restored PVC",
+			"originalPVCName", pvcMount.PVCName,
+			"restoredPVCName", restoredPVCName,
+			"veleroRestoreName", pvcMount.VeleroRestoreName)
+
+		// Get the PVC to check its state
 		pvc := &corev1.PersistentVolumeClaim{}
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      pvcMount.PVCName,
+		err = r.Get(ctx, types.NamespacedName{
+			Name:      restoredPVCName,
 			Namespace: restoreNamespace,
 		}, pvc)
-
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				logger.V(1).Info("PVC not yet created by Velero restore",
-					"pvcName", pvcMount.PVCName,
-					"namespace", restoreNamespace)
-				allValid = false
-				continue
-			}
-			return false, fmt.Errorf("failed to get PVC %s: %w", pvcMount.PVCName, err)
+			return false, fmt.Errorf("failed to get PVC %s: %w", restoredPVCName, err)
 		}
 
 		// Check PVC is in a valid state
@@ -2170,6 +2273,38 @@ func (r *VirtualMachineFileRestoreReconciler) validateRestoredPVCs(
 	return allValid, nil
 }
 
+// findRestoredPVCName finds the actual restored PVC name by searching for PVCs with the given
+// Velero Restore label and matching original name annotation
+func (r *VirtualMachineFileRestoreReconciler) findRestoredPVCName(
+	ctx context.Context,
+	restoreNamespace string,
+	veleroRestoreName string,
+	originalPVCName string,
+) (string, error) {
+	pvcList := &corev1.PersistentVolumeClaimList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(restoreNamespace),
+		client.MatchingLabels{
+			"velero.io/restore-name": veleroRestoreName,
+		},
+	}
+
+	if err := r.List(ctx, pvcList, listOpts...); err != nil {
+		return "", fmt.Errorf("failed to list PVCs for restore %s: %w", veleroRestoreName, err)
+	}
+
+	// Filter by annotation to find the PVC with the matching original name
+	for i := range pvcList.Items {
+		if pvcList.Items[i].Annotations != nil {
+			if origName := pvcList.Items[i].Annotations[constant.VMFROriginalPVCNameAnnotation]; origName == originalPVCName {
+				return pvcList.Items[i].Name, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("PVC not found for restore %s with original name %s", veleroRestoreName, originalPVCName)
+}
+
 // createFileServerResources creates the file server pod and service
 func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	ctx context.Context,
@@ -2187,6 +2322,18 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	pvcMounts := extractPVCMountsFromVMFR(vmfr)
 	if len(pvcMounts) == 0 {
 		return fmt.Errorf("no PVC mounts found in status")
+	}
+
+	// Populate the actual restored PVC names (which may differ from original names)
+	for i := range pvcMounts {
+		restoredName, err := r.findRestoredPVCName(ctx, restoreNamespace, pvcMounts[i].VeleroRestoreName, pvcMounts[i].PVCName)
+		if err != nil {
+			return fmt.Errorf("failed to find restored PVC name for %s: %w", pvcMounts[i].PVCName, err)
+		}
+		pvcMounts[i].RestoredPVCName = restoredName
+		logger.V(1).Info("Resolved PVC name for file server",
+			"originalName", pvcMounts[i].PVCName,
+			"restoredName", restoredName)
 	}
 
 	logger.V(0).Info("Creating file server resources",

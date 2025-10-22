@@ -35,11 +35,13 @@ import (
 
 // PVCMountInfo contains information needed to mount a PVC in the file server pod
 type PVCMountInfo struct {
-	PVCName         string
-	PVCNamespace    string
-	PVCUID          string
-	BackupName      string
-	BackupTimestamp *metav1.Time
+	PVCName           string // Original PVC name (at time of backup)
+	PVCNamespace      string
+	PVCUID            string
+	BackupName        string
+	BackupTimestamp   *metav1.Time
+	VeleroRestoreName string // Name of the Velero Restore CR that restored this PVC
+	RestoredPVCName   string // Actual name of the restored PVC (may differ from original)
 }
 
 // SSHAccessConfig contains configuration for SSH sidecar container
@@ -466,12 +468,19 @@ func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []core
 		// Create unique volume name for this PVC
 		volumeName := fmt.Sprintf("pvc-%s", pvcMount.PVCUID)
 
+		// Determine which PVC name to use: RestoredPVCName if available, otherwise PVCName
+		// RestoredPVCName is populated when kubevirt-velero-plugin changes the PVC name during restore
+		pvcClaimName := pvcMount.RestoredPVCName
+		if pvcClaimName == "" {
+			pvcClaimName = pvcMount.PVCName
+		}
+
 		// Add volume referencing the restored PVC
 		volumes = append(volumes, corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvcMount.PVCName,
+					ClaimName: pvcClaimName,
 					ReadOnly:  true, // Mount read-only for safety
 				},
 			},
@@ -725,11 +734,12 @@ func extractPVCMountsFromVMFR(vmfr *oadpv1alpha1.VirtualMachineFileRestore) []PV
 			// Only include completed restores
 			if restoreInfo.Phase == "Completed" && restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
 				pvcMounts = append(pvcMounts, PVCMountInfo{
-					PVCName:         pvcRestore.PVCName,
-					PVCNamespace:    pvcRestore.PVCNamespace,
-					PVCUID:          pvcRestore.PVCUID,
-					BackupName:      restoreInfo.VeleroBackupName,
-					BackupTimestamp: restoreInfo.Timestamp,
+					PVCName:           pvcRestore.PVCName,
+					PVCNamespace:      pvcRestore.PVCNamespace,
+					PVCUID:            pvcRestore.PVCUID,
+					BackupName:        restoreInfo.VeleroBackupName,
+					BackupTimestamp:   restoreInfo.Timestamp,
+					VeleroRestoreName: restoreInfo.VeleroRestoreName,
 				})
 				// Only mount the most recent successful restore per PVC
 				break

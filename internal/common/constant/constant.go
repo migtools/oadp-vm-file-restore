@@ -38,6 +38,10 @@ const (
 	BackupNameAnnotation              = "oadp.openshift.io/backup-name"
 	VirtualMachineNameAnnotation      = "oadp.openshift.io/vm-name"
 	VirtualMachineNamespaceAnnotation = "oadp.openshift.io/vm-namespace"
+
+	// VMFROriginalPVCNameAnnotation tracks the original PVC name before restore
+	// This is set by kubevirt-velero-plugin when restoring PVCs with generated names
+	VMFROriginalPVCNameAnnotation = "oadp.openshift.io/vmfr-original-name"
 )
 
 // Common finalizers for VirtualMachineFileRestore resources
