@@ -1,0 +1,110 @@
+# Build stage - compile Go binary
+FROM registry.access.redhat.com/ubi9/go-toolset:latest AS builder
+
+# Use the default working directory in go-toolset (user has write access)
+WORKDIR /opt/app-root/src
+COPY --chown=1001:0 oadp-sshd.go .
+
+# Build static binary for multi-arch
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o oadp-sshd oadp-sshd.go
+
+# Final stage
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+LABEL maintainer="OADP Team" \
+      description="Secure SSHD container for OADP VM File Restore with chroot jail" \
+      summary="Provides read-only SSH/SFTP/rsync access to backup files" \
+      io.openshift.tags="oadp,backup,restore,ssh,sftp,rsync" \
+      io.k8s.description="Multi-architecture SSHD container for secure read-only access to VM backup files"
+
+# Install required packages
+RUN microdnf install -y \
+    openssh-server \
+    openssh-clients \
+    shadow-utils \
+    passwd \
+    rsync \
+    bash \
+    findutils \
+    && microdnf clean all
+
+# Create chroot directory structure at /oadp
+RUN mkdir -p /oadp/bin \
+    && mkdir -p /oadp/lib \
+    && mkdir -p /oadp/lib64 \
+    && mkdir -p /oadp/usr/lib \
+    && mkdir -p /oadp/usr/lib64 \
+    && mkdir -p /oadp/usr/libexec/openssh \
+    && mkdir -p /oadp/dev \
+    && mkdir -p /oadp/.ssh
+
+# Copy binaries into chroot
+RUN cp /usr/bin/rsync /oadp/bin/ \
+    && cp /usr/bin/scp /oadp/bin/ \
+    && cp /bin/bash /oadp/bin/ \
+    && cp /usr/libexec/openssh/sftp-server /oadp/usr/libexec/openssh/
+
+# Copy library dependencies for all architectures (x86_64 and aarch64)
+# This script handles both lib and lib64 paths automatically
+RUN for binary in /usr/bin/rsync /usr/bin/scp /bin/bash /usr/libexec/openssh/sftp-server; do \
+        echo "Copying dependencies for $binary..."; \
+        ldd "$binary" 2>/dev/null | grep "=>" | awk '{print $3}' | while read lib; do \
+            if [ -f "$lib" ]; then \
+                # Preserve the original directory structure (lib vs lib64, etc.) \
+                case "$lib" in \
+                    /lib64/*) mkdir -p /oadp/lib64 && cp -L "$lib" /oadp/lib64/ 2>/dev/null || true ;; \
+                    /lib/*) mkdir -p /oadp/lib && cp -L "$lib" /oadp/lib/ 2>/dev/null || true ;; \
+                    /usr/lib64/*) mkdir -p /oadp/usr/lib64 && cp -L "$lib" /oadp/usr/lib64/ 2>/dev/null || true ;; \
+                    /usr/lib/*) mkdir -p /oadp/usr/lib && cp -L "$lib" /oadp/usr/lib/ 2>/dev/null || true ;; \
+                esac; \
+            fi; \
+        done; \
+        # Copy dynamic linker (ld-linux-*.so.*) \
+        ldd "$binary" 2>/dev/null | grep -E "ld-linux|ld.so" | awk '{print $1}' | while read linker; do \
+            if [ -f "$linker" ]; then \
+                case "$linker" in \
+                    /lib64/*) mkdir -p /oadp/lib64 && cp -L "$linker" /oadp/lib64/ 2>/dev/null || true ;; \
+                    /lib/*) mkdir -p /oadp/lib && cp -L "$linker" /oadp/lib/ 2>/dev/null || true ;; \
+                esac; \
+            fi; \
+        done; \
+    done
+
+# Note: Device nodes are created at runtime in entrypoint.sh
+# Cannot create them here because mknod requires CAP_MKNOD capability
+
+# Copy compiled Go binary from builder stage
+COPY --from=builder /opt/app-root/src/oadp-sshd /oadp/bin/oadp-sshd
+
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+
+# Make binaries executable
+# Note: oadp-sshd is 711, but DAC_READ_SEARCH capability allows downloading it anyway
+RUN chmod 711 /oadp/bin/oadp-sshd \
+    && chmod +x /entrypoint.sh \
+    && chmod 755 /oadp/bin/rsync \
+    && chmod 755 /oadp/bin/scp \
+    && chmod 755 /oadp/bin/bash \
+    && chmod 755 /oadp/usr/libexec/openssh/sftp-server
+
+# Set proper ownership for chroot directory
+RUN chown root:root /oadp \
+    && chmod 755 /oadp
+
+# Create a template directory with base /etc files
+# We'll copy these to /etc at runtime (when /etc is mounted as emptyDir)
+RUN mkdir -p /etc-template \
+    && cp -a /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/nsswitch.conf /etc-template/ \
+    && cp -a /etc/pam.d /etc-template/ \
+    && ls -la /etc-template/ \
+    && echo "Template files created successfully"
+
+# Expose SSH port
+EXPOSE 2222
+
+# Run as root (required for sshd and chroot)
+USER root
+
+# Entrypoint
+ENTRYPOINT ["/entrypoint.sh"]
