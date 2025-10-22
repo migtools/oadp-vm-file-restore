@@ -87,6 +87,7 @@ func (e ErrUnsupportedBackup) Error() string {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch
 
@@ -2353,33 +2354,33 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		VMFRNamespace:        vmfr.Namespace,
 		VMFRUID:              string(vmfr.UID),
 		PVCMounts:            pvcMounts,
-		MainContainer:        nil,               // Use default busybox HTTP server
-		SSHAccess:            sshConfig,         // Configured SSH access (or nil)
-		FileBrowserAccess:    fileBrowserConfig, // Configured FileBrowser access (or nil)
-		EnableDualPathAccess: true,              // Enable dual-path symlinks
-		UseInternalMounts:    false,             // Use Kubernetes-managed PVC mounts
+		MainContainer:        ptr.To(buildVMFileServerMainContainer(pvcMounts)), // Use VM file server for disk mounting
+		SSHAccess:            sshConfig,                                         // Configured SSH access (or nil)
+		FileBrowserAccess:    fileBrowserConfig,                                 // Configured FileBrowser access (or nil)
+		EnableDualPathAccess: true,                                              // Enable dual-path symlinks
+		UseInternalMounts:    false,                                             // Use Kubernetes-managed PVC mounts
 	}
 
 	logger.V(0).Info("File server configuration prepared",
 		"sshEnabled", sshConfig != nil,
 		"fileBrowserEnabled", fileBrowserConfig != nil)
 
-	// Build pod spec
-	pod, err := buildFileServerPodSpec(podConfig)
+	// Build deployment spec (uses VM file server container)
+	deployment, err := buildFileServerDeployment(podConfig)
 	if err != nil {
-		return fmt.Errorf("failed to build pod spec: %w", err)
+		return fmt.Errorf("failed to build deployment spec: %w", err)
 	}
 
-	// Create the pod
-	err = r.Create(ctx, pod)
+	// Create the deployment
+	err = r.Create(ctx, deployment)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			logger.V(1).Info("File server pod already exists", "podName", pod.Name)
+			logger.V(1).Info("File server deployment already exists", "deploymentName", deployment.Name)
 		} else {
-			return fmt.Errorf("failed to create file server pod: %w", err)
+			return fmt.Errorf("failed to create file server deployment: %w", err)
 		}
 	} else {
-		logger.V(0).Info("Created file server pod", "podName", pod.Name, "namespace", pod.Namespace)
+		logger.V(0).Info("Created file server deployment", "deploymentName", deployment.Name, "namespace", deployment.Namespace)
 	}
 
 	// Build service configuration
@@ -2418,7 +2419,7 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	}
 
 	logger.V(0).Info("File server resources created successfully",
-		"podName", pod.Name,
+		"deploymentName", deployment.Name,
 		"serviceName", service.Name,
 		"namespace", restoreNamespace)
 

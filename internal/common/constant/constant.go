@@ -123,6 +123,9 @@ const (
 	DefaultFileServerTimeout = "10m"
 	FileServerPodPrefix      = "vmfr-fileserver"
 	FileServerServicePrefix  = "vmfr-service"
+
+	// VM file server container image for mounting VM disk images
+	VMFileServerImage = "quay.io/spampatt/oadp-vm-file-server:dev"
 )
 
 // Magic numbers

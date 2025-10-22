@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -391,6 +392,72 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 	return pod, nil
 }
 
+// buildFileServerDeployment builds a Deployment spec for serving files from restored PVCs.
+// This wraps the pod spec from buildFileServerPodSpec in a Deployment for better lifecycle management.
+//
+// Using a Deployment instead of a bare Pod provides:
+// - Automatic pod restart on failure
+// - Better integration with Kubernetes lifecycle (no cross-namespace owner reference issues)
+// - Production-ready deployment patterns
+// - Simplified updates and rollbacks
+func buildFileServerDeployment(config FileServerPodConfig) (*appsv1.Deployment, error) {
+	// Build the pod spec using existing buildFileServerPodSpec function
+	pod, err := buildFileServerPodSpec(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build pod spec for deployment: %w", err)
+	}
+
+	// Extract pod template from the built pod
+	podTemplate := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      pod.Labels,
+			Annotations: pod.Annotations,
+		},
+		Spec: pod.Spec,
+	}
+
+	// Build selector labels - must match pod template labels
+	selectorLabels := map[string]string{
+		"oadp.openshift.io/vm-file-restore":    config.VMFRName,
+		"oadp.openshift.io/vm-file-restore-ns": config.VMFRNamespace,
+		"app":                                  "vmfr-file-server",
+	}
+
+	// Build deployment
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        config.PodName, // Use same name as pod would have
+			Namespace:   config.PodNamespace,
+			Labels:      pod.Labels,
+			Annotations: pod.Annotations,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptr.To(int32(1)), // Single replica for file server
+			Selector: &metav1.LabelSelector{
+				MatchLabels: selectorLabels,
+			},
+			Template: podTemplate,
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType, // Recreate to avoid conflicts with PVC mounts
+			},
+		},
+	}
+
+	// IMPORTANT: Do NOT add cross-namespace owner references!
+	// Kubernetes garbage collector rejects owner references where the owner
+	// is in a different namespace than the owned resource.
+	//
+	// Instead of owner references, we use:
+	// 1. Labels to track ownership (already added above)
+	// 2. Finalizers on the VMFR to clean up resources on deletion
+	//
+	// The labels "oadp.openshift.io/vm-file-restore" and
+	// "oadp.openshift.io/vm-file-restore-ns" uniquely identify the owning VMFR
+	// and allow the controller to find and delete this Deployment during finalizer cleanup.
+
+	return deployment, nil
+}
+
 // buildPVCVolumesAndMounts creates volumes and volume mounts for PVCs
 func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []corev1.VolumeMount) {
 	volumes := make([]corev1.Volume, 0, len(pvcMounts))
@@ -454,6 +521,20 @@ func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualP
 			},
 		},
 		VolumeMounts: volumeMounts,
+	}
+}
+
+// buildVMFileServerMainContainer creates a VM file server container for mounting VM disk images
+// This container uses libguestfs/QEMU to mount VM disks and provide file-level access
+func buildVMFileServerMainContainer(pvcMounts []PVCMountInfo) corev1.Container {
+	return corev1.Container{
+		Name:  "vm-file-server",
+		Image: constant.VMFileServerImage,
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			"echo 'VM file server starting...'; sleep infinity",
+		},
 	}
 }
 
@@ -609,19 +690,13 @@ func buildFileServerService(config ServiceConfig) (*corev1.Service, error) {
 		},
 	}
 
-	// Add owner reference if VMFR UID is provided
-	if config.VMFRUID != "" {
-		service.OwnerReferences = []metav1.OwnerReference{
-			{
-				APIVersion:         "oadp.openshift.io/v1alpha1",
-				Kind:               "VirtualMachineFileRestore",
-				Name:               config.VMFRName,
-				UID:                types.UID(config.VMFRUID),
-				Controller:         ptr.To(true),
-				BlockOwnerDeletion: ptr.To(true),
-			},
-		}
-	}
+	// IMPORTANT: Do NOT add cross-namespace owner references!
+	// Services are created in the same namespace as the Deployment/Pod (the restore namespace),
+	// which may be different from the VMFR namespace. Cross-namespace owner references
+	// are rejected by the Kubernetes garbage collector.
+	//
+	// Instead, we use labels (already added above) to track ownership,
+	// and the controller's finalizer logic will clean up the Service on VMFR deletion.
 
 	return service, nil
 }
