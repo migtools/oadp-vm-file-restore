@@ -1,0 +1,285 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: file-serving-pod
+  namespace: vmfr-pod-test
+  labels:
+    app: file-serving-pod
+spec:
+  # Pod-level security context to set fsGroup for volume ownership
+  securityContext:
+    fsGroup: 1000  # Files created in emptyDir volumes will be owned by GID 1000
+
+  initContainers:
+  # Privileged init container to create sample data
+  - name: setup-data
+    image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -ex
+        # File Browser user will have UID 1000
+        FB_UID=1000
+        FB_GID=1000
+
+        # Create sample directory structure
+        mkdir -p /restores/sampledata/vm1/disk1
+        mkdir -p /restores/sampledata/vm1/disk2
+        mkdir -p /restores/sampledata/vm2/disk1
+
+        # Create some sample files
+        echo "Sample data for VM1 disk1" > /restores/sampledata/vm1/disk1/data.txt
+        echo "Sample data for VM1 disk2" > /restores/sampledata/vm1/disk2/data.txt
+        echo "Sample data for VM2 disk1" > /restores/sampledata/vm2/disk1/data.txt
+
+        # Create a README
+        {
+          echo "OADP VM File Restore - Sample Data"
+          echo ""
+          echo "This directory contains sample backup data."
+          echo "In production, this would be restored from Velero backups."
+          echo ""
+          echo "Access via File Browser:"
+          echo "- Browse files through web interface"
+          echo "- Download individual files"
+          echo "- Download directories as ZIP archives"
+          echo "- Preview supported file types"
+        } > /restores/sampledata/README.txt
+
+        # Set ownership to filebrowser user (UID 1000)
+        chown -R ${FB_UID}:${FB_GID} /restores/sampledata
+
+        # Set permissions to allow filebrowser user full access
+        chmod -R 755 /restores/sampledata
+
+        echo "Sample data setup complete - owned by UID ${FB_UID}"
+        ls -lan /restores/sampledata/
+    volumeMounts:
+    - name: restores-volume
+      mountPath: /restores
+    securityContext:
+      privileged: true
+      runAsUser: 0
+
+  containers:
+  # File Browser container - provides web-based file access
+  - name: filebrowser
+    image: quay.io/migtools/oadp-vmfr-filebrowser:latest
+    command:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+
+        echo "==================================================================="
+        echo "OADP VM File Restore File Browser Container Starting"
+        echo "==================================================================="
+
+        # Configuration from environment
+        FB_DATABASE=${FB_DATABASE:-/database/filebrowser.db}
+        FB_ROOT=${FB_ROOT:-/srv}
+        FB_PORT=${FB_PORT:-8080}
+        FB_ADDRESS=${FB_ADDRESS:-0.0.0.0}
+
+        # Read credentials from secret
+        if [ -f /etc/filebrowser-credentials/username ]; then
+            FB_USERNAME=$(cat /etc/filebrowser-credentials/username)
+        else
+            FB_USERNAME="oadp"
+        fi
+
+        if [ -f /etc/filebrowser-credentials/password ]; then
+            FB_PASSWORD=$(cat /etc/filebrowser-credentials/password)
+        else
+            echo "ERROR: Password not found in secret at /etc/filebrowser-credentials/password"
+            exit 1
+        fi
+
+        # Branding configuration
+        FB_BRANDING_NAME=${FB_BRANDING_NAME:-OADP VM File Restore Browser}
+
+        echo "Initializing File Browser..."
+
+        # Initialize database if it doesn't exist
+        if [ ! -f "${FB_DATABASE}" ]; then
+            echo "Creating new database at ${FB_DATABASE}..."
+            /usr/local/bin/filebrowser config init --database "${FB_DATABASE}"
+        else
+            echo "Database exists at ${FB_DATABASE}"
+        fi
+
+        # Configure branding (idempotent - can run multiple times)
+        echo "Configuring branding..."
+
+        # Only set defaultLoginUser if username is missing or equals "oadp"
+        if [ -z "${FB_USERNAME}" ] || [ "${FB_USERNAME}" = "oadp" ]; then
+            echo "Setting default login user to: oadp"
+            /usr/local/bin/filebrowser config set \
+              --database "${FB_DATABASE}" \
+              --branding.name "${FB_BRANDING_NAME}" \
+              --branding.disableUsedPercentage \
+              --branding.disableExternal \
+              --branding.disableUserProfile \
+              --branding.defaultLoginUser "oadp"
+        else
+            echo "Using custom username, not setting default login user"
+            /usr/local/bin/filebrowser config set \
+              --database "${FB_DATABASE}" \
+              --branding.name "${FB_BRANDING_NAME}" \
+              --branding.disableUsedPercentage \
+              --branding.disableExternal \
+              --branding.disableUserProfile
+        fi
+
+        # Check if user exists, if not create it
+        if /usr/local/bin/filebrowser users ls --database "${FB_DATABASE}" | grep -q "^| ${FB_USERNAME} "; then
+            echo "User ${FB_USERNAME} already exists"
+        else
+            echo "Creating read-only user: ${FB_USERNAME}..."
+            /usr/local/bin/filebrowser users add "${FB_USERNAME}" "${FB_PASSWORD}" \
+              --database "${FB_DATABASE}" \
+              --perm.create=false \
+              --perm.delete=false \
+              --perm.modify=false \
+              --perm.rename=false \
+              --perm.share=false \
+              --perm.execute=false \
+              --lockPassword \
+              --locale en \
+              --hideDotfiles=false \
+              --singleClick=false \
+              --dateFormat=false
+            echo "User ${FB_USERNAME} created successfully"
+        fi
+
+        echo "==================================================================="
+        echo "File Browser Configuration Complete"
+        echo "==================================================================="
+        echo "Service URL: http://${FB_ADDRESS}:${FB_PORT}"
+        echo "Root Directory: ${FB_ROOT}"
+        echo ""
+        echo "User Credentials:"
+        echo "  Username: ${FB_USERNAME}"
+        echo "  Password: ********"
+        echo ""
+        echo "Permissions (Read-Only):"
+        echo "  ✓ View files"
+        echo "  ✓ Download files"
+        echo "  ✗ Create/Upload"
+        echo "  ✗ Delete/Modify/Rename/Share/Execute"
+        echo ""
+        echo "Branding: ${FB_BRANDING_NAME}"
+        echo "==================================================================="
+
+        # Start File Browser with TLS
+        echo "Starting File Browser with HTTPS..."
+        if [ -f /etc/filebrowser-tls/tls.crt ] && [ -f /etc/filebrowser-tls/tls.key ]; then
+          echo "TLS certificates found, starting with HTTPS on port ${FB_PORT}"
+          exec /usr/local/bin/filebrowser \
+            --address "${FB_ADDRESS}" \
+            --port "${FB_PORT}" \
+            --root "${FB_ROOT}" \
+            --database "${FB_DATABASE}" \
+            --cert /etc/filebrowser-tls/tls.crt \
+            --key /etc/filebrowser-tls/tls.key
+        else
+          echo "WARNING: TLS certificates not found, starting with HTTP"
+          exec /usr/local/bin/filebrowser \
+            --address "${FB_ADDRESS}" \
+            --port "${FB_PORT}" \
+            --root "${FB_ROOT}" \
+            --database "${FB_DATABASE}"
+        fi
+    ports:
+    - containerPort: 8443
+      name: https
+      protocol: TCP
+    env:
+    # File Browser configuration
+    - name: FB_ROOT
+      value: "/srv/restores"
+    - name: FB_PORT
+      value: "8443"
+    - name: FB_ADDRESS
+      value: "0.0.0.0"
+    - name: FB_DATABASE
+      value: "/database/filebrowser.db"
+    # Branding
+    - name: FB_BRANDING_NAME
+      value: "OADP VM File Restore Browser"
+    volumeMounts:
+    - name: restores-volume
+      mountPath: /srv/restores
+      readOnly: true  # Read-only access for security
+    - name: database
+      mountPath: /database
+    - name: tmp
+      mountPath: /tmp
+    - name: filebrowser-tls
+      mountPath: /etc/filebrowser-tls
+      readOnly: true
+    - name: filebrowser-credentials
+      mountPath: /etc/filebrowser-credentials
+      readOnly: true
+    securityContext:
+      # File Browser runs as non-root
+      runAsUser: 1000
+      runAsGroup: 1000
+      runAsNonRoot: true
+      # Read-only root filesystem for additional security
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      # Minimal capabilities
+      capabilities:
+        drop:
+        - ALL
+
+  volumes:
+  - name: restores-volume
+    persistentVolumeClaim:
+      claimName: restores-pvc
+  # Database volume for File Browser state
+  - name: database
+    emptyDir:
+      medium: Memory
+      sizeLimit: 10Mi
+  # Tmp volume for read-only root filesystem
+  - name: tmp
+    emptyDir:
+      medium: Memory
+      sizeLimit: 10Mi
+  # TLS certificates from OpenShift service CA
+  - name: filebrowser-tls
+    secret:
+      secretName: filebrowser-tls
+      defaultMode: 0400
+  # User credentials from secret
+  - name: filebrowser-credentials
+    secret:
+      secretName: filebrowser-credentials
+      defaultMode: 0400
+
+  restartPolicy: Always
+---
+# Service to expose HTTPS port
+apiVersion: v1
+kind: Service
+metadata:
+  name: file-serving-http
+  namespace: vmfr-pod-test
+  labels:
+    app: file-serving-pod
+  annotations:
+    # Request OpenShift to generate a serving certificate
+    service.beta.openshift.io/serving-cert-secret-name: filebrowser-tls
+spec:
+  selector:
+    app: file-serving-pod
+  type: ClusterIP
+  ports:
+  - name: https
+    port: 8443
+    targetPort: 8443
+    protocol: TCP

@@ -1,0 +1,20 @@
+---
+# OpenShift Route for external HTTPS access
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: file-serving-http
+  namespace: vmfr-pod-test
+  labels:
+    app: file-serving-pod
+spec:
+  to:
+    kind: Service
+    name: file-serving-http
+    weight: 100
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
