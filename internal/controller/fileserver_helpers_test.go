@@ -66,8 +66,16 @@ func TestBuildFileServerPodSpec_DefaultMainContainer(t *testing.T) {
 		}
 
 		// Verify labels
-		if pod.Labels["oadp.openshift.io/vm-file-restore"] != "test-vmfr" {
-			t.Error("Missing or incorrect vm-file-restore label")
+		if pod.Labels[constant.VMFROriginUUIDLabel] != "test-uid" {
+			t.Errorf("Expected UUID label '%s', got '%s'", "test-uid", pod.Labels[constant.VMFROriginUUIDLabel])
+		}
+
+		// Verify annotations
+		if pod.Annotations[constant.VMFROriginNameAnnotation] != "test-vmfr" {
+			t.Errorf("Expected name annotation 'test-vmfr', got '%s'", pod.Annotations[constant.VMFROriginNameAnnotation])
+		}
+		if pod.Annotations[constant.VMFROriginNamespaceAnnotation] != "vmfr-ns" {
+			t.Errorf("Expected namespace annotation 'vmfr-ns', got '%s'", pod.Annotations[constant.VMFROriginNamespaceAnnotation])
 		}
 
 		// Verify main container exists
@@ -365,8 +373,16 @@ func TestBuildFileServerService(t *testing.T) {
 		}
 
 		// Verify selector
-		if service.Spec.Selector["oadp.openshift.io/vm-file-restore"] != "test-vmfr" {
-			t.Error("Missing or incorrect selector")
+		if service.Spec.Selector[constant.VMFROriginUUIDLabel] != "test-uid" {
+			t.Errorf("Expected UUID selector '%s', got '%s'", "test-uid", service.Spec.Selector[constant.VMFROriginUUIDLabel])
+		}
+
+		// Verify annotations
+		if service.Annotations[constant.VMFROriginNameAnnotation] != "test-vmfr" {
+			t.Errorf("Expected name annotation 'test-vmfr', got '%s'", service.Annotations[constant.VMFROriginNameAnnotation])
+		}
+		if service.Annotations[constant.VMFROriginNamespaceAnnotation] != "vmfr-ns" {
+			t.Errorf("Expected namespace annotation 'vmfr-ns', got '%s'", service.Annotations[constant.VMFROriginNamespaceAnnotation])
 		}
 
 		// Verify ports

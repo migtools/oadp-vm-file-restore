@@ -418,9 +418,8 @@ func buildFileServerDeployment(config FileServerPodConfig) (*appsv1.Deployment, 
 
 	// Build selector labels - must match pod template labels
 	selectorLabels := map[string]string{
-		"oadp.openshift.io/vm-file-restore":    config.VMFRName,
-		"oadp.openshift.io/vm-file-restore-ns": config.VMFRNamespace,
-		"app":                                  "vmfr-file-server",
+		constant.VMFROriginUUIDLabel: config.VMFRUID,
+		"app":                        "vmfr-file-server",
 	}
 
 	// Build deployment
@@ -451,8 +450,8 @@ func buildFileServerDeployment(config FileServerPodConfig) (*appsv1.Deployment, 
 	// 1. Labels to track ownership (already added above)
 	// 2. Finalizers on the VMFR to clean up resources on deletion
 	//
-	// The labels "oadp.openshift.io/vm-file-restore" and
-	// "oadp.openshift.io/vm-file-restore-ns" uniquely identify the owning VMFR
+	// The label constant.VMFROriginUUIDLabel uniquely identifies the owning VMFR
+	// Name and namespace are stored in annotations for reference
 	// and allow the controller to find and delete this Deployment during finalizer cleanup.
 
 	return deployment, nil
@@ -541,10 +540,9 @@ func buildVMFileServerMainContainer() corev1.Container {
 // buildPodLabels creates labels for the pod
 func buildPodLabels(config FileServerPodConfig) map[string]string {
 	labels := map[string]string{
-		"oadp.openshift.io/vm-file-restore":    config.VMFRName,
-		"oadp.openshift.io/vm-file-restore-ns": config.VMFRNamespace,
-		constant.ManagedByLabel:                constant.ManagedByLabelValue,
-		"app":                                  "vmfr-file-server",
+		constant.VMFROriginUUIDLabel: config.VMFRUID,
+		constant.ManagedByLabel:      constant.ManagedByLabelValue,
+		"app":                        "vmfr-file-server",
 	}
 
 	// Merge with additional labels
@@ -558,8 +556,9 @@ func buildPodLabels(config FileServerPodConfig) map[string]string {
 // buildPodAnnotations creates annotations for the pod
 func buildPodAnnotations(config FileServerPodConfig) map[string]string {
 	annotations := map[string]string{
-		"oadp.openshift.io/vmfr-origin":    config.VMFRName,
-		"oadp.openshift.io/vmfr-pvc-count": fmt.Sprintf("%d", len(config.PVCMounts)),
+		constant.VMFROriginNameAnnotation:      config.VMFRName,
+		constant.VMFROriginNamespaceAnnotation: config.VMFRNamespace,
+		"oadp.openshift.io/vmfr-pvc-count":     fmt.Sprintf("%d", len(config.PVCMounts)),
 	}
 
 	// Add enabled access methods
@@ -657,18 +656,16 @@ func buildFileServerService(config ServiceConfig) (*corev1.Service, error) {
 	selector := config.Selector
 	if len(selector) == 0 {
 		selector = map[string]string{
-			"oadp.openshift.io/vm-file-restore":    config.VMFRName,
-			"oadp.openshift.io/vm-file-restore-ns": config.VMFRNamespace,
-			"app":                                  "vmfr-file-server",
+			constant.VMFROriginUUIDLabel: config.VMFRUID,
+			"app":                        "vmfr-file-server",
 		}
 	}
 
 	// Build default labels
 	defaultLabels := map[string]string{
-		"oadp.openshift.io/vm-file-restore":    config.VMFRName,
-		"oadp.openshift.io/vm-file-restore-ns": config.VMFRNamespace,
-		constant.ManagedByLabel:                constant.ManagedByLabelValue,
-		"app":                                  "vmfr-file-server",
+		constant.VMFROriginUUIDLabel: config.VMFRUID,
+		constant.ManagedByLabel:      constant.ManagedByLabelValue,
+		"app":                        "vmfr-file-server",
 	}
 
 	// Merge with additional labels
@@ -676,12 +673,22 @@ func buildFileServerService(config ServiceConfig) (*corev1.Service, error) {
 		defaultLabels[k] = v
 	}
 
+	// Build annotations
+	annotations := map[string]string{
+		constant.VMFROriginNameAnnotation:      config.VMFRName,
+		constant.VMFROriginNamespaceAnnotation: config.VMFRNamespace,
+	}
+	// Merge with additional annotations
+	for k, v := range config.ServiceAnnotations {
+		annotations[k] = v
+	}
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        config.ServiceName,
 			Namespace:   config.ServiceNamespace,
 			Labels:      defaultLabels,
-			Annotations: config.ServiceAnnotations,
+			Annotations: annotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: selector,

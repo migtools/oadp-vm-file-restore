@@ -1666,13 +1666,15 @@ func (r *VirtualMachineFileRestoreReconciler) mapVeleroRestoreToVMFR(ctx context
 	}
 
 	// Check if this Velero Restore is managed by a VMFR
-	vmfrName, exists := restore.Labels["oadp.openshift.io/vm-file-restore"]
+	_, exists := restore.Labels[constant.VMFROriginUUIDLabel]
 	if !exists {
 		return nil
 	}
 
-	vmfrNamespace, exists := restore.Labels["oadp.openshift.io/vm-file-restore-ns"]
-	if !exists {
+	// Get VMFR name and namespace from annotations
+	vmfrName, nameExists := restore.Annotations[constant.VMFROriginNameAnnotation]
+	vmfrNamespace, nsExists := restore.Annotations[constant.VMFROriginNamespaceAnnotation]
+	if !nameExists || !nsExists {
 		return nil
 	}
 
@@ -1865,10 +1867,11 @@ func (r *VirtualMachineFileRestoreReconciler) createVeleroRestores(
 				GenerateName: restoreNamePrefix, // K8s will append random suffix
 				Namespace:    r.OADPNamespace,
 				Labels: map[string]string{
-					"oadp.openshift.io/vm-file-restore":    vmfr.Name,
-					"oadp.openshift.io/vm-file-restore-ns": vmfr.Namespace,
+					constant.VMFROriginUUIDLabel: string(vmfr.UID),
 				},
 				Annotations: map[string]string{
+					constant.VMFROriginNameAnnotation:          vmfr.Name,
+					constant.VMFROriginNamespaceAnnotation:     vmfr.Namespace,
 					constant.VirtualMachineNameAnnotation:      vmbd.Spec.VirtualMachineName,
 					constant.VirtualMachineNamespaceAnnotation: vmbd.Spec.VirtualMachineNamespace,
 					constant.BackupNameAnnotation:              backupName,
@@ -1969,8 +1972,7 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 	listOpts := []client.ListOption{
 		client.InNamespace(r.OADPNamespace),
 		client.MatchingLabels{
-			"oadp.openshift.io/vm-file-restore":    vmfr.Name,
-			"oadp.openshift.io/vm-file-restore-ns": vmfr.Namespace,
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
 		},
 	}
 

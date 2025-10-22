@@ -23,6 +23,8 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/crypto/ssh"
 	apitypes "k8s.io/apimachinery/pkg/types"
+
+	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
 )
 
 const testUsername = "testuser"
@@ -161,8 +163,16 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 		if secret.Labels["oadp.openshift.io/credential-type"] != "ssh" {
 			t.Error("Missing or incorrect credential-type label")
 		}
-		if secret.Labels["oadp.openshift.io/vm-file-restore"] != "test-vmfr" {
-			t.Error("Missing or incorrect vm-file-restore label")
+		if secret.Labels[constant.VMFROriginUUIDLabel] != "test-uid" {
+			t.Errorf("Expected UUID label '%s', got '%s'", "test-uid", secret.Labels[constant.VMFROriginUUIDLabel])
+		}
+
+		// Check annotations
+		if secret.Annotations[constant.VMFROriginNameAnnotation] != "test-vmfr" {
+			t.Errorf("Expected name annotation 'test-vmfr', got '%s'", secret.Annotations[constant.VMFROriginNameAnnotation])
+		}
+		if secret.Annotations[constant.VMFROriginNamespaceAnnotation] != "vmfr-namespace" {
+			t.Errorf("Expected namespace annotation 'vmfr-namespace', got '%s'", secret.Annotations[constant.VMFROriginNamespaceAnnotation])
 		}
 	})
 
@@ -222,6 +232,17 @@ func TestCreateFileBrowserCredentialsSecret(t *testing.T) {
 		// Check labels
 		if secret.Labels["oadp.openshift.io/credential-type"] != "filebrowser" {
 			t.Error("Missing or incorrect credential-type label")
+		}
+		if secret.Labels[constant.VMFROriginUUIDLabel] != "test-uid" {
+			t.Errorf("Expected UUID label '%s', got '%s'", "test-uid", secret.Labels[constant.VMFROriginUUIDLabel])
+		}
+
+		// Check annotations
+		if secret.Annotations[constant.VMFROriginNameAnnotation] != "test-vmfr" {
+			t.Errorf("Expected name annotation 'test-vmfr', got '%s'", secret.Annotations[constant.VMFROriginNameAnnotation])
+		}
+		if secret.Annotations[constant.VMFROriginNamespaceAnnotation] != "vmfr-namespace" {
+			t.Errorf("Expected namespace annotation 'vmfr-namespace', got '%s'", secret.Annotations[constant.VMFROriginNamespaceAnnotation])
 		}
 	})
 

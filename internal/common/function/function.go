@@ -253,13 +253,14 @@ func CreateSSHCredentialsSecret(
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				constant.ManagedByLabel:                constant.ManagedByLabelValue,
-				"oadp.openshift.io/vm-file-restore":    vmfrName,
-				"oadp.openshift.io/vm-file-restore-ns": vmfrNamespace,
-				"oadp.openshift.io/credential-type":    "ssh",
+				constant.ManagedByLabel:             constant.ManagedByLabelValue,
+				constant.VMFROriginUUIDLabel:        string(vmfrUID),
+				"oadp.openshift.io/credential-type": "ssh",
 			},
 			Annotations: map[string]string{
-				"oadp.openshift.io/generated-by": "oadp-vm-file-restore-controller",
+				constant.VMFROriginNameAnnotation:      vmfrName,
+				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
+				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -307,13 +308,14 @@ func CreateFileBrowserCredentialsSecret(
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				constant.ManagedByLabel:                constant.ManagedByLabelValue,
-				"oadp.openshift.io/vm-file-restore":    vmfrName,
-				"oadp.openshift.io/vm-file-restore-ns": vmfrNamespace,
-				"oadp.openshift.io/credential-type":    "filebrowser",
+				constant.ManagedByLabel:             constant.ManagedByLabelValue,
+				constant.VMFROriginUUIDLabel:        string(vmfrUID),
+				"oadp.openshift.io/credential-type": "filebrowser",
 			},
 			Annotations: map[string]string{
-				"oadp.openshift.io/generated-by": "oadp-vm-file-restore-controller",
+				constant.VMFROriginNameAnnotation:      vmfrName,
+				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
+				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
