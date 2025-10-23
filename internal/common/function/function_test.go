@@ -22,6 +22,8 @@ import (
 
 	"github.com/go-logr/logr"
 	"golang.org/x/crypto/ssh"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
@@ -144,7 +146,7 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 	}
 
 	secret := CreateSSHCredentialsSecret(
-		"test-secret",
+		"test-secret-",
 		"test-namespace",
 		testUsername,
 		keyPair,
@@ -155,15 +157,15 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 	)
 
 	t.Run("creates secret with correct metadata", func(t *testing.T) {
-		if secret.Name != "test-secret" {
-			t.Errorf("Expected name 'test-secret', got '%s'", secret.Name)
+		if secret.GenerateName != "test-secret-" {
+			t.Errorf("Expected generateName 'test-secret-', got '%s'", secret.GenerateName)
 		}
 		if secret.Namespace != "test-namespace" {
 			t.Errorf("Expected namespace 'test-namespace', got '%s'", secret.Namespace)
 		}
 
 		// Check labels
-		if secret.Labels["oadp.openshift.io/credential-type"] != "ssh" {
+		if secret.Labels[constant.CredentialTypeLabel] != constant.CredentialTypeSSH {
 			t.Error("Missing or incorrect credential-type label")
 		}
 		if secret.Labels[constant.VMFROriginUUIDLabel] != "test-uid" {
@@ -191,20 +193,11 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 		}
 	})
 
-	t.Run("creates secret with owner reference", func(t *testing.T) {
-		if len(secret.OwnerReferences) != 1 {
-			t.Fatalf("Expected 1 owner reference, got %d", len(secret.OwnerReferences))
-		}
-
-		owner := secret.OwnerReferences[0]
-		if owner.Name != testVMFRName {
-			t.Errorf("Expected owner name 'test-vmfr', got '%s'", owner.Name)
-		}
-		if owner.Kind != "VirtualMachineFileRestore" {
-			t.Errorf("Expected owner kind 'VirtualMachineFileRestore', got '%s'", owner.Kind)
-		}
-		if *owner.Controller != true {
-			t.Error("Owner reference should be controller")
+	t.Run("creates secret without owner reference", func(t *testing.T) {
+		// Owner references are not set for cross-namespace resources
+		// (VMFR may be in different namespace than secret)
+		if len(secret.OwnerReferences) != 0 {
+			t.Fatalf("Expected 0 owner references (cross-namespace not allowed), got %d", len(secret.OwnerReferences))
 		}
 	})
 }
@@ -218,7 +211,7 @@ func TestCreateFileBrowserCredentialsSecret(t *testing.T) {
 	}
 
 	secret := CreateFileBrowserCredentialsSecret(
-		"fb-secret",
+		"fb-secret-",
 		"test-namespace",
 		creds,
 		testVMFRName,
@@ -228,12 +221,12 @@ func TestCreateFileBrowserCredentialsSecret(t *testing.T) {
 	)
 
 	t.Run("creates secret with correct metadata", func(t *testing.T) {
-		if secret.Name != "fb-secret" {
-			t.Errorf("Expected name 'fb-secret', got '%s'", secret.Name)
+		if secret.GenerateName != "fb-secret-" {
+			t.Errorf("Expected generateName 'fb-secret-', got '%s'", secret.GenerateName)
 		}
 
 		// Check labels
-		if secret.Labels["oadp.openshift.io/credential-type"] != "filebrowser" {
+		if secret.Labels[constant.CredentialTypeLabel] != constant.CredentialTypeFileBrowser {
 			t.Error("Missing or incorrect credential-type label")
 		}
 		if secret.Labels[constant.VMFROriginUUIDLabel] != "test-uid" {
@@ -365,6 +358,332 @@ func TestGenerateVeleroRestorePrefix(t *testing.T) {
 		expected := "vmfr-test-vmfr-test-backup-"
 		if prefix != expected {
 			t.Errorf("Expected lowercase '%s', got '%s'", expected, prefix)
+		}
+	})
+}
+
+func TestValidateSSHPublicKey(t *testing.T) {
+	t.Run("validates valid ED25519 public key", func(t *testing.T) {
+		// Valid ED25519 public key
+		validKey := []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com")
+		err := ValidateSSHPublicKey(validKey)
+		if err != nil {
+			t.Errorf("Expected valid key to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("validates valid ECDSA P-256 public key", func(t *testing.T) {
+		// Valid ECDSA P-256 public key
+		validKey := []byte("ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg= test@example.com")
+		err := ValidateSSHPublicKey(validKey)
+		if err != nil {
+			t.Errorf("Expected valid ECDSA key to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("validates valid RSA public key", func(t *testing.T) {
+		// Valid RSA key - modern SSH will use SHA-2 signatures (rsa-sha2-256/512) at runtime
+		// All RSA keys in authorized_keys format are labeled "ssh-rsa" regardless of signature algorithm
+		rsaKey := []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCgdRkm8/liQKXLAUVsC9ohk+TJk0/lJIy/7jDK0VoZtK9mnEDCxtsk1swu9n4q5yzg6kDevOSvdy+RmBddMc9P4QMbvmXLkXwq7JXIDAGuS80xwXDl1TtvwT760uuhmSD9jBNYiD26+p+YAvutFcr3XDgv4JFuLs7oSgSnRxOd2JOdx8n/XMzWBsADVNErfZ1+AqF37JI6wxn2eVCgbSJRQguA2uk2V1DWvhaptGXGYyUjjuwcVh525gGwqEYaaokzkTha8WsjJRE1Edlj2j34C3j+5p/vIASbYy0ah20j1Qi1aYplOkOIZcT3t+NFR9cqvwN//bhBQJrYXGS9c781 test@example.com")
+		err := ValidateSSHPublicKey(rsaKey)
+		if err != nil {
+			t.Errorf("Expected valid RSA key to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("rejects dss public key (deprecated)", func(t *testing.T) {
+		// Valid DSS key but should be rejected as it's not in allowed list
+		dssKey := []byte("ssh-dss AAAAB3NzaC1kc3MAAACBAKYQsDfLsXbNmHfK test@example.com")
+		err := ValidateSSHPublicKey(dssKey)
+		if err == nil {
+			t.Error("Expected ssh-dss key to be rejected")
+		}
+	})
+
+	t.Run("rejects invalid public key format", func(t *testing.T) {
+		invalidKey := []byte("not-a-valid-ssh-key")
+		err := ValidateSSHPublicKey(invalidKey)
+		if err == nil {
+			t.Error("Expected invalid key to fail validation")
+		}
+	})
+
+	t.Run("rejects empty public key", func(t *testing.T) {
+		err := ValidateSSHPublicKey([]byte(""))
+		if err == nil {
+			t.Error("Expected empty key to fail validation")
+		}
+	})
+
+	t.Run("rejects malformed key with ssh- prefix", func(t *testing.T) {
+		// Has ssh- prefix but is not a valid key
+		invalidKey := []byte("ssh-ed25519 invalid-base64-data")
+		err := ValidateSSHPublicKey(invalidKey)
+		if err == nil {
+			t.Error("Expected malformed key to fail validation")
+		}
+	})
+}
+
+func TestValidateSSHSecret(t *testing.T) {
+	logger := logr.Discard()
+
+	t.Run("validates secret with valid public key", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"publicKey": []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
+			},
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err != nil {
+			t.Errorf("Expected valid secret to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("validates secret with public key and username", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"publicKey": []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
+				"username":  []byte("testuser"),
+			},
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err != nil {
+			t.Errorf("Expected valid secret to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("validates secret with all fields", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"publicKey":  []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
+				"privateKey": []byte("-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----"),
+				"username":   []byte("testuser"),
+			},
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err != nil {
+			t.Errorf("Expected valid secret to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("rejects secret with nil data", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: nil,
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret with nil data to fail validation")
+		}
+	})
+
+	t.Run("rejects secret without public key", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"username": []byte("testuser"),
+			},
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret without publicKey to fail validation")
+		}
+	})
+
+	t.Run("rejects secret with empty public key", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"publicKey": []byte(""),
+			},
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret with empty publicKey to fail validation")
+		}
+	})
+
+	t.Run("rejects secret with invalid public key format", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"publicKey": []byte("not-a-valid-ssh-key"),
+			},
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret with invalid publicKey to fail validation")
+		}
+	})
+
+	t.Run("validates secret with ssh-rsa public key", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"publicKey": []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCgdRkm8/liQKXLAUVsC9ohk+TJk0/lJIy/7jDK0VoZtK9mnEDCxtsk1swu9n4q5yzg6kDevOSvdy+RmBddMc9P4QMbvmXLkXwq7JXIDAGuS80xwXDl1TtvwT760uuhmSD9jBNYiD26+p+YAvutFcr3XDgv4JFuLs7oSgSnRxOd2JOdx8n/XMzWBsADVNErfZ1+AqF37JI6wxn2eVCgbSJRQguA2uk2V1DWvhaptGXGYyUjjuwcVh525gGwqEYaaokzkTha8WsjJRE1Edlj2j34C3j+5p/vIASbYy0ah20j1Qi1aYplOkOIZcT3t+NFR9cqvwN//bhBQJrYXGS9c781 test@example.com"),
+			},
+		}
+
+		err := ValidateSSHSecret(secret, logger)
+		if err != nil {
+			t.Errorf("Expected secret with valid ssh-rsa publicKey to pass validation, got error: %v", err)
+		}
+	})
+}
+
+func TestValidateFileBrowserSecret(t *testing.T) {
+	logger := logr.Discard()
+
+	t.Run("validates secret with valid password", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"password": []byte("this-is-a-secure-password"),
+			},
+		}
+
+		err := ValidateFileBrowserSecret(secret, logger)
+		if err != nil {
+			t.Errorf("Expected valid secret to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("validates secret with password and username", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"password": []byte("this-is-a-secure-password"),
+				"username": []byte("testuser"),
+			},
+		}
+
+		err := ValidateFileBrowserSecret(secret, logger)
+		if err != nil {
+			t.Errorf("Expected valid secret to pass validation, got error: %v", err)
+		}
+	})
+
+	t.Run("rejects secret with nil data", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: nil,
+		}
+
+		err := ValidateFileBrowserSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret with nil data to fail validation")
+		}
+	})
+
+	t.Run("rejects secret without password", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"username": []byte("testuser"),
+			},
+		}
+
+		err := ValidateFileBrowserSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret without password to fail validation")
+		}
+	})
+
+	t.Run("rejects secret with empty password", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"password": []byte(""),
+			},
+		}
+
+		err := ValidateFileBrowserSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret with empty password to fail validation")
+		}
+	})
+
+	t.Run("rejects secret with password shorter than minimum length", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"password": []byte("short"), // 5 characters, less than DefaultMinimumPasswordLength (12)
+			},
+		}
+
+		err := ValidateFileBrowserSecret(secret, logger)
+		if err == nil {
+			t.Error("Expected secret with short password to fail validation")
+		}
+	})
+
+	t.Run("accepts password exactly at minimum length", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-secret",
+				Namespace: "test-ns",
+			},
+			Data: map[string][]byte{
+				"password": []byte("exactly12chr"), // Exactly 12 characters
+			},
+		}
+
+		err := ValidateFileBrowserSecret(secret, logger)
+		if err != nil {
+			t.Errorf("Expected password at minimum length to pass validation, got error: %v", err)
 		}
 	})
 }

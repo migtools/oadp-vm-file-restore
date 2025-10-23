@@ -49,12 +49,8 @@ type SSHAccessConfig struct {
 	// Username for SSH access
 	Username string
 
-	// PublicKey for SSH key-based authentication (optional, inline or from secret)
-	PublicKey string
-
 	// CredentialsSecretName is the name of the Secret containing SSH credentials
-	// Only set if user provided CredentialsSecretRef
-	// The controller must ensure this Secret exists before pod creation
+	// The controller ensures this Secret exists before pod creation (via ensureCredentials)
 	// +optional
 	CredentialsSecretName string
 
@@ -851,8 +847,7 @@ func buildSSHSidecar(
 				Value: fmt.Sprintf("%d", config.Port),
 			},
 			{
-				// Disable password authentication by default (key-based only)
-				// This will be overridden if password is provided in Secret
+				// Disable password authentication (only public key auth is supported)
 				Name:  "PASSWORD_ACCESS",
 				Value: "false",
 			},
@@ -903,35 +898,31 @@ func buildSSHSidecar(
 		}
 	}
 
-	// Add volumes and init container based on credential source
+	// Add Secret volume and init container for SSH configuration
+	// The controller ensures the Secret exists before pod creation (via ensureCredentials)
 	var initContainers []corev1.Container
 
-	if config.CredentialsSecretName != "" {
-		// Credentials from Secret: mount the secret and use init container to configure
-		credentialsVolume := corev1.Volume{
-			Name: "ssh-credentials",
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: config.CredentialsSecretName,
-				},
+	// Credentials from Secret: mount the secret and use init container to configure
+	credentialsVolume := corev1.Volume{
+		Name: "ssh-credentials",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: config.CredentialsSecretName,
 			},
-		}
-		volumes = append(volumes, credentialsVolume)
-
-		// Init container to set up SSH configuration from Secret
-		initContainer := buildSSHInitContainerFromSecret()
-		initContainers = append(initContainers, initContainer)
-	} else {
-		// Inline credentials: use init container to configure from inline publicKey
-		initContainer := buildSSHInitContainerInline(config.PublicKey)
-		initContainers = append(initContainers, initContainer)
+		},
 	}
+	volumes = append(volumes, credentialsVolume)
+
+	// Init container to set up SSH configuration from Secret
+	initContainer := buildSSHInitContainerFromSecret()
+	initContainers = append(initContainers, initContainer)
 
 	return container, volumes, initContainers
 }
 
 // buildSSHInitContainerFromSecret creates an init container that configures SSH from a Secret.
-// The Secret should contain keys: username, publicKey, and optionally password.
+// The Secret must contain the publicKey field for public key authentication.
+// Password authentication is not supported - only public key auth is enabled.
 func buildSSHInitContainerFromSecret() corev1.Container {
 	// Shell script to configure SSH user from Secret credentials
 	setupScript := `#!/bin/sh
@@ -942,26 +933,20 @@ echo "Setting up SSH configuration from Secret..."
 # Create SSH keys directory
 mkdir -p /config/ssh_keys
 
-# Check if publicKey exists in secret and copy it
-if [ -f /credentials/publicKey ]; then
-    echo "Configuring public key authentication..."
-    cp /credentials/publicKey /config/ssh_keys/authorized_keys
-    chmod 600 /config/ssh_keys/authorized_keys
-    echo "Public key configured successfully"
+# Copy public key from secret for key-based authentication
+if [ ! -f /credentials/publicKey ]; then
+    echo "ERROR: publicKey not found in Secret"
+    exit 1
 fi
 
-# Check if password exists in secret and configure password auth
-if [ -f /credentials/password ]; then
-    echo "Password authentication will be enabled by SSH server"
-    # The linuxserver/openssh-server image will handle password setup
-    # We just need to signal that password auth should be enabled
-    export PASSWORD_ACCESS=true
-fi
+echo "Configuring public key authentication..."
+cp /credentials/publicKey /config/ssh_keys/authorized_keys
+chmod 600 /config/ssh_keys/authorized_keys
 
 # Set proper ownership (SSH server runs as PUID/PGID 1000)
 chown -R 1000:1000 /config
 
-echo "SSH configuration completed successfully"
+echo "SSH configuration completed successfully (public key auth only)"
 `
 
 	return corev1.Container{
@@ -981,48 +966,6 @@ echo "SSH configuration completed successfully"
 				Name:      "ssh-credentials",
 				MountPath: "/credentials",
 				ReadOnly:  true,
-			},
-		},
-	}
-}
-
-// buildSSHInitContainerInline creates an init container that configures SSH from inline publicKey.
-func buildSSHInitContainerInline(publicKey string) corev1.Container {
-	// Shell script to configure SSH user from inline publicKey
-	// The publicKey is embedded directly in the script
-	setupScript := fmt.Sprintf(`#!/bin/sh
-set -e
-
-echo "Setting up SSH configuration from inline publicKey..."
-
-# Create SSH keys directory
-mkdir -p /config/ssh_keys
-
-# Write the public key to authorized_keys
-cat > /config/ssh_keys/authorized_keys <<'EOF'
-%s
-EOF
-
-chmod 600 /config/ssh_keys/authorized_keys
-
-# Set proper ownership (SSH server runs as PUID/PGID 1000)
-chown -R 1000:1000 /config
-
-echo "SSH configuration completed successfully"
-`, publicKey)
-
-	return corev1.Container{
-		Name:  "setup-ssh-credentials",
-		Image: "busybox:latest",
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			setupScript,
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "ssh-config",
-				MountPath: "/config",
 			},
 		},
 	}

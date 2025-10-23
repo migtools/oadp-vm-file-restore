@@ -87,6 +87,7 @@ func (e ErrUnsupportedBackup) Error() string {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch
@@ -135,12 +136,13 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		progressingCondition := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
 
 		// Check if we've completed validation and are in workflow execution phase
-		// Workflow reasons: ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), RestoresCompleted (file server creation), and future workflow steps
+		// Workflow reasons: ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), RestoresCompleted (credentials), CredentialsReady (file server creation), and future workflow steps
 		isInWorkflowPhase := progressingCondition != nil &&
 			(progressingCondition.Reason == oadptypes.ReasonValidationCompleted ||
 				progressingCondition.Reason == oadptypes.ReasonNamespaceReady ||
 				progressingCondition.Reason == oadptypes.ReasonWaitingForRestores ||
-				progressingCondition.Reason == oadptypes.ReasonRestoresCompleted)
+				progressingCondition.Reason == oadptypes.ReasonRestoresCompleted ||
+				progressingCondition.Reason == oadptypes.ReasonCredentialsReady)
 
 		if isInWorkflowPhase {
 			// Validation complete — proceed with restore workflow
@@ -674,7 +676,7 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 
 	// Determine workflow step based on current Progressing reason
 	switch progressingCondition.Reason {
-	case "ValidationCompleted":
+	case oadptypes.ReasonValidationCompleted:
 		// Step 1: Create or validate the restore namespace
 		// At this point, we know all PVCs have available backups (validated in validateAndDiscoverPVCs)
 		restoreNamespace, err := r.ensureRestoreNamespace(ctx, logger, vmfr)
@@ -726,7 +728,7 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		logger.V(0).Info("Namespace creation completed", "namespace", restoreNamespace)
 		return true, nil // Requeue to proceed to next step
 
-	case "NamespaceReady":
+	case oadptypes.ReasonNamespaceReady:
 		// Step 2: Create Velero Restores for available backups
 		logger.V(0).Info("Preparing to create Velero Restores")
 
@@ -787,7 +789,7 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		logger.V(0).Info("Velero Restores created, transitioning to WaitingForRestores")
 		return true, nil // Requeue - next reconciliation will monitor restores
 
-	case "WaitingForRestores":
+	case oadptypes.ReasonWaitingForRestores:
 		// Step 3: Monitor Velero Restore progress AND validate PVCs
 		// Only transition when BOTH Velero Restores are complete AND PVCs exist
 		logger.V(0).Info("Monitoring Velero Restore progress and PVC creation")
@@ -871,7 +873,13 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		var finalPhase oadpv1alpha1.VirtualMachineFileRestorePhase
 		var progressingReason string
 
-		if failed == 0 {
+		// Defensive check: ensure we have at least one restore
+		// This should never happen (validation ensures PVCs exist), but check defensively
+		if totalRestores == 0 {
+			return false, fmt.Errorf("no Velero Restores found - this indicates a serious workflow bug")
+		}
+
+		if failed == 0 && completed > 0 {
 			// All restores completed successfully and PVCs are ready
 			logger.V(0).Info("All Velero Restores completed successfully, ready to create file server")
 			finalPhase = oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress // Stay in InProgress
@@ -990,15 +998,70 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		logger.V(0).Info("Successfully transitioned to terminal phase", "phase", finalPhase)
 		return false, nil // Terminal state - no requeue
 
-	// Step 4: Deploy file server pod (pure action step - no validation)
-	// This case is only reached after WaitingForRestores has verified:
+	// Step 4: Prepare credentials for file server access
+	// This case is reached after WaitingForRestores has verified:
 	// - All Velero Restore CRs completed successfully
 	// - All PVCs exist and are ready for mounting
-	case "RestoresCompleted":
-		logger.V(0).Info("Creating file server pod and service (PVCs already validated)")
+	case oadptypes.ReasonRestoresCompleted:
+		logger.V(0).Info("Preparing credentials for file server (PVCs already validated)")
+
+		// Ensure credentials are validated/copied/generated as needed
+		// This handles SSH and FileBrowser credentials based on user configuration
+		err := r.ensureCredentials(ctx, logger, vmfr)
+		if err != nil {
+			failureMsg := fmt.Sprintf("Failed to prepare credentials: %s", err.Error())
+			logger.Error(err, "Credentials preparation failed")
+			return false, r.failValidation(ctx, vmfr, "CredentialsPreparationFailed", failureMsg, logger)
+		}
+
+		logger.V(0).Info("Credentials prepared successfully, ready to create file server")
+
+		// Update workflow to indicate credentials are ready
+		conditions := []metav1.Condition{
+			{
+				Type:               oadptypes.ConditionTypeProgressing,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonCredentialsReady,
+				Message:            "Credentials validated and ready, proceeding to file server creation",
+			},
+			{
+				Type:               oadptypes.ConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonFileServerPending,
+				Message:            "Credentials ready, file server creation pending",
+			},
+			{
+				Type:               oadptypes.ConditionTypeDegraded,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonNoFailures,
+				Message:            "No failures detected",
+			},
+			{
+				Type:               oadptypes.ConditionTypeReady,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonInProgress,
+				Message:            "File server creation pending",
+			},
+		}
+
+		if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress, conditions, false, logger); err != nil {
+			return false, err
+		}
+
+		logger.V(0).Info("Credentials preparation completed, transitioning to file server creation")
+		return true, nil // Requeue to proceed to CredentialsReady case
+
+	// Step 5: Deploy file server pod with validated credentials
+	case oadptypes.ReasonCredentialsReady:
+		logger.V(0).Info("Creating file server pod and service with validated credentials")
 
 		// Create file server pod and service
 		// PVCs are in Pending state - they will bind when the pod is created
+		// Credentials have been validated/copied/generated in previous step
 		err := r.createFileServerResources(ctx, logger, vmfr)
 		if err != nil {
 			failureMsg := fmt.Sprintf("Failed to create file server resources: %s", err.Error())
@@ -2099,7 +2162,8 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 			completed++
 		case veleroapi.RestorePhaseFailed, veleroapi.RestorePhasePartiallyFailed, veleroapi.RestorePhaseFailedValidation:
 			failed++
-		case veleroapi.RestorePhaseNew, veleroapi.RestorePhaseInProgress, "":
+		case veleroapi.RestorePhaseNew, veleroapi.RestorePhaseInProgress, veleroapi.RestorePhaseFinalizing, veleroapi.RestorePhaseFinalizingPartiallyFailed, "":
+			// Finalizing* phases are transitional states - wait for terminal state
 			inProgress++
 		default:
 			logger.V(1).Info("Unknown Velero Restore phase, treating as in-progress",
@@ -2341,6 +2405,8 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		"namespace", restoreNamespace)
 
 	// Parse FileAccess spec and build SSH/FileBrowser configurations
+	// Note: Credentials were already validated/copied/generated by ensureCredentials()
+	// We just need to determine which secret names to use
 	var sshConfig *SSHAccessConfig
 	var fileBrowserConfig *FileBrowserAccessConfig
 
@@ -2357,74 +2423,56 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		// Use default SSH port
 		port := int32(constant.DefaultSSHPort)
 
-		// Handle three credential scenarios:
-		// 1. Secret reference provided
-		// 2. Inline publicKey provided
-		// 3. Neither (generate credentials)
+		// Determine which secret to use based on how credentials were provided
+		// (ensureCredentials() already validated/copied/generated as needed)
 		if sshSpec.CredentialsSecretRef != nil {
-			// Scenario 1: Use existing Secret
+			// Scenario 1: User provided CredentialsSecretRef
+			// Secret may be in restore namespace (original) or copied
 			secretName := sshSpec.CredentialsSecretRef.Name
 			secretNamespace := sshSpec.CredentialsSecretRef.Namespace
 			if secretNamespace == "" {
-				secretNamespace = vmfr.Namespace
+				secretNamespace = r.OADPNamespace
 			}
 
-			// Validate that secret exists
-			secret := &corev1.Secret{}
-			if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret); err != nil {
-				return fmt.Errorf("failed to get SSH credentials secret %s/%s: %w", secretNamespace, secretName, err)
+			// Determine actual secret name in restore namespace
+			var actualSecretName string
+			var err error
+			if secretNamespace == restoreNamespace {
+				// Secret was already in restore namespace, use original name
+				actualSecretName = secretName
+			} else {
+				// Secret was copied - look it up by labels
+				actualSecretName, err = r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeSSH, true)
+				if err != nil {
+					return fmt.Errorf("failed to find copied SSH secret: %w", err)
+				}
 			}
 
-			logger.V(0).Info("Using existing SSH credentials secret", "secretName", secretName, "secretNamespace", secretNamespace)
+			logger.V(1).Info("Using prepared SSH secret",
+				"secretName", actualSecretName,
+				"namespace", restoreNamespace)
 
 			sshConfig = &SSHAccessConfig{
 				Username:                   username,
-				PublicKey:                  "", // Will be read from secret
-				CredentialsSecretName:      secretName,
-				CredentialsSecretNamespace: secretNamespace,
+				CredentialsSecretName:      actualSecretName,
+				CredentialsSecretNamespace: restoreNamespace,
 				Port:                       port,
 			}
-		} else if sshSpec.PublicKey != "" {
-			// Scenario 2: Inline publicKey
-			logger.V(0).Info("Using inline SSH public key", "username", username)
-
-			sshConfig = &SSHAccessConfig{
-				Username:  username,
-				PublicKey: sshSpec.PublicKey,
-				Port:      port,
-			}
 		} else {
-			// Scenario 3: Generate SSH keypair and create secret
-			logger.V(0).Info("Generating SSH keypair (no publicKey or secret provided)", "username", username)
-
-			keyPair, err := function.GenerateSSHKeyPair(logger)
+			// Scenario 2 & 3: Inline publicKey or generated credentials - look up by labels
+			// Both scenarios now create secrets in ensureCredentials()
+			actualSecretName, err := r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeSSH, false)
 			if err != nil {
-				return fmt.Errorf("failed to generate SSH keypair: %w", err)
+				return fmt.Errorf("failed to find SSH secret: %w", err)
 			}
 
-			// Create secret with generated credentials in restore namespace
-			secretName := fmt.Sprintf("%s-ssh-creds", vmfr.Name)
-			secret := function.CreateSSHCredentialsSecret(
-				secretName,
-				restoreNamespace,
-				username,
-				keyPair,
-				vmfr.Name,
-				vmfr.Namespace,
-				vmfr.UID,
-				logger,
-			)
-
-			if err := r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("failed to create SSH credentials secret: %w", err)
-			}
-
-			logger.V(0).Info("Created SSH credentials secret", "secretName", secretName, "namespace", restoreNamespace)
+			logger.V(1).Info("Using SSH secret",
+				"secretName", actualSecretName,
+				"namespace", restoreNamespace)
 
 			sshConfig = &SSHAccessConfig{
 				Username:                   username,
-				PublicKey:                  "", // Will be read from secret
-				CredentialsSecretName:      secretName,
+				CredentialsSecretName:      actualSecretName,
 				CredentialsSecretNamespace: restoreNamespace,
 				Port:                       port,
 			}
@@ -2438,57 +2486,53 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		// Use default FileBrowser port
 		port := int32(constant.DefaultFileBrowserPort)
 
-		// Handle credentials: either from secret or generated
+		// Determine which secret to use
+		// (ensureCredentials() already validated/copied/generated as needed)
 		if fbSpec.CredentialsSecretRef != nil {
-			// Use existing Secret
+			// Scenario 1: User provided CredentialsSecretRef
+			// Secret may be in restore namespace (original) or copied
 			secretName := fbSpec.CredentialsSecretRef.Name
 			secretNamespace := fbSpec.CredentialsSecretRef.Namespace
 			if secretNamespace == "" {
-				secretNamespace = vmfr.Namespace
+				secretNamespace = r.OADPNamespace
 			}
 
-			// Validate that secret exists
-			secret := &corev1.Secret{}
-			if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret); err != nil {
-				return fmt.Errorf("failed to get FileBrowser credentials secret %s/%s: %w", secretNamespace, secretName, err)
+			// Determine actual secret name in restore namespace
+			var actualSecretName string
+			var err error
+			if secretNamespace == restoreNamespace {
+				// Secret was already in restore namespace, use original name
+				actualSecretName = secretName
+			} else {
+				// Secret was copied - look it up by labels
+				actualSecretName, err = r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeFileBrowser, true)
+				if err != nil {
+					return fmt.Errorf("failed to find copied FileBrowser secret: %w", err)
+				}
 			}
 
-			logger.V(0).Info("Using existing FileBrowser credentials secret", "secretName", secretName, "secretNamespace", secretNamespace)
+			logger.V(1).Info("Using prepared FileBrowser secret",
+				"secretName", actualSecretName,
+				"namespace", restoreNamespace)
 
 			fileBrowserConfig = &FileBrowserAccessConfig{
-				CredentialsSecretName:      secretName,
-				CredentialsSecretNamespace: secretNamespace,
+				CredentialsSecretName:      actualSecretName,
+				CredentialsSecretNamespace: restoreNamespace,
 				Port:                       port,
 			}
 		} else {
-			// Generate FileBrowser credentials and create secret
-			logger.V(0).Info("Generating FileBrowser credentials (no secret provided)")
-
-			credentials, err := function.GenerateFileBrowserCredentials("", logger) // Use default username
+			// Scenario 2: Generated credentials - look up by labels
+			actualSecretName, err := r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeFileBrowser, false)
 			if err != nil {
-				return fmt.Errorf("failed to generate FileBrowser credentials: %w", err)
+				return fmt.Errorf("failed to find generated FileBrowser secret: %w", err)
 			}
 
-			// Create secret with generated credentials in restore namespace
-			secretName := fmt.Sprintf("%s-filebrowser-creds", vmfr.Name)
-			secret := function.CreateFileBrowserCredentialsSecret(
-				secretName,
-				restoreNamespace,
-				credentials,
-				vmfr.Name,
-				vmfr.Namespace,
-				vmfr.UID,
-				logger,
-			)
-
-			if err := r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
-				return fmt.Errorf("failed to create FileBrowser credentials secret: %w", err)
-			}
-
-			logger.V(0).Info("Created FileBrowser credentials secret", "secretName", secretName, "namespace", restoreNamespace, "username", credentials.Username)
+			logger.V(1).Info("Using generated FileBrowser secret",
+				"secretName", actualSecretName,
+				"namespace", restoreNamespace)
 
 			fileBrowserConfig = &FileBrowserAccessConfig{
-				CredentialsSecretName:      secretName,
+				CredentialsSecretName:      actualSecretName,
 				CredentialsSecretNamespace: restoreNamespace,
 				Port:                       port,
 			}
@@ -2572,5 +2616,429 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		"serviceName", service.Name,
 		"namespace", restoreNamespace)
 
+	return nil
+}
+
+// ensureSecretInRestoreNamespace ensures a secret is available in the restore namespace.
+// If the secret is already in the restore namespace, it validates and returns the secret name.
+// If the secret is in a different namespace, it validates the source, copies it to the restore
+// namespace, and tracks the copy with labels for cleanup via finalizer.
+//
+// Returns the secret name in the restore namespace.
+func (r *VirtualMachineFileRestoreReconciler) ensureSecretInRestoreNamespace(
+	ctx context.Context,
+	secretName string,
+	secretNamespace string,
+	restoreNamespace string,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	validator func(*corev1.Secret, logr.Logger) error,
+	credentialType string, // constant.CredentialTypeSSH or constant.CredentialTypeFileBrowser
+	logger logr.Logger,
+) (string, error) {
+
+	// If secret namespace matches restore namespace, just validate and return
+	if secretNamespace == restoreNamespace {
+		logger.V(1).Info("Secret already in restore namespace, validating",
+			"secretName", secretName,
+			"namespace", restoreNamespace,
+			"credentialType", credentialType)
+
+		// Get and validate the secret
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret); err != nil {
+			return "", fmt.Errorf("failed to get secret %s/%s: %w", secretNamespace, secretName, err)
+		}
+
+		// Validate secret contents
+		if err := validator(secret, logger); err != nil {
+			return "", fmt.Errorf("secret validation failed for %s/%s: %w", secretNamespace, secretName, err)
+		}
+
+		logger.V(0).Info("Using existing secret in restore namespace",
+			"secretName", secretName,
+			"namespace", restoreNamespace,
+			"credentialType", credentialType)
+
+		return secretName, nil
+	}
+
+	// Secret is in a different namespace - need to copy it
+	logger.V(0).Info("Secret in different namespace, copying to restore namespace",
+		"sourceSecret", secretName,
+		"sourceNamespace", secretNamespace,
+		"targetNamespace", restoreNamespace,
+		"credentialType", credentialType)
+
+	// Get the source secret
+	sourceSecret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, sourceSecret); err != nil {
+		return "", fmt.Errorf("failed to get source secret %s/%s: %w", secretNamespace, secretName, err)
+	}
+
+	// Validate source secret before copying
+	if err := validator(sourceSecret, logger); err != nil {
+		return "", fmt.Errorf("source secret validation failed for %s/%s: %w", secretNamespace, secretName, err)
+	}
+
+	// Check if copied secret already exists by looking up with labels
+	// (using VMFROriginUUIDLabel + CredentialTypeLabel + VMFRManagedCopyLabel)
+	secretList := &corev1.SecretList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(restoreNamespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel:  string(vmfr.UID),
+			constant.CredentialTypeLabel:  credentialType,
+			constant.VMFRManagedCopyLabel: constant.TrueString,
+		},
+	}
+
+	if err := r.List(ctx, secretList, listOpts...); err != nil {
+		return "", fmt.Errorf("failed to list existing copied secrets: %w", err)
+	}
+
+	// Filter to find copy from the same source secret
+	for _, existingCopy := range secretList.Items {
+		if existingCopy.Annotations["oadp.openshift.io/copied-from-secret"] == secretName &&
+			existingCopy.Annotations["oadp.openshift.io/copied-from-ns"] == secretNamespace {
+			// Found existing copy, validate and return
+			logger.V(1).Info("Copied secret already exists, validating",
+				"copiedSecretName", existingCopy.Name,
+				"namespace", restoreNamespace)
+
+			if err := validator(&existingCopy, logger); err != nil {
+				return "", fmt.Errorf("existing copied secret validation failed for %s/%s: %w", restoreNamespace, existingCopy.Name, err)
+			}
+
+			logger.V(0).Info("Using existing copied secret",
+				"copiedSecretName", existingCopy.Name,
+				"namespace", restoreNamespace)
+
+			return existingCopy.Name, nil
+		}
+	}
+
+	// Create the copied secret with generateName
+	// Format: <vmfr-name>-<credential-type>-
+	generateNamePrefix := fmt.Sprintf("%s-%s-", vmfr.Name, credentialType)
+
+	copiedSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: generateNamePrefix,
+			Namespace:    restoreNamespace,
+			Labels: map[string]string{
+				constant.ManagedByLabel:       constant.ManagedByLabelValue,
+				constant.VMFROriginUUIDLabel:  string(vmfr.UID),
+				constant.VMFRManagedCopyLabel: constant.TrueString, // Mark as copied secret for finalizer cleanup
+				constant.CredentialTypeLabel:  credentialType,
+			},
+			Annotations: map[string]string{
+				constant.VMFROriginNameAnnotation:      vmfr.Name,
+				constant.VMFROriginNamespaceAnnotation: vmfr.Namespace,
+				"oadp.openshift.io/copied-from":        fmt.Sprintf("%s/%s", secretNamespace, secretName),
+				"oadp.openshift.io/copied-from-secret": secretName,      // Track source secret name (no 63-char limit in annotations)
+				"oadp.openshift.io/copied-from-ns":     secretNamespace, // Track source namespace (no 63-char limit in annotations)
+				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: sourceSecret.Data, // Copy the data
+	}
+
+	// NOTE: We do NOT use owner references here because:
+	// 1. VMFR may be in a different namespace (cross-namespace owner refs are rejected)
+	// 2. We use labels + finalizer for cleanup instead
+	// The finalizer on VMFR will ensure these copied secrets are cleaned up on deletion
+
+	if err := r.Create(ctx, copiedSecret); err != nil {
+		return "", fmt.Errorf("failed to create copied secret with prefix %s: %w", generateNamePrefix, err)
+	}
+
+	// Get the actual name assigned by Kubernetes
+	actualSecretName := copiedSecret.Name
+
+	logger.V(0).Info("Successfully copied secret to restore namespace",
+		"sourceSecret", fmt.Sprintf("%s/%s", secretNamespace, secretName),
+		"copiedSecret", fmt.Sprintf("%s/%s", restoreNamespace, actualSecretName),
+		"credentialType", credentialType)
+
+	return actualSecretName, nil
+}
+
+// findSecretByLabels finds a secret in the specified namespace by VMFR UID and credential type labels.
+// If isCopied is true, also filters for VMFRManagedCopyLabel.
+// Returns the name of the first matching secret, or an error if none found.
+func (r *VirtualMachineFileRestoreReconciler) findSecretByLabels(
+	ctx context.Context,
+	namespace string,
+	vmfrUID string,
+	credentialType string,
+	isCopied bool,
+) (string, error) {
+	// Build label selector
+	labels := map[string]string{
+		constant.VMFROriginUUIDLabel: vmfrUID,
+		constant.CredentialTypeLabel: credentialType,
+	}
+	if isCopied {
+		labels[constant.VMFRManagedCopyLabel] = constant.TrueString
+	}
+
+	// List secrets with matching labels
+	secretList := &corev1.SecretList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(namespace),
+		client.MatchingLabels(labels),
+	}
+
+	if err := r.List(ctx, secretList, listOpts...); err != nil {
+		return "", fmt.Errorf("failed to list secrets with labels %v: %w", labels, err)
+	}
+
+	// Return first match
+	if len(secretList.Items) == 0 {
+		return "", fmt.Errorf("no secret found with labels %v in namespace %s", labels, namespace)
+	}
+
+	if len(secretList.Items) > 1 {
+		// This shouldn't happen, but log a warning
+		// We'll still use the first one
+		log.FromContext(ctx).V(1).Info("Multiple secrets found with same labels, using first",
+			"count", len(secretList.Items),
+			"namespace", namespace,
+			"labels", labels)
+	}
+
+	return secretList.Items[0].Name, nil
+}
+
+// ensureCredentials validates and prepares credentials for SSH and FileBrowser access.
+// This function handles three scenarios for each credential type:
+// 1. CredentialsSecretRef provided → validate and copy to restore namespace if needed
+// 2. Inline credentials (SSH publicKey) → validate or use as-is
+// 3. No credentials → generate new credentials and create secret in restore namespace
+//
+// This function should be called AFTER PVCs are restored but BEFORE pod creation.
+// It updates the VMFR status to track which secrets to use for pod creation.
+func (r *VirtualMachineFileRestoreReconciler) ensureCredentials(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) error {
+
+	restoreNamespace := vmfr.Status.CreatedNamespace
+	if restoreNamespace == "" {
+		return fmt.Errorf("restore namespace not found in status")
+	}
+
+	sshEnabled := vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil
+	fileBrowserEnabled := vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.FileBrowser != nil
+
+	logger.V(0).Info("Ensuring credentials are ready for file server",
+		"restoreNamespace", restoreNamespace,
+		"sshEnabled", sshEnabled,
+		"fileBrowserEnabled", fileBrowserEnabled)
+
+	// If no file access methods enabled, log and return early
+	if !sshEnabled && !fileBrowserEnabled {
+		logger.V(0).Info("No file access methods enabled (SSH or FileBrowser), skipping credential preparation")
+		return nil
+	}
+
+	// Handle SSH credentials if SSH access is enabled
+	if sshEnabled {
+		sshSpec := vmfr.Spec.FileAccess.SSH
+
+		if sshSpec.CredentialsSecretRef != nil {
+			// Scenario 1: User provided CredentialsSecretRef
+			secretName := sshSpec.CredentialsSecretRef.Name
+			secretNamespace := sshSpec.CredentialsSecretRef.Namespace
+
+			// Default namespace to OADP namespace if not specified
+			if secretNamespace == "" {
+				secretNamespace = r.OADPNamespace
+			}
+
+			logger.V(0).Info("SSH credentials from secret reference",
+				"secretName", secretName,
+				"secretNamespace", secretNamespace)
+
+			// Validate and copy secret to restore namespace if needed
+			preparedSecretName, err := r.ensureSecretInRestoreNamespace(
+				ctx,
+				secretName,
+				secretNamespace,
+				restoreNamespace,
+				vmfr,
+				function.ValidateSSHSecret,
+				constant.CredentialTypeSSH,
+				logger,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to ensure SSH secret in restore namespace: %w", err)
+			}
+
+			logger.V(1).Info("SSH secret prepared and ready for use",
+				"secretName", preparedSecretName,
+				"namespace", restoreNamespace)
+
+		} else if sshSpec.PublicKey != "" {
+			// Scenario 2: Inline publicKey provided - create secret for consistency
+			logger.V(0).Info("SSH credentials from inline publicKey, creating secret")
+
+			// Validate the inline publicKey using robust SSH parser
+			if err := function.ValidateSSHPublicKey([]byte(sshSpec.PublicKey)); err != nil {
+				return fmt.Errorf("inline SSH publicKey validation failed: %w", err)
+			}
+
+			// Create secret with inline publicKey in restore namespace
+			username := sshSpec.Username
+			if username == "" {
+				username = constant.DefaultSSHUsername
+			}
+
+			// Use generateName for automatic unique naming
+			generateNamePrefix := fmt.Sprintf("%s-ssh-inline-", vmfr.Name)
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					GenerateName: generateNamePrefix,
+					Namespace:    restoreNamespace,
+					Labels: map[string]string{
+						constant.ManagedByLabel:      constant.ManagedByLabelValue,
+						constant.VMFROriginUUIDLabel: string(vmfr.UID),
+						constant.CredentialTypeLabel: constant.CredentialTypeSSH,
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation:      vmfr.Name,
+						constant.VMFROriginNamespaceAnnotation: vmfr.Namespace,
+						"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
+						"oadp.openshift.io/source":             "inline-public-key",
+					},
+					// NOTE: No OwnerReferences - VMFR may be in different namespace (cross-namespace refs are rejected)
+					// Use labels + finalizer for cleanup instead
+				},
+				Type: corev1.SecretTypeOpaque,
+				StringData: map[string]string{
+					"username":  username,
+					"publicKey": sshSpec.PublicKey,
+				},
+			}
+
+			if err := r.Create(ctx, secret); err != nil {
+				return fmt.Errorf("failed to create SSH secret from inline publicKey: %w", err)
+			}
+
+			logger.V(0).Info("Created SSH secret from inline publicKey",
+				"secretName", secret.Name,
+				"namespace", restoreNamespace)
+
+		} else {
+			// Scenario 3: Generate SSH credentials
+			logger.V(0).Info("Generating SSH credentials (no publicKey or secret provided)")
+
+			keyPair, err := function.GenerateSSHKeyPair(logger)
+			if err != nil {
+				return fmt.Errorf("failed to generate SSH keypair: %w", err)
+			}
+
+			// Create secret with generated credentials in restore namespace
+			username := sshSpec.Username
+			if username == "" {
+				username = constant.DefaultSSHUsername
+			}
+
+			// Use generateName for automatic unique naming
+			generateNamePrefix := fmt.Sprintf("%s-ssh-", vmfr.Name)
+			secret := function.CreateSSHCredentialsSecret(
+				generateNamePrefix,
+				restoreNamespace,
+				username,
+				keyPair,
+				vmfr.Name,
+				vmfr.Namespace,
+				vmfr.UID,
+				logger,
+			)
+
+			if err := r.Create(ctx, secret); err != nil {
+				return fmt.Errorf("failed to create generated SSH credentials secret: %w", err)
+			}
+
+			logger.V(0).Info("Created generated SSH credentials secret",
+				"secretName", secret.Name,
+				"namespace", restoreNamespace)
+		}
+	}
+
+	// Handle FileBrowser credentials if FileBrowser access is enabled
+	if fileBrowserEnabled {
+		fbSpec := vmfr.Spec.FileAccess.FileBrowser
+
+		if fbSpec.CredentialsSecretRef != nil {
+			// Scenario 1: User provided CredentialsSecretRef
+			secretName := fbSpec.CredentialsSecretRef.Name
+			secretNamespace := fbSpec.CredentialsSecretRef.Namespace
+
+			// Default namespace to OADP namespace if not specified (per CRD comment line 156)
+			if secretNamespace == "" {
+				secretNamespace = r.OADPNamespace
+			}
+
+			logger.V(0).Info("FileBrowser credentials from secret reference",
+				"secretName", secretName,
+				"secretNamespace", secretNamespace)
+
+			// Validate and copy secret to restore namespace if needed
+			preparedSecretName, err := r.ensureSecretInRestoreNamespace(
+				ctx,
+				secretName,
+				secretNamespace,
+				restoreNamespace,
+				vmfr,
+				function.ValidateFileBrowserSecret,
+				constant.CredentialTypeFileBrowser,
+				logger,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to ensure FileBrowser secret in restore namespace: %w", err)
+			}
+
+			logger.V(1).Info("FileBrowser secret prepared and ready for use",
+				"secretName", preparedSecretName,
+				"namespace", restoreNamespace)
+
+		} else {
+			// Scenario 2: Generate FileBrowser credentials (always required, no inline option)
+			logger.V(0).Info("Generating FileBrowser credentials (no secret provided)")
+
+			credentials, err := function.GenerateFileBrowserCredentials("", logger) // Use default username
+			if err != nil {
+				return fmt.Errorf("failed to generate FileBrowser credentials: %w", err)
+			}
+
+			// Create secret with generated credentials in restore namespace
+			// Use generateName for automatic unique naming
+			generateNamePrefix := fmt.Sprintf("%s-filebrowser-", vmfr.Name)
+			secret := function.CreateFileBrowserCredentialsSecret(
+				generateNamePrefix,
+				restoreNamespace,
+				credentials,
+				vmfr.Name,
+				vmfr.Namespace,
+				vmfr.UID,
+				logger,
+			)
+
+			if err := r.Create(ctx, secret); err != nil {
+				return fmt.Errorf("failed to create generated FileBrowser credentials secret: %w", err)
+			}
+
+			logger.V(0).Info("Created generated FileBrowser credentials secret",
+				"secretName", secret.Name,
+				"namespace", restoreNamespace,
+				"username", credentials.Username)
+		}
+	}
+
+	logger.V(0).Info("All credentials ready for file server creation")
 	return nil
 }

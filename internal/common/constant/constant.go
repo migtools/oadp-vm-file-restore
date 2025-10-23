@@ -25,10 +25,18 @@ const (
 	ManagedByLabelValue    = "oadp-vm-file-restore-controller"
 	VMFROriginUUIDLabel    = "oadp.openshift.io/vmfr-origin-uuid"
 	VMFRTempNamespaceLabel = "oadp.openshift.io/vmfr-temp-namespace"
+	VMFRManagedCopyLabel   = "oadp.openshift.io/vmfr-managed-copy"
+	CredentialTypeLabel    = "oadp.openshift.io/credential-type"
 
 	// Resource UID labeling constants for selective restore implemented
 	// by the https://github.com/kubevirt/kubevirt-velero-plugin/pull/396
 	PVCUIDLabel = "velero.kubevirt.io/pvc-uid"
+)
+
+// Credential type values for CredentialTypeLabel
+const (
+	CredentialTypeSSH         = "ssh"
+	CredentialTypeFileBrowser = "filebrowser"
 )
 
 // Common annotations for tracking ownership and origin
@@ -138,6 +146,9 @@ const (
 	// Default usernames for file access methods
 	DefaultSSHUsername         = "oadp"
 	DefaultFileBrowserUsername = "oadp"
+
+	// Minimum password length for FileBrowser credentials
+	DefaultMinimumPasswordLength = 12
 )
 
 // Magic numbers
