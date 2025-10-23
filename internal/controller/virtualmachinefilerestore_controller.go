@@ -28,6 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -86,11 +87,15 @@ func (e ErrUnsupportedBackup) Error() string {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch
+// +kubebuilder:rbac:groups=velero.io,resources=downloadrequests,verbs=get;list;watch;create;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -1843,6 +1848,66 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		logger.V(0).Info("Created temporary restore namespace", "namespace", namespaceName)
 	}
 
+	// Create ServiceAccount for file server pods with privileged SCC access
+	serviceAccountName := "vmfr-file-server"
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceAccountName,
+			Namespace: namespaceName,
+			Labels: map[string]string{
+				constant.VMFROriginUUIDLabel: string(vmfr.UID),
+				constant.ManagedByLabel:      constant.ManagedByLabelValue,
+			},
+		},
+	}
+
+	err = r.Create(ctx, serviceAccount)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			logger.V(1).Info("ServiceAccount already exists", "serviceAccount", serviceAccountName, "namespace", namespaceName)
+		} else {
+			return "", fmt.Errorf("failed to create ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
+		}
+	} else {
+		logger.V(0).Info("Created ServiceAccount for file server", "serviceAccount", serviceAccountName, "namespace", namespaceName)
+	}
+
+	// Bind ServiceAccount to privileged SCC via RoleBinding
+	// This grants the file server pod permission to use privileged mode, hostPath volumes, and spc_t SELinux type
+	sccRoleBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vmfr-file-server-privileged",
+			Namespace: namespaceName,
+			Labels: map[string]string{
+				constant.VMFROriginUUIDLabel: string(vmfr.UID),
+				constant.ManagedByLabel:      constant.ManagedByLabelValue,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "system:openshift:scc:privileged",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      serviceAccountName,
+				Namespace: namespaceName,
+			},
+		},
+	}
+
+	err = r.Create(ctx, sccRoleBinding)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			logger.V(1).Info("SCC RoleBinding already exists", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
+		} else {
+			return "", fmt.Errorf("failed to create SCC RoleBinding in namespace '%s': %w", namespaceName, err)
+		}
+	} else {
+		logger.V(0).Info("Bound ServiceAccount to privileged SCC", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
+	}
+
 	// Update VMFR status with the created namespace
 	patch := client.MergeFrom(vmfr.DeepCopy())
 	vmfr.Status.CreatedNamespace = namespaceName
@@ -2158,9 +2223,11 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 
 		// Categorize by phase
 		switch restorePhase {
-		case veleroapi.RestorePhaseCompleted:
+		case veleroapi.RestorePhaseCompleted, veleroapi.RestorePhaseFinalizing:
+			// Treat Finalizing as completed since PVCs are already restored and available for mounting
 			completed++
-		case veleroapi.RestorePhaseFailed, veleroapi.RestorePhasePartiallyFailed, veleroapi.RestorePhaseFailedValidation:
+		case veleroapi.RestorePhaseFailed, veleroapi.RestorePhasePartiallyFailed, veleroapi.RestorePhaseFailedValidation,
+			"FinalizingPartiallyFailed": // Velero is finalizing a partially failed restore
 			failed++
 		case veleroapi.RestorePhaseNew, veleroapi.RestorePhaseInProgress, veleroapi.RestorePhaseFinalizing, veleroapi.RestorePhaseFinalizingPartiallyFailed, "":
 			// Finalizing* phases are transitional states - wait for terminal state
@@ -2410,6 +2477,9 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	var sshConfig *SSHAccessConfig
 	var fileBrowserConfig *FileBrowserAccessConfig
 
+	// TODO: Re-enable SSH/FileBrowser sidecars after Increment 1 is complete
+	// For now, commenting out to focus on core file server functionality
+	/*
 	// Configure SSH access if enabled
 	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil {
 		sshSpec := vmfr.Spec.FileAccess.SSH
@@ -2538,6 +2608,7 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 			}
 		}
 	}
+	*/
 
 	// Build pod configuration with parsed access methods
 	podConfig := FileServerPodConfig{
@@ -2558,22 +2629,26 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		"sshEnabled", sshConfig != nil,
 		"fileBrowserEnabled", fileBrowserConfig != nil)
 
-	// Build deployment spec (uses VM file server container)
-	deployment, err := buildFileServerDeployment(podConfig)
+	// Build pod spec (uses VM file server container)
+	// Note: Using Pod instead of Deployment because:
+	// 1. ReadWriteOnce PVCs can only be mounted by one pod
+	// 2. No cross-namespace owner references allowed (VMFR in OADP ns, Pod in temp ns)
+	// 3. Cleanup handled by namespace deletion (namespace has owner ref to VMFR)
+	pod, err := buildFileServerPodSpec(podConfig)
 	if err != nil {
-		return fmt.Errorf("failed to build deployment spec: %w", err)
+		return fmt.Errorf("failed to build pod spec: %w", err)
 	}
 
-	// Create the deployment
-	err = r.Create(ctx, deployment)
+	// Create the pod
+	err = r.Create(ctx, pod)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			logger.V(1).Info("File server deployment already exists", "deploymentName", deployment.Name)
+			logger.V(1).Info("File server pod already exists", "podName", pod.Name)
 		} else {
-			return fmt.Errorf("failed to create file server deployment: %w", err)
+			return fmt.Errorf("failed to create file server pod: %w", err)
 		}
 	} else {
-		logger.V(0).Info("Created file server deployment", "deploymentName", deployment.Name, "namespace", deployment.Namespace)
+		logger.V(0).Info("Created file server pod", "podName", pod.Name, "namespace", pod.Namespace)
 	}
 
 	// Build service configuration
@@ -2612,7 +2687,7 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	}
 
 	logger.V(0).Info("File server resources created successfully",
-		"deploymentName", deployment.Name,
+		"podName", pod.Name,
 		"serviceName", service.Name,
 		"namespace", restoreNamespace)
 
