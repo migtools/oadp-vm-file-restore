@@ -118,8 +118,8 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		// Deletion path - handle finalizer-based cleanup
 		logger.V(0).Info("Executing deletion path")
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
-			// r.handleResourceDeletion,
-			// TBD handle resource deletion
+			r.handleVeleroRestoreCleanup,
+			r.handleResourceCleanup,
 		}
 
 	case vmfr.Status.Phase == "":
@@ -3040,5 +3040,284 @@ func (r *VirtualMachineFileRestoreReconciler) ensureCredentials(
 	}
 
 	logger.V(0).Info("All credentials ready for file server creation")
+	return nil
+}
+
+// handleVeleroRestoreCleanup deletes Velero Restore objects created by this VMFR.
+// This finalizer runs first to ensure Velero Restores are cleaned up before
+// other resources that they may reference.
+func (r *VirtualMachineFileRestoreReconciler) handleVeleroRestoreCleanup(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (bool, error) {
+	if !controllerutil.ContainsFinalizer(vmfr, constant.VeleroRestoreCleanupFinalizer) {
+		logger.V(1).Info("VeleroRestoreCleanupFinalizer already removed, skipping")
+		return false, nil
+	}
+
+	logger.V(0).Info("Cleaning up Velero Restore objects")
+
+	// Find all Velero Restore objects created by this VMFR using label selector
+	restoreList := &veleroapi.RestoreList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(r.OADPNamespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		},
+	}
+
+	if err := r.List(ctx, restoreList, listOpts...); err != nil {
+		logger.Error(err, "Failed to list Velero Restore objects for cleanup")
+		return false, fmt.Errorf("failed to list Velero Restore objects: %w", err)
+	}
+
+	logger.V(0).Info("Found Velero Restore objects to delete", "count", len(restoreList.Items))
+
+	deletedCount := 0
+	for i := range restoreList.Items {
+		restore := &restoreList.Items[i]
+		logger.V(1).Info("Deleting Velero Restore", "name", restore.Name, "namespace", restore.Namespace)
+
+		if err := r.Delete(ctx, restore); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Velero Restore already deleted", "name", restore.Name)
+				continue
+			}
+			logger.Error(err, "Failed to delete Velero Restore", "name", restore.Name)
+			return false, fmt.Errorf("failed to delete Velero Restore %s: %w", restore.Name, err)
+		}
+		deletedCount++
+	}
+
+	logger.V(0).Info("Deleted Velero Restore objects", "count", deletedCount)
+
+	// Remove this finalizer to proceed to next cleanup step
+	patch := client.MergeFrom(vmfr.DeepCopy())
+	controllerutil.RemoveFinalizer(vmfr, constant.VeleroRestoreCleanupFinalizer)
+	if err := r.Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to remove VeleroRestoreCleanupFinalizer")
+		return false, fmt.Errorf("failed to remove VeleroRestoreCleanupFinalizer: %w", err)
+	}
+
+	logger.V(0).Info("Removed VeleroRestoreCleanupFinalizer")
+	return true, nil
+}
+
+// handleResourceCleanup cleans up namespace, PVCs, and secrets based on namespace ownership.
+// For temporary namespaces created by the controller, the entire namespace is deleted
+// (which cascades to all contained resources). For user-provided namespaces, only
+// resources created by this controller are individually deleted.
+func (r *VirtualMachineFileRestoreReconciler) handleResourceCleanup(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (bool, error) {
+	if !controllerutil.ContainsFinalizer(vmfr, constant.VMFileRestoreFinalizer) {
+		logger.V(1).Info("VMFileRestoreFinalizer already removed, skipping")
+		return false, nil
+	}
+
+	logger.V(0).Info("Cleaning up VMFR resources")
+
+	restoreNamespace := vmfr.Status.CreatedNamespace
+	if restoreNamespace == "" {
+		logger.V(0).Info("No restore namespace found in status, skipping resource cleanup")
+		patch := client.MergeFrom(vmfr.DeepCopy())
+		controllerutil.RemoveFinalizer(vmfr, constant.VMFileRestoreFinalizer)
+		if err := r.Patch(ctx, vmfr, patch); err != nil {
+			logger.Error(err, "Failed to remove VMFileRestoreFinalizer")
+			return false, fmt.Errorf("failed to remove VMFileRestoreFinalizer: %w", err)
+		}
+		logger.V(0).Info("Removed VMFileRestoreFinalizer (no namespace to clean)")
+		return false, nil
+	}
+
+	// Check if namespace exists and determine if it's controller-managed
+	namespace := &corev1.Namespace{}
+	err := r.Get(ctx, types.NamespacedName{Name: restoreNamespace}, namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.V(0).Info("Restore namespace already deleted", "namespace", restoreNamespace)
+			patch := client.MergeFrom(vmfr.DeepCopy())
+			controllerutil.RemoveFinalizer(vmfr, constant.VMFileRestoreFinalizer)
+			if err := r.Patch(ctx, vmfr, patch); err != nil {
+				logger.Error(err, "Failed to remove VMFileRestoreFinalizer")
+				return false, fmt.Errorf("failed to remove VMFileRestoreFinalizer: %w", err)
+			}
+			logger.V(0).Info("Removed VMFileRestoreFinalizer (namespace already deleted)")
+			return false, nil
+		}
+		logger.Error(err, "Failed to get restore namespace", "namespace", restoreNamespace)
+		return false, fmt.Errorf("failed to get restore namespace: %w", err)
+	}
+
+	// Determine cleanup strategy based on namespace ownership
+	isTempNamespace := namespace.Labels != nil &&
+		namespace.Labels[constant.VMFRTempNamespaceLabel] == constant.TrueString
+
+	if isTempNamespace {
+		// Delete the entire temporary namespace - Kubernetes will cascade to all resources
+		logger.V(0).Info("Deleting temporary namespace created by controller",
+			"namespace", restoreNamespace)
+
+		if err := r.Delete(ctx, namespace); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Temporary namespace already deleted", "namespace", restoreNamespace)
+			} else {
+				logger.Error(err, "Failed to delete temporary namespace", "namespace", restoreNamespace)
+				return false, fmt.Errorf("failed to delete temporary namespace: %w", err)
+			}
+		} else {
+			logger.V(0).Info("Temporary namespace deletion initiated", "namespace", restoreNamespace)
+		}
+	} else {
+		// User-provided namespace - selectively delete only controller-created resources
+		logger.V(0).Info("Cleaning up controller resources in user-provided namespace",
+			"namespace", restoreNamespace)
+
+		// Delete PVCs restored by this VMFR's Velero Restore objects
+		if err := r.deleteRestoredPVCs(ctx, logger, vmfr, restoreNamespace); err != nil {
+			return false, err
+		}
+
+		// Delete secrets created or copied by this controller
+		if err := r.deleteControllerSecrets(ctx, logger, vmfr, restoreNamespace); err != nil {
+			return false, err
+		}
+
+		logger.V(0).Info("Completed cleanup of controller resources",
+			"namespace", restoreNamespace)
+	}
+
+	// Remove the main finalizer - VMFR can now be deleted
+	patch := client.MergeFrom(vmfr.DeepCopy())
+	controllerutil.RemoveFinalizer(vmfr, constant.VMFileRestoreFinalizer)
+	if err := r.Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to remove VMFileRestoreFinalizer")
+		return false, fmt.Errorf("failed to remove VMFileRestoreFinalizer: %w", err)
+	}
+
+	logger.V(0).Info("Removed VMFileRestoreFinalizer, VMFR cleanup complete")
+	return false, nil
+}
+
+// deleteRestoredPVCs removes PVCs that were created by this VMFR's Velero Restore operations.
+// PVCs are identified by the Velero restore label that matches restore names from VMFR status.
+func (r *VirtualMachineFileRestoreReconciler) deleteRestoredPVCs(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	namespace string,
+) error {
+	logger.V(0).Info("Deleting restored PVCs", "namespace", namespace)
+
+	// Extract unique Velero Restore names from VMFR status
+	restoreNames := make(map[string]bool)
+	for _, pvcRestore := range vmfr.Status.PVCRestores {
+		for _, restoreInfo := range pvcRestore.Restores {
+			if restoreInfo.VeleroRestoreName != "" {
+				restoreNames[restoreInfo.VeleroRestoreName] = true
+			}
+		}
+	}
+
+	if len(restoreNames) == 0 {
+		logger.V(1).Info("No Velero Restore names found in status, skipping PVC deletion")
+		return nil
+	}
+
+	logger.V(1).Info("Found Velero Restore names from status", "count", len(restoreNames))
+
+	// Delete PVCs for each Velero Restore using the restore label
+	deletedCount := 0
+	for restoreName := range restoreNames {
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		listOpts := []client.ListOption{
+			client.InNamespace(namespace),
+			client.MatchingLabels{
+				"velero.io/restore-name": restoreName,
+			},
+		}
+
+		if err := r.List(ctx, pvcList, listOpts...); err != nil {
+			logger.Error(err, "Failed to list PVCs for Velero Restore", "restoreName", restoreName)
+			return fmt.Errorf("failed to list PVCs for restore %s: %w", restoreName, err)
+		}
+
+		logger.V(1).Info("Found PVCs for Velero Restore",
+			"restoreName", restoreName,
+			"pvcCount", len(pvcList.Items))
+
+		for i := range pvcList.Items {
+			pvc := &pvcList.Items[i]
+			logger.V(1).Info("Deleting PVC",
+				"pvcName", pvc.Name,
+				"namespace", pvc.Namespace,
+				"restoreName", restoreName)
+
+			if err := r.Delete(ctx, pvc); err != nil {
+				if apierrors.IsNotFound(err) {
+					logger.V(1).Info("PVC already deleted", "pvcName", pvc.Name)
+					continue
+				}
+				logger.Error(err, "Failed to delete PVC", "pvcName", pvc.Name)
+				return fmt.Errorf("failed to delete PVC %s: %w", pvc.Name, err)
+			}
+			deletedCount++
+		}
+	}
+
+	logger.V(0).Info("Deleted restored PVCs", "count", deletedCount, "namespace", namespace)
+	return nil
+}
+
+// deleteControllerSecrets removes secrets created or copied by this controller.
+// Secrets are identified by the VMFROriginUUIDLabel matching this VMFR's UID.
+// This includes both copied secrets (from other namespaces) and generated credentials.
+func (r *VirtualMachineFileRestoreReconciler) deleteControllerSecrets(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	namespace string,
+) error {
+	logger.V(0).Info("Deleting controller-created secrets", "namespace", namespace)
+
+	secretList := &corev1.SecretList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		},
+	}
+
+	if err := r.List(ctx, secretList, listOpts...); err != nil {
+		logger.Error(err, "Failed to list controller secrets")
+		return fmt.Errorf("failed to list controller secrets: %w", err)
+	}
+
+	logger.V(0).Info("Found controller-created secrets to delete", "count", len(secretList.Items))
+
+	deletedCount := 0
+	for i := range secretList.Items {
+		secret := &secretList.Items[i]
+		logger.V(1).Info("Deleting controller secret",
+			"secretName", secret.Name,
+			"namespace", secret.Namespace,
+			"isCopy", secret.Labels[constant.VMFRManagedCopyLabel] == constant.TrueString,
+			"credentialType", secret.Labels[constant.CredentialTypeLabel])
+
+		if err := r.Delete(ctx, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Secret already deleted", "secretName", secret.Name)
+				continue
+			}
+			logger.Error(err, "Failed to delete secret", "secretName", secret.Name)
+			return fmt.Errorf("failed to delete secret %s: %w", secret.Name, err)
+		}
+		deletedCount++
+	}
+
+	logger.V(0).Info("Deleted controller-created secrets", "count", deletedCount, "namespace", namespace)
 	return nil
 }
