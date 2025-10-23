@@ -92,6 +92,15 @@ rules:
 - apiGroups:
   - velero.io
   resources:
+  - datadownloads
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - velero.io
+  resources:
   - downloadrequests
   verbs:
   - create

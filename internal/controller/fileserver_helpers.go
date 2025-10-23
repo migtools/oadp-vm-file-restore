@@ -40,8 +40,9 @@ type PVCMountInfo struct {
 	PVCUID            string
 	BackupName        string
 	BackupTimestamp   *metav1.Time
-	VeleroRestoreName string // Name of the Velero Restore CR that restored this PVC
-	RestoredPVCName   string // Actual name of the restored PVC (may differ from original)
+	VeleroRestoreName string                       // Name of the Velero Restore CR that restored this PVC
+	RestoredPVCName   string                       // Actual name of the restored PVC (may differ from original)
+	VolumeMode        *corev1.PersistentVolumeMode // VolumeMode of the PVC (Block or Filesystem), nil if not yet queried
 }
 
 // SSHAccessConfig contains configuration for SSH sidecar container
@@ -229,8 +230,9 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		config.SharedMountPath = "/mnt/restore"
 	}
 
-	// Build PVC volumes (always added to pod, even in internal mount mode)
-	pvcVolumes, pvcVolumeMounts := buildPVCVolumesAndMounts(config.PVCMounts)
+	// Build PVC volumes, mounts, and devices (always added to pod, even in internal mount mode)
+	// Returns volumeMounts for Filesystem PVCs and volumeDevices for Block mode PVCs
+	pvcVolumes, pvcVolumeMounts, pvcVolumeDevices := buildPVCVolumesAndMounts(config.PVCMounts)
 
 	// Collect all volumes: PVC volumes + sidecar volumes (SSH, FileBrowser) + utility volumes
 	allVolumes := make([]corev1.Volume, 0, len(pvcVolumes)+10)
@@ -366,8 +368,9 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		}
 	} else {
 		// Kubernetes-managed mode: kubelet handles PVC mounting
-		// Inject PVC volume mounts into the main container
+		// Inject PVC volume mounts (Filesystem mode) and volume devices (Block mode) into the main container
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, pvcVolumeMounts...)
+		mainContainer.VolumeDevices = append(mainContainer.VolumeDevices, pvcVolumeDevices...)
 
 		// If dual-path is enabled, also mount the symlink directory
 		if config.EnableDualPathAccess {
@@ -516,10 +519,19 @@ func buildFileServerDeployment(config FileServerPodConfig) (*appsv1.Deployment, 
 	return deployment, nil
 }
 
-// buildPVCVolumesAndMounts creates volumes and volume mounts for PVCs
-func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []corev1.VolumeMount) {
+// buildPVCVolumesAndMounts creates volumes, volume mounts, and volume devices for PVCs.
+// Handles both Block and Filesystem mode PVCs correctly:
+// - Block mode PVCs: VM disks stored as raw block devices, exposed via volumeDevices at /dev/pvc-{uid}
+// - Filesystem mode PVCs: Traditional file storage, mounted via volumeMounts at /restores_by_name/{backup}/{uid}
+//
+// Returns:
+// - volumes: Kubernetes Volume objects referencing the PVCs
+// - volumeMounts: Mount points for Filesystem mode PVCs
+// - volumeDevices: Device mappings for Block mode PVCs
+func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []corev1.VolumeMount, []corev1.VolumeDevice) {
 	volumes := make([]corev1.Volume, 0, len(pvcMounts))
 	volumeMounts := make([]corev1.VolumeMount, 0, len(pvcMounts))
+	volumeDevices := make([]corev1.VolumeDevice, 0, len(pvcMounts))
 
 	for _, pvcMount := range pvcMounts {
 		// Create unique volume name for this PVC
@@ -532,27 +544,42 @@ func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []core
 			pvcClaimName = pvcMount.PVCName
 		}
 
-		// Add volume referencing the restored PVC
+		// Add volume referencing the restored PVC (always added regardless of mode)
 		volumes = append(volumes, corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: pvcClaimName,
-					ReadOnly:  true, // Mount read-only for safety
+					ReadOnly:  false, // libguestfs needs write access for internal operations
 				},
 			},
 		})
 
-		// Mount path: /restores_by_name/<backup-name>/<pvc-uid>
-		mountPath := fmt.Sprintf("/restores_by_name/%s/%s", pvcMount.BackupName, pvcMount.PVCUID)
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      volumeName,
-			MountPath: mountPath,
-			ReadOnly:  true,
-		})
+		// Determine how to expose the PVC based on its volumeMode
+		// Default to Filesystem if volumeMode is nil (Kubernetes default)
+		isBlockMode := pvcMount.VolumeMode != nil && *pvcMount.VolumeMode == corev1.PersistentVolumeBlock
+
+		if isBlockMode {
+			// Block mode: Expose as raw block device at /dev/pvc-{uid}
+			// libguestfs/QEMU can directly access the block device containing the VM disk image
+			devicePath := fmt.Sprintf("/dev/pvc-%s", pvcMount.PVCUID)
+			volumeDevices = append(volumeDevices, corev1.VolumeDevice{
+				Name:       volumeName,
+				DevicePath: devicePath,
+			})
+		} else {
+			// Filesystem mode: Mount at /restores_by_name/<backup-name>/<pvc-uid>
+			// Traditional file access for filesystem-based storage
+			mountPath := fmt.Sprintf("/restores_by_name/%s/%s", pvcMount.BackupName, pvcMount.PVCUID)
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: mountPath,
+				ReadOnly:  false, // libguestfs needs write access
+			})
+		}
 	}
 
-	return volumes, volumeMounts
+	return volumes, volumeMounts, volumeDevices
 }
 
 // buildDefaultMainContainer creates a default busybox HTTP server container
@@ -610,7 +637,7 @@ func buildVMFileServerMainContainer() corev1.Container {
 		// Container-level security context
 		// CRITICAL: Privileged mode required for /dev/kvm access with SELinux
 		SecurityContext: &corev1.SecurityContext{
-			Privileged: ptr.To(true), // Required for /dev/kvm and /dev/fuse access
+			Privileged: ptr.To(true),       // Required for /dev/kvm and /dev/fuse access
 			RunAsUser:  ptr.To(int64(107)), // qemu user
 			RunAsGroup: ptr.To(int64(107)), // qemu group
 		},
@@ -622,7 +649,7 @@ func buildVMFileServerMainContainer() corev1.Container {
 				corev1.ResourceCPU:    resource.MustParse("250m"),
 			},
 			Limits: corev1.ResourceList{
-				corev1.ResourceMemory: resource.MustParse("2Gi"),  // libguestfs can use significant memory
+				corev1.ResourceMemory: resource.MustParse("2Gi"),   // libguestfs can use significant memory
 				corev1.ResourceCPU:    resource.MustParse("1000m"), // KVM uses CPU during mount
 			},
 		},

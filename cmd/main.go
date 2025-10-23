@@ -29,6 +29,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	velerov2alpha1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	uberzap "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -58,6 +59,7 @@ func init() {
 
 	utilruntime.Must(oadpv1alpha1.AddToScheme(scheme))
 	utilruntime.Must(velerov1api.AddToScheme(scheme))
+	utilruntime.Must(velerov2alpha1api.AddToScheme(scheme))
 	utilruntime.Must(kubevirtv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
