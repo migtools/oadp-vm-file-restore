@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: quay.io/spampatt/oadp-vm-file-restore
-  newTag: dev
+  newTag: latest

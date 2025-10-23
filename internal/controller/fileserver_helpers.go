@@ -18,6 +18,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -250,15 +251,8 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		})
 	}
 
-	// Add EmptyDir for dual-path symlinks if enabled
-	if config.EnableDualPathAccess {
-		allVolumes = append(allVolumes, corev1.Volume{
-			Name: "restores-by-date",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
-			},
-		})
-	}
+	// Note: /restores_by_name and /restores_by_date are created by the script at runtime
+	// No need to create EmptyDir volumes - script creates these as regular directories
 
 	// Add /dev/fuse hostPath volume (required for guestmount FUSE filesystem)
 	allVolumes = append(allVolumes, corev1.Volume{
@@ -324,14 +318,8 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		allInitContainers = append(allInitContainers, fileBrowserInitContainers...)
 	}
 
-	// Add dual-path symlink init container if enabled
-	if config.EnableDualPathAccess {
-		symlinkInit := buildInitContainerForDualPathSymlinks(config.PVCMounts)
-		// Add PVC volume mounts to symlink init container
-		symlinkInit.VolumeMounts = append(symlinkInit.VolumeMounts, pvcVolumeMounts...)
-		// Prepend so it runs before sidecar init containers
-		allInitContainers = append([]corev1.Container{symlinkInit}, allInitContainers...)
-	}
+	// Dual-path symlink structure is now created by the file server detect-and-mount.sh script
+	// after mounting filesystems, eliminating the init container dependency issue
 
 	// Build or use default main container
 	var mainContainer corev1.Container
@@ -371,15 +359,6 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		// Inject PVC volume mounts (Filesystem mode) and volume devices (Block mode) into the main container
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, pvcVolumeMounts...)
 		mainContainer.VolumeDevices = append(mainContainer.VolumeDevices, pvcVolumeDevices...)
-
-		// If dual-path is enabled, also mount the symlink directory
-		if config.EnableDualPathAccess {
-			mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-				ReadOnly:  true,
-			})
-		}
 
 		// Add /dev/fuse device mount (required for guestmount)
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
@@ -587,15 +566,6 @@ func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualP
 	volumeMounts := make([]corev1.VolumeMount, len(pvcVolumeMounts))
 	copy(volumeMounts, pvcVolumeMounts)
 
-	// Add dual-path mount if enabled
-	if enableDualPath {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "restores-by-date",
-			MountPath: "/restores_by_date",
-			ReadOnly:  true,
-		})
-	}
-
 	return corev1.Container{
 		Name:  "file-server",
 		Image: "busybox:latest",
@@ -619,7 +589,10 @@ func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualP
 // buildVMFileServerMainContainer creates a VM file server container for mounting VM disk images
 // This container uses libguestfs/QEMU to mount VM disks and provide file-level access
 // Based on CONTROLLER_INTEGRATION.md from Issue #6/#7
-func buildVMFileServerMainContainer() corev1.Container {
+func buildVMFileServerMainContainer(pvcMounts []PVCMountInfo) corev1.Container {
+	// Build BACKUP_PVC_MAP JSON for the file server script
+	backupPVCMap := buildBackupPVCMapJSON(pvcMounts)
+
 	return corev1.Container{
 		Name:  "vm-file-server",
 		Image: constant.VMFileServerImage,
@@ -631,6 +604,10 @@ func buildVMFileServerMainContainer() corev1.Container {
 			{
 				Name:  "HOME",
 				Value: "/tmp", // Required for libguestfs cache
+			},
+			{
+				Name:  "BACKUP_PVC_MAP",
+				Value: backupPVCMap, // JSON mapping of backups to PVCs for dual-path structure
 			},
 		},
 
@@ -654,6 +631,56 @@ func buildVMFileServerMainContainer() corev1.Container {
 			},
 		},
 	}
+}
+
+// buildBackupPVCMapJSON builds a JSON string mapping backup names to PVC information
+// This is used by the file server script to create the dual-path directory structure
+//
+// Format: {"backup-name": [{"name": "pvc-name", "path": "/dev/pvc-{uid}", "timestamp": "2025-10-23T18:40:00Z"}]}
+//
+// Example output:
+//
+//	{
+//	  "test-vm-backup-20250115": [
+//	    {"name": "test-vm-disk-1", "path": "/dev/pvc-5685cd9a-56b4-4482-9236-17b7cc4b0dff", "timestamp": "2025-10-23T18:40:00Z"}
+//	  ]
+//	}
+func buildBackupPVCMapJSON(pvcMounts []PVCMountInfo) string {
+	// Group PVCs by backup name
+	backupMap := make(map[string][]map[string]string)
+
+	for _, pvcMount := range pvcMounts {
+		backupName := pvcMount.BackupName
+
+		// Build device path based on volumeMode
+		// Block mode: /dev/pvc-{uid}
+		// Filesystem mode: /restores_by_name/{backup}/{uid} (but we use the UID-based path for consistency)
+		devicePath := fmt.Sprintf("/dev/pvc-%s", pvcMount.PVCUID)
+
+		// Format timestamp as ISO8601
+		timestamp := ""
+		if pvcMount.BackupTimestamp != nil {
+			timestamp = pvcMount.BackupTimestamp.Format("2006-01-02T15:04:05Z")
+		}
+
+		// Create PVC entry
+		pvcEntry := map[string]string{
+			"name":      pvcMount.PVCName,
+			"path":      devicePath,
+			"timestamp": timestamp,
+		}
+
+		backupMap[backupName] = append(backupMap[backupName], pvcEntry)
+	}
+
+	// Marshal to JSON
+	jsonBytes, err := json.Marshal(backupMap)
+	if err != nil {
+		// If marshaling fails, return empty JSON object (script will skip dual-path creation)
+		return "{}"
+	}
+
+	return string(jsonBytes)
 }
 
 // buildPodLabels creates labels for the pod
@@ -698,54 +725,6 @@ func buildPodAnnotations(config FileServerPodConfig) map[string]string {
 	}
 
 	return annotations
-}
-
-// buildInitContainerForDualPathSymlinks creates an init container that sets up symlinks
-// to provide dual-path access to the same PVCs:
-// - /restores_by_name/<backup-name>/<pvc-uid> (actual mount point)
-// - /restores_by_date/<date>/<pvc-name> (symlink to above)
-func buildInitContainerForDualPathSymlinks(pvcMounts []PVCMountInfo) corev1.Container {
-	// Build shell commands to create symlink structure
-	commands := []string{"set -e"} // Exit on error
-
-	// Create base directory
-	commands = append(commands, "mkdir -p /restores_by_date")
-
-	for _, pvcMount := range pvcMounts {
-		// Format date as YYYY-MM-DD
-		backupDate := formatBackupDate(pvcMount.BackupTimestamp)
-
-		// Source: /restores_by_name/<backup-name>/<pvc-uid>
-		sourcePath := fmt.Sprintf("/restores_by_name/%s/%s", pvcMount.BackupName, pvcMount.PVCUID)
-
-		// Target: /restores_by_date/<date>/<pvc-name>
-		targetDir := fmt.Sprintf("/restores_by_date/%s", backupDate)
-		targetPath := fmt.Sprintf("%s/%s", targetDir, pvcMount.PVCName)
-
-		// Create date directory and symlink
-		commands = append(commands,
-			fmt.Sprintf("mkdir -p %s", targetDir),
-			fmt.Sprintf("ln -sf %s %s", sourcePath, targetPath),
-		)
-	}
-
-	commands = append(commands, "echo 'Dual-path symlinks created successfully'")
-
-	return corev1.Container{
-		Name:  "setup-dual-path-symlinks",
-		Image: "quay.io/quay/busybox:latest",
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			strings.Join(commands, "\n"),
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-			},
-		},
-	}
 }
 
 // buildFileServerService builds a Service spec for exposing file server pod ports
@@ -1003,13 +982,6 @@ func buildSSHSidecar(
 	} else {
 		// Kubernetes-managed mode: mount PVCs directly
 		container.VolumeMounts = append(container.VolumeMounts, pvcVolumeMounts...)
-		if enableDualPath {
-			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-				ReadOnly:  true,
-			})
-		}
 	}
 
 	// Add Secret volume and init container for SSH configuration
@@ -1216,13 +1188,6 @@ func buildFileBrowserSidecar(
 	} else {
 		// Kubernetes-managed mode: mount PVCs directly
 		container.VolumeMounts = append(container.VolumeMounts, pvcVolumeMounts...)
-		if enableDualPath {
-			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-				ReadOnly:  true,
-			})
-		}
 	}
 
 	// Init container to configure FileBrowser database and create user

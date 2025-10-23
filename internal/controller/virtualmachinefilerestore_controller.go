@@ -2706,11 +2706,11 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		VMFRNamespace:        vmfr.Namespace,
 		VMFRUID:              string(vmfr.UID),
 		PVCMounts:            pvcMounts,
-		MainContainer:        ptr.To(buildVMFileServerMainContainer()), // Use VM file server for disk mounting
-		SSHAccess:            sshConfig,                                // Configured SSH access (or nil)
-		FileBrowserAccess:    fileBrowserConfig,                        // Configured FileBrowser access (or nil)
-		EnableDualPathAccess: true,                                     // Enable dual-path symlinks
-		UseInternalMounts:    false,                                    // Use Kubernetes-managed PVC mounts
+		MainContainer:        ptr.To(buildVMFileServerMainContainer(pvcMounts)), // Use VM file server for disk mounting
+		SSHAccess:            sshConfig,                                          // Configured SSH access (or nil)
+		FileBrowserAccess:    fileBrowserConfig,                                  // Configured FileBrowser access (or nil)
+		EnableDualPathAccess: true,                                               // Enable dual-path symlinks
+		UseInternalMounts:    false,                                              // Use Kubernetes-managed PVC mounts
 	}
 
 	logger.V(0).Info("File server configuration prepared",
