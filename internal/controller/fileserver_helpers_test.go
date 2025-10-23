@@ -108,9 +108,10 @@ func TestBuildFileServerPodSpec_SSHSidecar(t *testing.T) {
 
 	t.Run("builds pod with SSH sidecar", func(t *testing.T) {
 		sshConfig := &SSHAccessConfig{
-			Username:  "testuser",
-			PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
-			Port:      constant.DefaultSSHPort,
+			Username:                   "testuser",
+			CredentialsSecretName:      "test-ssh-secret",
+			CredentialsSecretNamespace: "test-ns",
+			Port:                       constant.DefaultSSHPort,
 		}
 
 		config := FileServerPodConfig{
@@ -238,9 +239,10 @@ func TestBuildFileServerPodSpec_BothSidecars(t *testing.T) {
 
 	t.Run("builds pod with both SSH and FileBrowser sidecars", func(t *testing.T) {
 		sshConfig := &SSHAccessConfig{
-			Username:  "testuser",
-			PublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
-			Port:      constant.DefaultSSHPort,
+			Username:                   "testuser",
+			CredentialsSecretName:      "test-ssh-secret",
+			CredentialsSecretNamespace: "test-ns",
+			Port:                       constant.DefaultSSHPort,
 		}
 
 		fbConfig := &FileBrowserAccessConfig{

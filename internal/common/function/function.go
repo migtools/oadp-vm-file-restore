@@ -20,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -232,14 +231,49 @@ func min(a, b int) int {
 	return b
 }
 
+// createCredentialsSecretBase creates a Secret with common VMFR metadata using generateName.
+// Kubernetes will automatically append a random suffix to ensure uniqueness.
+// The secret can be looked up later using the VMFROriginUUIDLabel and CredentialTypeLabel.
+func createCredentialsSecretBase(
+	generateNamePrefix string,
+	namespace string,
+	credentialType string, // constant.CredentialTypeSSH or constant.CredentialTypeFileBrowser
+	vmfrName string,
+	vmfrNamespace string,
+	vmfrUID apitypes.UID,
+) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: generateNamePrefix,
+			Namespace:    namespace,
+			Labels: map[string]string{
+				constant.ManagedByLabel:      constant.ManagedByLabelValue,
+				constant.VMFROriginUUIDLabel: string(vmfrUID),
+				constant.CredentialTypeLabel: credentialType,
+			},
+			Annotations: map[string]string{
+				constant.VMFROriginNameAnnotation:      vmfrName,
+				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
+				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
+			},
+			// NOTE: No OwnerReferences - VMFR may be in different namespace than secret
+			// (e.g., VMFR in openshift-adp, secret in restore namespace)
+			// Cross-namespace owner references are rejected by Kubernetes
+			// Use labels + finalizer for cleanup instead
+		},
+		Type: corev1.SecretTypeOpaque,
+	}
+}
+
 // CreateSSHCredentialsSecret creates a Kubernetes Secret containing SSH credentials.
+// Uses generateName for automatic unique naming - Kubernetes appends a random suffix.
 // The Secret will contain:
 // - username: SSH username
 // - privateKey: SSH private key in PEM format
 // - publicKey: SSH public key in authorized_keys format
-// The Secret will have labels indicating it's managed by VMFR and owned by the specified VMFR resource.
+// The Secret can be found later using VMFROriginUUIDLabel and CredentialTypeLabel.
 func CreateSSHCredentialsSecret(
-	name string,
+	generateNamePrefix string,
 	namespace string,
 	username string,
 	keyPair *SSHKeyPair,
@@ -248,54 +282,37 @@ func CreateSSHCredentialsSecret(
 	vmfrUID apitypes.UID,
 	logger logr.Logger,
 ) *corev1.Secret {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				constant.ManagedByLabel:             constant.ManagedByLabelValue,
-				constant.VMFROriginUUIDLabel:        string(vmfrUID),
-				"oadp.openshift.io/credential-type": "ssh",
-			},
-			Annotations: map[string]string{
-				constant.VMFROriginNameAnnotation:      vmfrName,
-				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
-				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion:         "oadp.openshift.io/v1alpha1",
-					Kind:               "VirtualMachineFileRestore",
-					Name:               vmfrName,
-					UID:                vmfrUID,
-					Controller:         ptr.To(true),
-					BlockOwnerDeletion: ptr.To(true),
-				},
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"username":   username,
-			"privateKey": keyPair.PrivateKey,
-			"publicKey":  keyPair.PublicKey,
-		},
+	secret := createCredentialsSecretBase(
+		generateNamePrefix,
+		namespace,
+		constant.CredentialTypeSSH,
+		vmfrName,
+		vmfrNamespace,
+		vmfrUID,
+	)
+
+	secret.StringData = map[string]string{
+		"username":   username,
+		"privateKey": keyPair.PrivateKey,
+		"publicKey":  keyPair.PublicKey,
 	}
 
-	logger.V(1).Info("Created SSH credentials secret",
-		"secretName", name,
-		"secretNamespace", namespace,
+	logger.V(1).Info("Created SSH credentials secret with generateName",
+		"generateNamePrefix", generateNamePrefix,
+		"namespace", namespace,
 		"username", username)
 
 	return secret
 }
 
 // CreateFileBrowserCredentialsSecret creates a Kubernetes Secret containing FileBrowser credentials.
+// Uses generateName for automatic unique naming - Kubernetes appends a random suffix.
 // The Secret will contain:
 // - username: FileBrowser username
 // - password: FileBrowser password
-// The Secret will have labels indicating it's managed by VMFR and owned by the specified VMFR resource.
+// The Secret can be found later using VMFROriginUUIDLabel and CredentialTypeLabel.
 func CreateFileBrowserCredentialsSecret(
-	name string,
+	generateNamePrefix string,
 	namespace string,
 	credentials *FileBrowserCredentials,
 	vmfrName string,
@@ -303,42 +320,128 @@ func CreateFileBrowserCredentialsSecret(
 	vmfrUID apitypes.UID,
 	logger logr.Logger,
 ) *corev1.Secret {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				constant.ManagedByLabel:             constant.ManagedByLabelValue,
-				constant.VMFROriginUUIDLabel:        string(vmfrUID),
-				"oadp.openshift.io/credential-type": "filebrowser",
-			},
-			Annotations: map[string]string{
-				constant.VMFROriginNameAnnotation:      vmfrName,
-				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
-				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion:         "oadp.openshift.io/v1alpha1",
-					Kind:               "VirtualMachineFileRestore",
-					Name:               vmfrName,
-					UID:                vmfrUID,
-					Controller:         ptr.To(true),
-					BlockOwnerDeletion: ptr.To(true),
-				},
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"username": credentials.Username,
-			"password": credentials.Password,
-		},
+	secret := createCredentialsSecretBase(
+		generateNamePrefix,
+		namespace,
+		constant.CredentialTypeFileBrowser,
+		vmfrName,
+		vmfrNamespace,
+		vmfrUID,
+	)
+
+	secret.StringData = map[string]string{
+		"username": credentials.Username,
+		"password": credentials.Password,
 	}
 
-	logger.V(1).Info("Created FileBrowser credentials secret",
-		"secretName", name,
-		"secretNamespace", namespace,
+	logger.V(1).Info("Created FileBrowser credentials secret with generateName",
+		"generateNamePrefix", generateNamePrefix,
+		"namespace", namespace,
 		"username", credentials.Username)
 
 	return secret
+}
+
+// ValidateSSHPublicKey validates an SSH public key format using the crypto/ssh parser.
+// This provides robust validation by actually parsing the key rather than simple string checks.
+//
+// Security policy: Allows modern secure key types. For RSA keys, we allow "ssh-rsa" (the key type
+// identifier in authorized_keys format) because:
+// 1. All RSA keys in authorized_keys format are labeled "ssh-rsa" regardless of signature algorithm
+// 2. Modern OpenSSH (7.2+) automatically negotiates SHA-2 signatures (rsa-sha2-256/512) at runtime
+// 3. If ParseAuthorizedKey succeeds on an RSA key, it's already RSA2 (protocol v2), not the deprecated RSA1
+//
+// Note: "rsa-sha2-256" and "rsa-sha2-512" are signature algorithm names negotiated during authentication,
+// not key type identifiers that appear in the public key itself.
+//
+// Allowed key types:
+// - ssh-ed25519 (recommended - most secure)
+// - ssh-rsa (RSA keys - modern SSH uses SHA-2 signatures)
+// - ecdsa-sha2-nistp256/384/521 (ECDSA variants)
+// - FIDO/U2F hardware key variants
+func ValidateSSHPublicKey(publicKey []byte) error {
+	parsedKey, _, _, _, err := ssh.ParseAuthorizedKey(publicKey)
+	if err != nil {
+		return fmt.Errorf("invalid SSH public key format: %w", err)
+	}
+
+	// Get the key type identifier from the public key
+	keyType := parsedKey.Type()
+
+	// Whitelist of allowed key types
+	allowedKeyTypes := map[string]bool{
+		"ssh-ed25519":                        true, // Ed25519 - most secure, recommended
+		"ssh-rsa":                            true, // RSA - modern SSH uses SHA-2 signatures
+		"ecdsa-sha2-nistp256":                true, // ECDSA P-256
+		"ecdsa-sha2-nistp384":                true, // ECDSA P-384
+		"ecdsa-sha2-nistp521":                true, // ECDSA P-521
+		"sk-ssh-ed25519@openssh.com":         true, // FIDO/U2F Ed25519
+		"sk-ecdsa-sha2-nistp256@openssh.com": true, // FIDO/U2F ECDSA
+	}
+
+	if !allowedKeyTypes[keyType] {
+		return fmt.Errorf("SSH key type '%s' is not allowed. Allowed types: ssh-ed25519 (recommended), ssh-rsa, ecdsa-sha2-nistp256/384/521, and FIDO variants", keyType)
+	}
+
+	return nil
+}
+
+// ValidateSSHSecret validates that a Secret contains the required SSH credential fields.
+// Required fields:
+// - publicKey: SSH public key in authorized_keys format
+// Optional fields:
+// - username: SSH username (defaults to "oadp" if not provided)
+// - privateKey: SSH private key (only for user reference, not used by server)
+func ValidateSSHSecret(secret *corev1.Secret, logger logr.Logger) error {
+	if secret.Data == nil {
+		return fmt.Errorf("secret data is nil")
+	}
+
+	// Check for required publicKey field
+	publicKey, exists := secret.Data["publicKey"]
+	if !exists || len(publicKey) == 0 {
+		return fmt.Errorf("secret missing required field 'publicKey'")
+	}
+
+	// Validate publicKey format using robust SSH parser
+	if err := ValidateSSHPublicKey(publicKey); err != nil {
+		return fmt.Errorf("publicKey validation failed: %w", err)
+	}
+
+	logger.V(1).Info("SSH secret validation passed",
+		"secretName", secret.Name,
+		"secretNamespace", secret.Namespace,
+		"hasUsername", secret.Data["username"] != nil,
+		"hasPrivateKey", secret.Data["privateKey"] != nil)
+
+	return nil
+}
+
+// ValidateFileBrowserSecret validates that a Secret contains the required FileBrowser credential fields.
+// Required fields:
+// - password: FileBrowser password
+// Optional fields:
+// - username: FileBrowser username (defaults to "oadp" if not provided)
+func ValidateFileBrowserSecret(secret *corev1.Secret, logger logr.Logger) error {
+	if secret.Data == nil {
+		return fmt.Errorf("secret data is nil")
+	}
+
+	// Check for required password field
+	password, exists := secret.Data["password"]
+	if !exists || len(password) == 0 {
+		return fmt.Errorf("secret missing required field 'password'")
+	}
+
+	// Validate password is not too weak (minimum length enforced)
+	if len(password) < constant.DefaultMinimumPasswordLength {
+		return fmt.Errorf("password must be at least %d characters long", constant.DefaultMinimumPasswordLength)
+	}
+
+	logger.V(1).Info("FileBrowser secret validation passed",
+		"secretName", secret.Name,
+		"secretNamespace", secret.Namespace,
+		"hasUsername", secret.Data["username"] != nil)
+
+	return nil
 }
