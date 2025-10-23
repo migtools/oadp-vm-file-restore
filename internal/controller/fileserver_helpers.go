@@ -23,8 +23,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -258,6 +258,36 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		})
 	}
 
+	// Add /dev/fuse hostPath volume (required for guestmount FUSE filesystem)
+	allVolumes = append(allVolumes, corev1.Volume{
+		Name: "fuse-device",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: "/dev/fuse",
+				Type: ptr.To(corev1.HostPathCharDev),
+			},
+		},
+	})
+
+	// Add /dev/kvm hostPath volume (required for KVM hardware acceleration)
+	allVolumes = append(allVolumes, corev1.Volume{
+		Name: "kvm-device",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: "/dev/kvm",
+				Type: ptr.To(corev1.HostPathCharDev),
+			},
+		},
+	})
+
+	// Add emptyDir for filesystem mount points (where guestmount will mount filesystems)
+	allVolumes = append(allVolumes, corev1.Volume{
+		Name: "filesystems",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
+
 	// Collect init containers and sidecar containers
 	var allInitContainers []corev1.Container
 	var sidecarContainers []corev1.Container
@@ -347,6 +377,24 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 				ReadOnly:  true,
 			})
 		}
+
+		// Add /dev/fuse device mount (required for guestmount)
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "fuse-device",
+			MountPath: "/dev/fuse",
+		})
+
+		// Add /dev/kvm device mount (required for KVM acceleration)
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "kvm-device",
+			MountPath: "/dev/kvm",
+		})
+
+		// Add filesystems mount point (where guestmount will create filesystem mounts)
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "filesystems",
+			MountPath: "/mnt/filesystems",
+		})
 	}
 
 	// Combine main container with sidecars
@@ -366,26 +414,39 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
-			InitContainers: allInitContainers,
-			Containers:     containers,
-			Volumes:        allVolumes,
-			RestartPolicy:  corev1.RestartPolicyAlways,
+			// Use dedicated ServiceAccount for file server pods
+			// This ServiceAccount is created by the controller in ensureRestoreNamespace
+			// and is bound to the privileged SCC to allow hostPath volumes and privileged containers
+			ServiceAccountName: "vmfr-file-server",
+			InitContainers:     allInitContainers,
+			Containers:         containers,
+			Volumes:            allVolumes,
+			RestartPolicy:      corev1.RestartPolicyAlways,
+			// Pod-level security context
+			// Required for accessing VM disk images with qemu user/group permissions
+			SecurityContext: &corev1.PodSecurityContext{
+				// fsGroup: 107 (qemu group in OpenShift Virtualization)
+				// This ensures volumes are accessible by the qemu user/group
+				FSGroup: ptr.To(int64(107)),
+				// supplementalGroups: [107] - Grants qemu group membership to all containers
+				SupplementalGroups: []int64{107},
+				// SELinux: Use spc_t (Super Privileged Container) type
+				// This disables SELinux enforcement for volume access, similar to Velero's spcNoRelabeling option
+				// See: https://velero.io/docs/main/data-movement-backup-pvc-configuration/
+				SELinuxOptions: &corev1.SELinuxOptions{
+					Type: "spc_t",
+				},
+			},
 		},
 	}
 
-	// Add owner reference if VMFR UID is provided
-	if config.VMFRUID != "" {
-		pod.OwnerReferences = []metav1.OwnerReference{
-			{
-				APIVersion:         "oadp.openshift.io/v1alpha1",
-				Kind:               "VirtualMachineFileRestore",
-				Name:               config.VMFRName,
-				UID:                types.UID(config.VMFRUID),
-				Controller:         ptr.To(true),
-				BlockOwnerDeletion: ptr.To(true),
-			},
-		}
-	}
+	// NOTE: No owner references added to the Pod
+	// Kubernetes does not allow cross-namespace owner references (VMFR is in OADP namespace,
+	// Pod is in temp restore namespace). Instead, cleanup is handled by:
+	// 1. Temp namespace has owner reference to VMFR
+	// 2. When VMFR is deleted, namespace is deleted
+	// 3. Namespace deletion cascades to all resources including this Pod
+	// Labels (VMFROriginUUIDLabel) are used for tracking ownership instead
 
 	return pod, nil
 }
@@ -530,14 +591,40 @@ func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualP
 
 // buildVMFileServerMainContainer creates a VM file server container for mounting VM disk images
 // This container uses libguestfs/QEMU to mount VM disks and provide file-level access
+// Based on CONTROLLER_INTEGRATION.md from Issue #6/#7
 func buildVMFileServerMainContainer() corev1.Container {
 	return corev1.Container{
 		Name:  "vm-file-server",
 		Image: constant.VMFileServerImage,
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			"echo 'VM file server starting...'; sleep infinity",
+		// Run detect-and-mount.sh to automatically mount all disk images
+		Command: []string{"/usr/local/bin/detect-and-mount.sh"},
+
+		// Environment variables
+		Env: []corev1.EnvVar{
+			{
+				Name:  "HOME",
+				Value: "/tmp", // Required for libguestfs cache
+			},
+		},
+
+		// Container-level security context
+		// CRITICAL: Privileged mode required for /dev/kvm access with SELinux
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr.To(true), // Required for /dev/kvm and /dev/fuse access
+			RunAsUser:  ptr.To(int64(107)), // qemu user
+			RunAsGroup: ptr.To(int64(107)), // qemu group
+		},
+
+		// Resource limits
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("2Gi"),  // libguestfs can use significant memory
+				corev1.ResourceCPU:    resource.MustParse("1000m"), // KVM uses CPU during mount
+			},
 		},
 	}
 }
@@ -619,7 +706,7 @@ func buildInitContainerForDualPathSymlinks(pvcMounts []PVCMountInfo) corev1.Cont
 
 	return corev1.Container{
 		Name:  "setup-dual-path-symlinks",
-		Image: "busybox:latest",
+		Image: "quay.io/quay/busybox:latest",
 		Command: []string{
 			"/bin/sh",
 			"-c",
@@ -727,8 +814,8 @@ func extractPVCMountsFromVMFR(vmfr *oadpv1alpha1.VirtualMachineFileRestore) []PV
 		// Find the most recent successfully completed restore for this PVC
 		// Restores are already sorted by timestamp (newest first) in processDiscoveryResults
 		for _, restoreInfo := range pvcRestore.Restores {
-			// Only include completed restores
-			if restoreInfo.Phase == "Completed" && restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
+			// Include both Completed and Finalizing phases (PVCs are ready in both cases)
+			if (restoreInfo.Phase == "Completed" || restoreInfo.Phase == "Finalizing") && restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
 				pvcMounts = append(pvcMounts, PVCMountInfo{
 					PVCName:           pvcRestore.PVCName,
 					PVCNamespace:      pvcRestore.PVCNamespace,
@@ -943,15 +1030,15 @@ echo "Configuring public key authentication..."
 cp /credentials/publicKey /config/ssh_keys/authorized_keys
 chmod 600 /config/ssh_keys/authorized_keys
 
-# Set proper ownership (SSH server runs as PUID/PGID 1000)
-chown -R 1000:1000 /config
+# Note: No chown needed - OpenShift's restricted-v2 SCC doesn't allow it,
+# and EmptyDir volumes are created with pod's fsGroup ownership automatically
 
 echo "SSH configuration completed successfully (public key auth only)"
 `
 
 	return corev1.Container{
 		Name:  "setup-ssh-credentials",
-		Image: "busybox:latest",
+		Image: "quay.io/quay/busybox:latest",
 		Command: []string{
 			"/bin/sh",
 			"-c",
@@ -966,6 +1053,48 @@ echo "SSH configuration completed successfully (public key auth only)"
 				Name:      "ssh-credentials",
 				MountPath: "/credentials",
 				ReadOnly:  true,
+			},
+		},
+	}
+}
+
+// buildSSHInitContainerInline creates an init container that configures SSH from inline publicKey.
+func buildSSHInitContainerInline(publicKey string) corev1.Container {
+	// Shell script to configure SSH user from inline publicKey
+	// The publicKey is embedded directly in the script
+	setupScript := fmt.Sprintf(`#!/bin/sh
+set -e
+
+echo "Setting up SSH configuration from inline publicKey..."
+
+# Create SSH keys directory
+mkdir -p /config/ssh_keys
+
+# Write the public key to authorized_keys
+cat > /config/ssh_keys/authorized_keys <<'EOF'
+%s
+EOF
+
+chmod 600 /config/ssh_keys/authorized_keys
+
+# Note: No chown needed - OpenShift's restricted-v2 SCC doesn't allow it,
+# and EmptyDir volumes are created with pod's fsGroup ownership automatically
+
+echo "SSH configuration completed successfully"
+`, publicKey)
+
+	return corev1.Container{
+		Name:  "setup-ssh-credentials",
+		Image: "quay.io/quay/busybox:latest",
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			setupScript,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "ssh-config",
+				MountPath: "/config",
 			},
 		},
 	}
