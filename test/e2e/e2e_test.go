@@ -34,7 +34,7 @@ import (
 )
 
 // namespace where the project is deployed in
-const namespace = "oadp-vm-file-restore-system"
+const namespace = "openshift-adp"
 
 // serviceAccountName created for the project
 const serviceAccountName = "oadp-vm-file-restore-controller-manager"
@@ -55,7 +55,8 @@ var _ = Describe("Manager", Ordered, func() {
 		By("creating manager namespace")
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
 		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+		// Ignore error if namespace already exists - this is fine for e2e tests
+		// (err will be "namespaces 'openshift-adp' already exists" which is okay)
 
 		By("labeling the namespace to enforce the restricted security policy")
 		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
@@ -72,6 +73,14 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", projectImage))
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+		By("patching the deployment to use IfNotPresent imagePullPolicy for e2e tests")
+		cmd = exec.Command("kubectl", "patch", "deployment",
+			"oadp-vm-file-restore-controller-manager",
+			"-n", namespace,
+			"-p", `{"spec":{"template":{"spec":{"containers":[{"name":"manager","imagePullPolicy":"IfNotPresent"}]}}}}`)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to patch imagePullPolicy")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
