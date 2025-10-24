@@ -29,6 +29,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -42,6 +43,7 @@ import (
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
 	oadptypes "github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
+	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 )
 
 var _ = Describe("VirtualMachineFileRestore Controller", func() {
@@ -2680,6 +2682,34 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 	}
 }
 
+// mockBackupContentsReader is a simple mock implementation for testing
+type mockBackupContentsReader struct {
+	ExtractVMFunc   func(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (*kubevirtv1.VirtualMachine, error)
+	FetchPVCFunc    func(ctx context.Context, backup *velerov1api.Backup, pvcName, pvcNamespace string) (*corev1.PersistentVolumeClaim, error)
+}
+
+func (m *mockBackupContentsReader) ExtractVMFromBackupMetadata(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (*kubevirtv1.VirtualMachine, error) {
+	if m.ExtractVMFunc != nil {
+		return m.ExtractVMFunc(ctx, backup, vmName, vmNamespace)
+	}
+	return nil, nil
+}
+
+func (m *mockBackupContentsReader) FetchPVCFromBackup(ctx context.Context, backup *velerov1api.Backup, pvcName, pvcNamespace string) (*corev1.PersistentVolumeClaim, error) {
+	if m.FetchPVCFunc != nil {
+		return m.FetchPVCFunc(ctx, backup, pvcName, pvcNamespace)
+	}
+	return nil, nil
+}
+
+func (m *mockBackupContentsReader) BackupContainsVM(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (bool, error) {
+	return true, nil
+}
+
+func (m *mockBackupContentsReader) FetchBackupMetadata(ctx context.Context, backup *velerov1api.Backup) (*velerohelpers.BackupMetadata, error) {
+	return nil, nil
+}
+
 func TestGetBackupMetadata(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = oadpv1alpha1.AddToScheme(scheme)
@@ -2806,4 +2836,280 @@ func TestGetBackupMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunConcurrentPVCDiscovery(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	_ = kubevirtv1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+	time2 := metav1.NewTime(time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
+	time3 := metav1.NewTime(time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
+
+	tests := []struct {
+		name              string
+		backupsToServe    []oadptypes.VeleroBackupInfo
+		existingBackups   []*velerov1api.Backup
+		vmbd              *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		mockReader        *mockBackupContentsReader
+		expectedResults   int
+		validateResults   func(t *testing.T, results []oadptypes.BackupDiscoveryProgress)
+	}{
+		{
+			name:            "empty backups list returns empty results",
+			backupsToServe:  []oadptypes.VeleroBackupInfo{},
+			expectedResults: 0,
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+					VirtualMachineName:      "test-vm",
+					VirtualMachineNamespace: "test-ns",
+				},
+			},
+		},
+		{
+			name: "single backup with successful discovery",
+			backupsToServe: []oadptypes.VeleroBackupInfo{
+				{Name: "backup-1", Namespace: "openshift-adp", CreatedAt: &time1},
+			},
+			existingBackups: []*velerov1api.Backup{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "backup-1",
+						Namespace:         "openshift-adp",
+						CreationTimestamp: time1,
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+					VirtualMachineName:      "test-vm",
+					VirtualMachineNamespace: "test-ns",
+				},
+			},
+			mockReader: &mockBackupContentsReader{
+				ExtractVMFunc: func(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (*kubevirtv1.VirtualMachine, error) {
+					return &kubevirtv1.VirtualMachine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-vm",
+							Namespace: "test-ns",
+						},
+						Spec: kubevirtv1.VirtualMachineSpec{
+							Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
+								Spec: kubevirtv1.VirtualMachineInstanceSpec{
+									Volumes: []kubevirtv1.Volume{
+										{
+											Name: "disk1",
+											VolumeSource: kubevirtv1.VolumeSource{
+												PersistentVolumeClaim: &kubevirtv1.PersistentVolumeClaimVolumeSource{
+													PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{
+														ClaimName: "pvc-1",
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					}, nil
+				},
+				FetchPVCFunc: func(ctx context.Context, backup *velerov1api.Backup, pvcName, pvcNamespace string) (*corev1.PersistentVolumeClaim, error) {
+					return &corev1.PersistentVolumeClaim{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      pvcName,
+							Namespace: pvcNamespace,
+							UID:       "pvc-uid-1",
+							Labels: map[string]string{
+								constant.PVCUIDLabel: "pvc-uid-1",
+							},
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: mustParseQuantity("10Gi"),
+								},
+							},
+						},
+					}, nil
+				},
+			},
+			expectedResults: 1,
+			validateResults: func(t *testing.T, results []oadptypes.BackupDiscoveryProgress) {
+				if len(results) != 1 {
+					t.Fatalf("Expected 1 result, got %d", len(results))
+				}
+				if results[0].Status != oadptypes.BackupDiscoveryStatusCompleted {
+					t.Errorf("Expected status Completed, got %s", results[0].Status)
+				}
+				if results[0].VeleroBackupInfo.Name != "backup-1" {
+					t.Errorf("Expected backup name 'backup-1', got '%s'", results[0].VeleroBackupInfo.Name)
+				}
+				if len(results[0].VeleroBackupInfo.PVCs) != 1 {
+					t.Errorf("Expected 1 PVC, got %d", len(results[0].VeleroBackupInfo.PVCs))
+				}
+			},
+		},
+		{
+			name: "multiple backups processed concurrently",
+			backupsToServe: []oadptypes.VeleroBackupInfo{
+				{Name: "backup-1", Namespace: "openshift-adp", CreatedAt: &time1},
+				{Name: "backup-2", Namespace: "openshift-adp", CreatedAt: &time2},
+				{Name: "backup-3", Namespace: "openshift-adp", CreatedAt: &time3},
+			},
+			existingBackups: []*velerov1api.Backup{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "backup-1",
+						Namespace:         "openshift-adp",
+						CreationTimestamp: time1,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "backup-2",
+						Namespace:         "openshift-adp",
+						CreationTimestamp: time2,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "backup-3",
+						Namespace:         "openshift-adp",
+						CreationTimestamp: time3,
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+					VirtualMachineName:      "test-vm",
+					VirtualMachineNamespace: "test-ns",
+				},
+			},
+			mockReader: &mockBackupContentsReader{
+				ExtractVMFunc: func(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (*kubevirtv1.VirtualMachine, error) {
+					return &kubevirtv1.VirtualMachine{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-vm",
+							Namespace: "test-ns",
+						},
+						Spec: kubevirtv1.VirtualMachineSpec{
+							Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
+								Spec: kubevirtv1.VirtualMachineInstanceSpec{
+									Volumes: []kubevirtv1.Volume{
+										{
+											Name: "disk1",
+											VolumeSource: kubevirtv1.VolumeSource{
+												PersistentVolumeClaim: &kubevirtv1.PersistentVolumeClaimVolumeSource{
+													PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{
+														ClaimName: "pvc-1",
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					}, nil
+				},
+				FetchPVCFunc: func(ctx context.Context, backup *velerov1api.Backup, pvcName, pvcNamespace string) (*corev1.PersistentVolumeClaim, error) {
+					return &corev1.PersistentVolumeClaim{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      pvcName,
+							Namespace: pvcNamespace,
+							UID:       "pvc-uid-1",
+							Labels: map[string]string{
+								constant.PVCUIDLabel: "pvc-uid-1",
+							},
+						},
+						Spec: corev1.PersistentVolumeClaimSpec{
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceStorage: mustParseQuantity("10Gi"),
+								},
+							},
+						},
+					}, nil
+				},
+			},
+			expectedResults: 3,
+			validateResults: func(t *testing.T, results []oadptypes.BackupDiscoveryProgress) {
+				if len(results) != 3 {
+					t.Fatalf("Expected 3 results, got %d", len(results))
+				}
+				// All should be successful
+				for _, result := range results {
+					if result.Status != oadptypes.BackupDiscoveryStatusCompleted {
+						t.Errorf("Expected status Completed for backup %s, got %s", result.VeleroBackupInfo.Name, result.Status)
+					}
+				}
+			},
+		},
+		{
+			name: "backup not found creates failed result",
+			backupsToServe: []oadptypes.VeleroBackupInfo{
+				{Name: "nonexistent-backup", Namespace: "openshift-adp"},
+			},
+			existingBackups: []*velerov1api.Backup{},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+					VirtualMachineName:      "test-vm",
+					VirtualMachineNamespace: "test-ns",
+				},
+			},
+			expectedResults: 1,
+			validateResults: func(t *testing.T, results []oadptypes.BackupDiscoveryProgress) {
+				if len(results) != 1 {
+					t.Fatalf("Expected 1 result, got %d", len(results))
+				}
+				if results[0].Status != oadptypes.BackupDiscoveryStatusFailed {
+					t.Errorf("Expected status Failed, got %s", results[0].Status)
+				}
+				if !contains(results[0].Message, "BackupNotFound") {
+					t.Errorf("Expected message to contain 'BackupNotFound', got '%s'", results[0].Message)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{}
+			for _, backup := range tt.existingBackups {
+				objects = append(objects, backup)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:               fakeClient,
+				Scheme:               scheme,
+				OADPNamespace:        "openshift-adp",
+				BackupContentsReader: tt.mockReader,
+			}
+
+			results := reconciler.runConcurrentPVCDiscovery(ctx, zap.New(), tt.vmbd, tt.backupsToServe)
+
+			if len(results) != tt.expectedResults {
+				t.Errorf("Expected %d results, got %d", tt.expectedResults, len(results))
+			}
+
+			if tt.validateResults != nil {
+				tt.validateResults(t, results)
+			}
+		})
+	}
+}
+
+// mustParseQuantity is a helper to parse quantities in tests
+func mustParseQuantity(s string) resource.Quantity {
+	q := resource.MustParse(s)
+	return q
 }
