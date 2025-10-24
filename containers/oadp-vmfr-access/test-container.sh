@@ -33,7 +33,7 @@
 #     - detect-and-mount.sh script is accessible and has usage info
 #
 # Environment Variables:
-#   IMAGE_NAME - Container image name (default: oadp-vm-file-server:dev)
+#   IMAGE_NAME - Container image name (default: oadp-vmfr-access:dev)
 #
 # Examples:
 #   ./test-container.sh                    # Build and run all tests
@@ -49,7 +49,7 @@
 
 set -euo pipefail
 
-IMAGE_NAME="${IMAGE_NAME:-oadp-vm-file-server:dev}"
+IMAGE_NAME="${IMAGE_NAME:-oadp-vmfr-access:dev}"
 CONTAINER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ==============================================================================
@@ -269,7 +269,7 @@ Commands:
     all          - Build and run all tests (default)
 
 Environment Variables:
-    IMAGE_NAME - Container image name (default: oadp-vm-file-server:dev)
+    IMAGE_NAME - Container image name (default: oadp-vmfr-access:dev)
 
 Examples:
     $0 build

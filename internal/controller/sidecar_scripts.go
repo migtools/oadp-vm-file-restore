@@ -26,7 +26,7 @@ package controller
 // - Starts FileBrowser with TLS support
 //
 // The script is based on the official example from:
-// side-containers/filebrowser/sample-deployment/4_serving_pod.yaml
+// containers/side-containers/filebrowser/sample-deployment/4_serving_pod.yaml
 const fileBrowserInitScript = `set -e
 
 echo "==================================================================="

@@ -89,7 +89,7 @@ The VMFR controller (Issue #7) will pass this information to the file-server pod
 ```yaml
 containers:
 - name: file-server
-  image: oadp-vm-file-server:latest
+  image: quay.io/konveyor/oadp-vmfr-access:latest
   env:
   # Backup and PVC mapping (JSON format)
   - name: BACKUP_PVC_MAP
@@ -391,7 +391,7 @@ func (r *VMFRReconciler) buildPodSpec(vmfr *oadpv1alpha1.VirtualMachineFileResto
         Spec: corev1.PodSpec{
             Containers: []corev1.Container{{
                 Name:  "file-server",
-                Image: "oadp-vm-file-server:latest",
+                Image: "quay.io/konveyor/oadp-vmfr-access:latest",
                 Env: []corev1.EnvVar{{
                     Name:  "BACKUP_PVC_MAP",
                     Value: string(backupMapJSON),

@@ -1,5 +1,5 @@
 ---
-# Custom SecurityContextConstraint for OADP VM File Server
+# Custom SecurityContextConstraint for OADP VM File Restore Access
 #
 # Purpose: Allow SYS_ADMIN capability for FUSE mounting without requiring
 #          privileged containers
@@ -13,10 +13,10 @@
 apiVersion: security.openshift.io/v1
 kind: SecurityContextConstraints
 metadata:
-  name: oadp-vm-file-server
+  name: oadp-vmfr-access
   annotations:
     kubernetes.io/description: >
-      SCC for OADP VM file server pods that need FUSE mounting capability.
+      SCC for OADP VM file restore access container that needs FUSE mounting capability.
       Allows SYS_ADMIN for mount() syscall without requiring privileged mode.
 allowHostDirVolumePlugin: true  # Required for /dev/fuse, /dev/kvm hostPath
 allowHostIPC: false
@@ -54,4 +54,4 @@ volumes:
 users: []
 groups: []
 # Usage: Grant to specific service account
-#   oc adm policy add-scc-to-user oadp-vm-file-server -z <service-account> -n <namespace>
+#   oc adm policy add-scc-to-user oadp-vmfr-access -z <service-account> -n <namespace>

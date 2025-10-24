@@ -14,7 +14,7 @@ Web-based file browser container for accessing OADP VM backup files through a mo
 
 ## Container Image
 
-**Pre-built image:** `quay.io/migtools/oadp-vmfr-filebrowser:latest`
+**Pre-built image:** `quay.io/konveyor/oadp-vmfr-access-filebrowser:latest`
 
 Built from: https://github.com/migtools/filebrowser
 

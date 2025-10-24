@@ -49,7 +49,7 @@ spec:
               - |
                 cat > /root/oadp-validation.json <<EOF
                 {
-                  "test_name": "OADP VM File Server - Live Cluster Test",
+                  "test_name": "OADP VM File Access Container - Live Cluster Test",
                   "test_date": "$(date -I)",
                   "vm_name": "test-vm-live",
                   "disk_format": "raw",

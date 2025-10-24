@@ -14,7 +14,7 @@ spec:
 
   containers:
   - name: file-server
-    image: quay.io/spampatt/oadp-vm-file-server:amd64-test
+    image: quay.io/konveyor/oadp-vmfr-access:latest
     imagePullPolicy: Always
 
     # Mount block device directly with guestmount

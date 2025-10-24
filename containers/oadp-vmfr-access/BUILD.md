@@ -1,4 +1,4 @@
-# Building the OADP VM File Server Container
+# Building the OADP VM File Access Container
 
 This document explains how to build the file-server container image.
 
@@ -27,10 +27,10 @@ Both produce functionally identical images - the choice is about build context a
 cd containers/file-server/
 
 # Simple build (uses Dockerfile by default)
-podman build -t oadp-vm-file-server:latest .
+podman build -t oadp-vmfr-access:latest .
 
 # Or explicitly specify Dockerfile
-podman build -f Dockerfile -t oadp-vm-file-server:latest .
+podman build -f Dockerfile -t oadp-vmfr-access:latest .
 ```
 
 ### Why Fedora 42?
@@ -82,7 +82,7 @@ cd containers/file-server/
 
 # This will work if you have access to Red Hat internal build environment
 podman build -f konflux.Dockerfile \
-  -t oadp-vm-file-server:konflux \
+  -t oadp-vmfr-access:konflux \
   .
 ```
 
@@ -103,16 +103,16 @@ After building (either Dockerfile), verify the image:
 
 ```bash
 # Check image was created
-podman images | grep oadp-vm-file-server
+podman images | grep oadp-vmfr-access
 
 # Verify libguestfs is installed
-podman run --rm oadp-vm-file-server:latest guestmount --version
+podman run --rm oadp-vmfr-access:latest guestmount --version
 
 # Check qemu-img is available
-podman run --rm oadp-vm-file-server:latest qemu-img --version
+podman run --rm oadp-vmfr-access:latest qemu-img --version
 
 # Verify running as qemu user (UID 107)
-podman run --rm --entrypoint /bin/bash oadp-vm-file-server:latest -c "id"
+podman run --rm --entrypoint /bin/bash oadp-vmfr-access:latest -c "id"
 # Expected output: uid=107(qemu) gid=107(qemu)
 ```
 
@@ -138,16 +138,14 @@ jobs:
       - name: Build container (Fedora)
         run: |
           cd containers/file-server
-          podman build -t oadp-vm-file-server:latest .
+          podman build -t oadp-vmfr-access:latest .
 
       - name: Push to quay.io
         run: |
           podman login -u="${{ secrets.QUAY_USER }}" \
                       -p="${{ secrets.QUAY_TOKEN }}" \
                       quay.io
-          podman tag oadp-vm-file-server:latest \
-                     quay.io/oadp/oadp-vm-file-server:latest
-          podman push quay.io/oadp/oadp-vm-file-server:latest
+          podman push quay.io/konveyor/oadp-vmfr-access:latest
 ```
 
 **Required GitHub Secrets:**
@@ -192,7 +190,7 @@ For Konflux configuration, see Red Hat internal documentation.
 
 **Fix:** Use the Fedora Dockerfile for local development:
 ```bash
-podman build -f Dockerfile -t oadp-vm-file-server:dev .
+podman build -f Dockerfile -t oadp-vmfr-access:dev .
 ```
 
 The konflux.Dockerfile is designed for automated Konflux builds only.
@@ -226,7 +224,7 @@ The Dockerfile.rhel explicitly:
 
 You can verify:
 ```bash
-podman run --rm --entrypoint /bin/bash oadp-vm-file-server:rhel \
+podman run --rm --entrypoint /bin/bash oadp-vmfr-access:rhel \
   -c "ls -la /var/lib/rhsm/ 2>&1"
 # Expected: directory not found or empty
 ```
@@ -236,10 +234,10 @@ podman run --rm --entrypoint /bin/bash oadp-vm-file-server:rhel \
 Always scan built images for vulnerabilities:
 ```bash
 # Using podman
-podman scan oadp-vm-file-server:latest
+podman scan oadp-vmfr-access:latest
 
 # Using trivy
-trivy image oadp-vm-file-server:latest
+trivy image oadp-vmfr-access:latest
 ```
 
 ---
@@ -251,19 +249,19 @@ Both Dockerfiles support multi-arch builds:
 ### Fedora (Upstream)
 
 ```bash
-podman manifest create oadp-vm-file-server:latest
+podman manifest create oadp-vmfr-access:latest
 
 # Build for x86_64
 podman build --platform linux/amd64 \
-  --manifest oadp-vm-file-server:latest .
+  --manifest oadp-vmfr-access:latest .
 
 # Build for aarch64
 podman build --platform linux/arm64 \
-  --manifest oadp-vm-file-server:latest .
+  --manifest oadp-vmfr-access:latest .
 
 # Push manifest
-podman manifest push oadp-vm-file-server:latest \
-  quay.io/oadp/oadp-vm-file-server:latest
+podman manifest push oadp-vmfr-access:latest \
+  quay.io/konveyor/oadp-vmfr-access:latest
 ```
 
 ### Konflux (Downstream)
@@ -280,14 +278,14 @@ For local testing without pushing to registry:
 
 ```bash
 # Build
-podman build -t oadp-vm-file-server:dev .
+podman build -t oadp-vmfr-access:dev .
 
 # Run locally
 podman run -it --privileged \
   --device /dev/fuse \
   --device /dev/kvm \
   -v /path/to/test-data:/mnt/volumes \
-  oadp-vm-file-server:dev \
+  oadp-vmfr-access:dev \
   /bin/bash
 ```
 

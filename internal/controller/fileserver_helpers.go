@@ -858,7 +858,7 @@ func buildDefaultHTTPServicePort() corev1.ServicePort {
 // Uses custom OADP SSH image with chroot environment for enhanced security.
 //
 // Implementation details:
-// - Uses constant.SSHSidecarImage (quay.io/migtools/oadp-vmfr-sshd:latest)
+// - Uses constant.SSHSidecarImage (quay.io/konveyor/oadp-vmfr-access-sshd:latest)
 // - Runs as root for authentication and chroot (security hardened with capabilities)
 // - Read-only root filesystem with emptyDir volumes for runtime directories
 // - Supports public key authentication only
@@ -1059,7 +1059,7 @@ func buildSSHSidecar(
 // Uses custom OADP FileBrowser image with TLS support and read-only permissions.
 //
 // Implementation details:
-// - Uses constant.FileBrowserSidecarImage (quay.io/migtools/oadp-vmfr-filebrowser:latest)
+// - Uses constant.FileBrowserSidecarImage (quay.io/konveyor/oadp-vmfr-access-filebrowser:latest)
 // - Runs as non-root (UID 1000) with read-only root filesystem
 // - Serves HTTPS on port 8443 with TLS certificates from OpenShift service CA
 // - Configured with authentication from Secret credentials
