@@ -137,7 +137,7 @@ const (
 	FileServerServicePrefix  = "vmfr-service"
 
 	// VM file server container image for mounting VM disk images
-	VMFileServerImage = "quay.io/spampatt/oadp-vm-file-server:dev"
+	VMFileServerImage = "quay.io/spampatt/oadp-vm-file-server:dual-path-fix"
 
 	// Default ports for file access methods
 	DefaultSSHPort         = 22

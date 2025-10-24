@@ -303,12 +303,20 @@ PYEOF
 
         # Find disk image in the PVC path (can be regular file or block device)
         local disk_image=""
-        for ext in img raw qcow2 qcow vmdk vdi; do
-            if [ -f "$pvc_path/disk.$ext" ] || [ -b "$pvc_path/disk.$ext" ]; then
-                disk_image="$pvc_path/disk.$ext"
-                break
-            fi
-        done
+
+        # Check if pvc_path itself is a block device (Block mode PVC)
+        if [ -b "$pvc_path" ]; then
+            disk_image="$pvc_path"
+            log "Found block device (Block mode PVC): $disk_image"
+        else
+            # Filesystem mode PVC: look for disk image files
+            for ext in img raw qcow2 qcow vmdk vdi; do
+                if [ -f "$pvc_path/disk.$ext" ]; then
+                    disk_image="$pvc_path/disk.$ext"
+                    break
+                fi
+            done
+        fi
 
         if [ -z "$disk_image" ]; then
             error "No disk image found in $pvc_path"
@@ -344,6 +352,9 @@ PYEOF
 
     # Generate METADATA.json
     generate_metadata
+
+    # Create dual-path directory structure for SSH browsing
+    create_dual_path_structure
 
     return 0
 }
@@ -422,30 +433,28 @@ PYEOF
 # processes each found disk image. This is the default mode when the
 # script is run without arguments.
 #
-# Supported extensions:
-#   - .qcow2 (most common for KubeVirt/QEMU)
-#   - .raw
-#   - .img
-#   - .qcow
-#   - .vmdk (VMware, less common but supported)
-#   - .vdi (VirtualBox)
+# Supported sources:
+#   - Filesystem mode PVCs: Files in VOLUME_MOUNT_DIR with extensions:
+#     .qcow2 (most common for KubeVirt/QEMU), .raw, .img, .qcow, .vmdk, .vdi
+#   - Block mode PVCs: Block devices at /dev/pvc-* (VM disks as raw block devices)
 #
 # Returns:
 #   Always returns 0 (does not fail if no disks found or some fail to mount)
 auto_mount_all() {
-    log "Auto-mounting all disk images in $VOLUME_MOUNT_DIR"
+    log "Auto-mounting all disk images in $VOLUME_MOUNT_DIR and Block devices at /dev/pvc-*"
 
     local found=false
     local success_count=0
     local fail_count=0
 
+    # Part 1: Scan for Filesystem mode PVCs (disk image files)
     # Look for common VM disk image file extensions
     # Bash brace expansion: expands to multiple patterns
     for disk in "$VOLUME_MOUNT_DIR"/*.{qcow2,raw,img,qcow,vmdk,vdi}; do
         # Check if file actually exists (glob may not match anything)
         if [[ -f "$disk" ]]; then
             found=true
-            log "Found disk image: $disk"
+            log "Found disk image file: $disk"
 
             # Process each disk, but don't fail on individual errors
             if process_disk_image "$disk"; then
@@ -457,9 +466,34 @@ auto_mount_all() {
         fi
     done
 
+    # Part 2: Scan for Block mode PVCs (block devices at /dev/pvc-*)
+    # Block devices are created by Kubernetes when volumeMode: Block is used
+    log "Scanning for Block mode PVC devices at /dev/pvc-*"
+    for block_device in /dev/pvc-*; do
+        # Check if block device actually exists (glob may not match anything)
+        if [[ -b "$block_device" ]]; then
+            found=true
+            log "Found Block mode PVC device: $block_device"
+
+            # Extract PVC UID from device name: /dev/pvc-{uid} -> {uid}
+            local pvc_uid="${block_device#/dev/pvc-}"
+            local volume_name="pvc-$pvc_uid"
+
+            # Process block device as disk image
+            # process_disk_image already handles both files and block devices (see line 91: [[ ! -b "$disk_path" ]])
+            if process_disk_image "$block_device" "$volume_name"; then
+                ((success_count++))
+            else
+                ((fail_count++))
+                log "Warning: Failed to process Block device $block_device, continuing with remaining devices"
+            fi
+        fi
+    done
+
     if [[ "$found" == "false" ]]; then
-        log "No disk images found in $VOLUME_MOUNT_DIR"
-        log "Supported extensions: .qcow2, .raw, .img, .qcow, .vmdk, .vdi"
+        log "No disk images or Block devices found"
+        log "Filesystem mode PVCs: Searched in $VOLUME_MOUNT_DIR for .qcow2, .raw, .img, .qcow, .vmdk, .vdi"
+        log "Block mode PVCs: Searched for /dev/pvc-* devices"
     else
         log "Auto-mount completed: $success_count successful, $fail_count failed"
     fi
@@ -467,6 +501,119 @@ auto_mount_all() {
     # List mounted filesystems
     log "Currently mounted filesystems:"
     mount | grep "$FS_MOUNT_DIR" || true
+
+    # Create dual-path directory structure for SSH browsing
+    create_dual_path_structure
+}
+
+# create_dual_path_structure - Create /restores_by_name and /restores_by_date directory structure
+#
+# This function creates a dual-path symlink structure for browsing restored filesystems:
+#   1. /restores_by_name/<backup-name>/<pvc-uid> -> /mnt/filesystems/pvc-<pvc-uid>/
+#   2. /restores_by_date/<date>/<pvc-name> -> /restores_by_name/<backup-name>/<pvc-uid>
+#
+# Requires BACKUP_PVC_MAP environment variable with backup metadata in JSON format:
+#   {"backup-name": [{"name": "pvc-name", "path": "/dev/pvc-{uid}", "timestamp": "2025-10-23T18:40:00Z"}]}
+#
+# Returns:
+#   Exit code 0 on success
+create_dual_path_structure() {
+    local restores_by_name="/restores_by_name"
+    local restores_by_date="/restores_by_date"
+
+    # Check if BACKUP_PVC_MAP is available
+    if [[ -z "$BACKUP_PVC_MAP" ]]; then
+        log "BACKUP_PVC_MAP not set, skipping dual-path structure creation"
+        return 0
+    fi
+
+    log "Creating dual-path directory structure for SSH browsing"
+
+    # Create base directories
+    mkdir -p "$restores_by_name" "$restores_by_date"
+
+    # Parse BACKUP_PVC_MAP using Python
+    python3 <<'PYEOF' | while IFS='|' read -r backup_name pvc_name pvc_uid backup_date; do
+import json, os, sys
+from datetime import datetime
+
+try:
+    backup_map = json.loads(os.environ.get('BACKUP_PVC_MAP', '{}'))
+    for backup_name, pvcs in backup_map.items():
+        for pvc in pvcs:
+            # Extract PVC UID from path
+            pvc_path = pvc.get('path', '')
+            if '/dev/pvc-' in pvc_path:
+                pvc_uid = pvc_path.split('/dev/pvc-')[-1]
+            elif pvc_path.startswith('pvc-'):
+                pvc_uid = pvc_path[4:]
+            else:
+                # Fallback: use last component of path
+                pvc_uid = pvc_path.rstrip('/').split('/')[-1]
+                if pvc_uid.startswith('pvc-'):
+                    pvc_uid = pvc_uid[4:]
+
+            # Format backup timestamp as YYYY-MM-DD
+            backup_timestamp = pvc.get('timestamp', '')
+            if backup_timestamp:
+                try:
+                    dt = datetime.fromisoformat(backup_timestamp.replace('Z', '+00:00'))
+                    backup_date = dt.strftime('%Y-%m-%d')
+                except:
+                    backup_date = datetime.now().strftime('%Y-%m-%d')
+            else:
+                backup_date = datetime.now().strftime('%Y-%m-%d')
+
+            print(f"{backup_name}|{pvc.get('name', 'unknown')}|{pvc_uid}|{backup_date}")
+except Exception as e:
+    print(f"ERROR: Failed to parse BACKUP_PVC_MAP: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+
+        # Skip if parsing failed
+        if [[ -z "$backup_name" ]] || [[ -z "$pvc_uid" ]]; then
+            continue
+        fi
+
+        # Source mount is at /mnt/filesystems/{backup-name}/{pvc-name}/
+        local source_mount="$FS_MOUNT_DIR/$backup_name/$pvc_name"
+
+        # Check if source mount exists
+        if [[ ! -d "$source_mount" ]]; then
+            log "Warning: Source mount $source_mount does not exist, skipping"
+            continue
+        fi
+
+        # Create /restores_by_name/<backup-name>/<pvc-name> -> /mnt/filesystems/{backup-name}/{pvc-name}/
+        local backup_dir="$restores_by_name/$backup_name"
+        local name_symlink="$backup_dir/$pvc_name"
+
+        if [[ ! -d "$backup_dir" ]]; then
+            mkdir -p "$backup_dir"
+            log "Created directory: $backup_dir"
+        fi
+
+        if [[ ! -e "$name_symlink" ]]; then
+            ln -sf "$source_mount" "$name_symlink"
+            log "Created symlink: $name_symlink -> $source_mount"
+        fi
+
+        # Create /restores_by_date/<date>/<pvc-name> -> /restores_by_name/<backup-name>/<pvc-uid>
+        local date_dir="$restores_by_date/$backup_date"
+        local date_symlink="$date_dir/$pvc_name"
+
+        if [[ ! -d "$date_dir" ]]; then
+            mkdir -p "$date_dir"
+            log "Created directory: $date_dir"
+        fi
+
+        if [[ ! -e "$date_symlink" ]]; then
+            ln -sf "$name_symlink" "$date_symlink"
+            log "Created symlink: $date_symlink -> $name_symlink"
+        fi
+    done
+
+    log "Completed dual-path directory structure creation"
 }
 
 # main - Entry point for the script

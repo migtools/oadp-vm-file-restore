@@ -18,13 +18,14 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
@@ -40,8 +41,9 @@ type PVCMountInfo struct {
 	PVCUID            string
 	BackupName        string
 	BackupTimestamp   *metav1.Time
-	VeleroRestoreName string // Name of the Velero Restore CR that restored this PVC
-	RestoredPVCName   string // Actual name of the restored PVC (may differ from original)
+	VeleroRestoreName string                       // Name of the Velero Restore CR that restored this PVC
+	RestoredPVCName   string                       // Actual name of the restored PVC (may differ from original)
+	VolumeMode        *corev1.PersistentVolumeMode // VolumeMode of the PVC (Block or Filesystem), nil if not yet queried
 }
 
 // SSHAccessConfig contains configuration for SSH sidecar container
@@ -229,8 +231,9 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		config.SharedMountPath = "/mnt/restore"
 	}
 
-	// Build PVC volumes (always added to pod, even in internal mount mode)
-	pvcVolumes, pvcVolumeMounts := buildPVCVolumesAndMounts(config.PVCMounts)
+	// Build PVC volumes, mounts, and devices (always added to pod, even in internal mount mode)
+	// Returns volumeMounts for Filesystem PVCs and volumeDevices for Block mode PVCs
+	pvcVolumes, pvcVolumeMounts, pvcVolumeDevices := buildPVCVolumesAndMounts(config.PVCMounts)
 
 	// Collect all volumes: PVC volumes + sidecar volumes (SSH, FileBrowser) + utility volumes
 	allVolumes := make([]corev1.Volume, 0, len(pvcVolumes)+10)
@@ -248,15 +251,38 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		})
 	}
 
-	// Add EmptyDir for dual-path symlinks if enabled
-	if config.EnableDualPathAccess {
-		allVolumes = append(allVolumes, corev1.Volume{
-			Name: "restores-by-date",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{},
+	// Note: /restores_by_name and /restores_by_date are created by the script at runtime
+	// No need to create EmptyDir volumes - script creates these as regular directories
+
+	// Add /dev/fuse hostPath volume (required for guestmount FUSE filesystem)
+	allVolumes = append(allVolumes, corev1.Volume{
+		Name: "fuse-device",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: "/dev/fuse",
+				Type: ptr.To(corev1.HostPathCharDev),
 			},
-		})
-	}
+		},
+	})
+
+	// Add /dev/kvm hostPath volume (required for KVM hardware acceleration)
+	allVolumes = append(allVolumes, corev1.Volume{
+		Name: "kvm-device",
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: "/dev/kvm",
+				Type: ptr.To(corev1.HostPathCharDev),
+			},
+		},
+	})
+
+	// Add emptyDir for filesystem mount points (where guestmount will mount filesystems)
+	allVolumes = append(allVolumes, corev1.Volume{
+		Name: "filesystems",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	})
 
 	// Collect init containers and sidecar containers
 	var allInitContainers []corev1.Container
@@ -292,14 +318,8 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		allInitContainers = append(allInitContainers, fileBrowserInitContainers...)
 	}
 
-	// Add dual-path symlink init container if enabled
-	if config.EnableDualPathAccess {
-		symlinkInit := buildInitContainerForDualPathSymlinks(config.PVCMounts)
-		// Add PVC volume mounts to symlink init container
-		symlinkInit.VolumeMounts = append(symlinkInit.VolumeMounts, pvcVolumeMounts...)
-		// Prepend so it runs before sidecar init containers
-		allInitContainers = append([]corev1.Container{symlinkInit}, allInitContainers...)
-	}
+	// Dual-path symlink structure is now created by the file server detect-and-mount.sh script
+	// after mounting filesystems, eliminating the init container dependency issue
 
 	// Build or use default main container
 	var mainContainer corev1.Container
@@ -336,17 +356,27 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		}
 	} else {
 		// Kubernetes-managed mode: kubelet handles PVC mounting
-		// Inject PVC volume mounts into the main container
+		// Inject PVC volume mounts (Filesystem mode) and volume devices (Block mode) into the main container
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, pvcVolumeMounts...)
+		mainContainer.VolumeDevices = append(mainContainer.VolumeDevices, pvcVolumeDevices...)
 
-		// If dual-path is enabled, also mount the symlink directory
-		if config.EnableDualPathAccess {
-			mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-				ReadOnly:  true,
-			})
-		}
+		// Add /dev/fuse device mount (required for guestmount)
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "fuse-device",
+			MountPath: "/dev/fuse",
+		})
+
+		// Add /dev/kvm device mount (required for KVM acceleration)
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "kvm-device",
+			MountPath: "/dev/kvm",
+		})
+
+		// Add filesystems mount point (where guestmount will create filesystem mounts)
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "filesystems",
+			MountPath: "/mnt/filesystems",
+		})
 	}
 
 	// Combine main container with sidecars
@@ -366,26 +396,39 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
-			InitContainers: allInitContainers,
-			Containers:     containers,
-			Volumes:        allVolumes,
-			RestartPolicy:  corev1.RestartPolicyAlways,
+			// Use dedicated ServiceAccount for file server pods
+			// This ServiceAccount is created by the controller in ensureRestoreNamespace
+			// and is bound to the privileged SCC to allow hostPath volumes and privileged containers
+			ServiceAccountName: "vmfr-file-server",
+			InitContainers:     allInitContainers,
+			Containers:         containers,
+			Volumes:            allVolumes,
+			RestartPolicy:      corev1.RestartPolicyAlways,
+			// Pod-level security context
+			// Required for accessing VM disk images with qemu user/group permissions
+			SecurityContext: &corev1.PodSecurityContext{
+				// fsGroup: 107 (qemu group in OpenShift Virtualization)
+				// This ensures volumes are accessible by the qemu user/group
+				FSGroup: ptr.To(int64(107)),
+				// supplementalGroups: [107] - Grants qemu group membership to all containers
+				SupplementalGroups: []int64{107},
+				// SELinux: Use spc_t (Super Privileged Container) type
+				// This disables SELinux enforcement for volume access, similar to Velero's spcNoRelabeling option
+				// See: https://velero.io/docs/main/data-movement-backup-pvc-configuration/
+				SELinuxOptions: &corev1.SELinuxOptions{
+					Type: "spc_t",
+				},
+			},
 		},
 	}
 
-	// Add owner reference if VMFR UID is provided
-	if config.VMFRUID != "" {
-		pod.OwnerReferences = []metav1.OwnerReference{
-			{
-				APIVersion:         "oadp.openshift.io/v1alpha1",
-				Kind:               "VirtualMachineFileRestore",
-				Name:               config.VMFRName,
-				UID:                types.UID(config.VMFRUID),
-				Controller:         ptr.To(true),
-				BlockOwnerDeletion: ptr.To(true),
-			},
-		}
-	}
+	// NOTE: No owner references added to the Pod
+	// Kubernetes does not allow cross-namespace owner references (VMFR is in OADP namespace,
+	// Pod is in temp restore namespace). Instead, cleanup is handled by:
+	// 1. Temp namespace has owner reference to VMFR
+	// 2. When VMFR is deleted, namespace is deleted
+	// 3. Namespace deletion cascades to all resources including this Pod
+	// Labels (VMFROriginUUIDLabel) are used for tracking ownership instead
 
 	return pod, nil
 }
@@ -455,10 +498,19 @@ func buildFileServerDeployment(config FileServerPodConfig) (*appsv1.Deployment, 
 	return deployment, nil
 }
 
-// buildPVCVolumesAndMounts creates volumes and volume mounts for PVCs
-func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []corev1.VolumeMount) {
+// buildPVCVolumesAndMounts creates volumes, volume mounts, and volume devices for PVCs.
+// Handles both Block and Filesystem mode PVCs correctly:
+// - Block mode PVCs: VM disks stored as raw block devices, exposed via volumeDevices at /dev/pvc-{uid}
+// - Filesystem mode PVCs: Traditional file storage, mounted via volumeMounts at /restores_by_name/{backup}/{uid}
+//
+// Returns:
+// - volumes: Kubernetes Volume objects referencing the PVCs
+// - volumeMounts: Mount points for Filesystem mode PVCs
+// - volumeDevices: Device mappings for Block mode PVCs
+func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []corev1.VolumeMount, []corev1.VolumeDevice) {
 	volumes := make([]corev1.Volume, 0, len(pvcMounts))
 	volumeMounts := make([]corev1.VolumeMount, 0, len(pvcMounts))
+	volumeDevices := make([]corev1.VolumeDevice, 0, len(pvcMounts))
 
 	for _, pvcMount := range pvcMounts {
 		// Create unique volume name for this PVC
@@ -471,42 +523,48 @@ func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []core
 			pvcClaimName = pvcMount.PVCName
 		}
 
-		// Add volume referencing the restored PVC
+		// Add volume referencing the restored PVC (always added regardless of mode)
 		volumes = append(volumes, corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: pvcClaimName,
-					ReadOnly:  true, // Mount read-only for safety
+					ReadOnly:  false, // libguestfs needs write access for internal operations
 				},
 			},
 		})
 
-		// Mount path: /restores_by_name/<backup-name>/<pvc-uid>
-		mountPath := fmt.Sprintf("/restores_by_name/%s/%s", pvcMount.BackupName, pvcMount.PVCUID)
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      volumeName,
-			MountPath: mountPath,
-			ReadOnly:  true,
-		})
+		// Determine how to expose the PVC based on its volumeMode
+		// Default to Filesystem if volumeMode is nil (Kubernetes default)
+		isBlockMode := pvcMount.VolumeMode != nil && *pvcMount.VolumeMode == corev1.PersistentVolumeBlock
+
+		if isBlockMode {
+			// Block mode: Expose as raw block device at /dev/pvc-{uid}
+			// libguestfs/QEMU can directly access the block device containing the VM disk image
+			devicePath := fmt.Sprintf("/dev/pvc-%s", pvcMount.PVCUID)
+			volumeDevices = append(volumeDevices, corev1.VolumeDevice{
+				Name:       volumeName,
+				DevicePath: devicePath,
+			})
+		} else {
+			// Filesystem mode: Mount at /restores_by_name/<backup-name>/<pvc-uid>
+			// Traditional file access for filesystem-based storage
+			mountPath := fmt.Sprintf("/restores_by_name/%s/%s", pvcMount.BackupName, pvcMount.PVCUID)
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      volumeName,
+				MountPath: mountPath,
+				ReadOnly:  false, // libguestfs needs write access
+			})
+		}
 	}
 
-	return volumes, volumeMounts
+	return volumes, volumeMounts, volumeDevices
 }
 
 // buildDefaultMainContainer creates a default busybox HTTP server container
 func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualPath bool) corev1.Container {
 	volumeMounts := make([]corev1.VolumeMount, len(pvcVolumeMounts))
 	copy(volumeMounts, pvcVolumeMounts)
-
-	// Add dual-path mount if enabled
-	if enableDualPath {
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "restores-by-date",
-			MountPath: "/restores_by_date",
-			ReadOnly:  true,
-		})
-	}
 
 	return corev1.Container{
 		Name:  "file-server",
@@ -530,16 +588,99 @@ func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualP
 
 // buildVMFileServerMainContainer creates a VM file server container for mounting VM disk images
 // This container uses libguestfs/QEMU to mount VM disks and provide file-level access
-func buildVMFileServerMainContainer() corev1.Container {
+// Based on CONTROLLER_INTEGRATION.md from Issue #6/#7
+func buildVMFileServerMainContainer(pvcMounts []PVCMountInfo) corev1.Container {
+	// Build BACKUP_PVC_MAP JSON for the file server script
+	backupPVCMap := buildBackupPVCMapJSON(pvcMounts)
+
 	return corev1.Container{
 		Name:  "vm-file-server",
 		Image: constant.VMFileServerImage,
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			"echo 'VM file server starting...'; sleep infinity",
+		// Run detect-and-mount.sh to automatically mount all disk images
+		Command: []string{"/usr/local/bin/detect-and-mount.sh"},
+
+		// Environment variables
+		Env: []corev1.EnvVar{
+			{
+				Name:  "HOME",
+				Value: "/tmp", // Required for libguestfs cache
+			},
+			{
+				Name:  "BACKUP_PVC_MAP",
+				Value: backupPVCMap, // JSON mapping of backups to PVCs for dual-path structure
+			},
+		},
+
+		// Container-level security context
+		// CRITICAL: Privileged mode required for /dev/kvm access with SELinux
+		SecurityContext: &corev1.SecurityContext{
+			Privileged: ptr.To(true),       // Required for /dev/kvm and /dev/fuse access
+			RunAsUser:  ptr.To(int64(107)), // qemu user
+			RunAsGroup: ptr.To(int64(107)), // qemu group
+		},
+
+		// Resource limits
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("2Gi"),   // libguestfs can use significant memory
+				corev1.ResourceCPU:    resource.MustParse("1000m"), // KVM uses CPU during mount
+			},
 		},
 	}
+}
+
+// buildBackupPVCMapJSON builds a JSON string mapping backup names to PVC information
+// This is used by the file server script to create the dual-path directory structure
+//
+// Format: {"backup-name": [{"name": "pvc-name", "path": "/dev/pvc-{uid}", "timestamp": "2025-10-23T18:40:00Z"}]}
+//
+// Example output:
+//
+//	{
+//	  "test-vm-backup-20250115": [
+//	    {"name": "test-vm-disk-1", "path": "/dev/pvc-5685cd9a-56b4-4482-9236-17b7cc4b0dff", "timestamp": "2025-10-23T18:40:00Z"}
+//	  ]
+//	}
+func buildBackupPVCMapJSON(pvcMounts []PVCMountInfo) string {
+	// Group PVCs by backup name
+	backupMap := make(map[string][]map[string]string)
+
+	for _, pvcMount := range pvcMounts {
+		backupName := pvcMount.BackupName
+
+		// Build device path based on volumeMode
+		// Block mode: /dev/pvc-{uid}
+		// Filesystem mode: /restores_by_name/{backup}/{uid} (but we use the UID-based path for consistency)
+		devicePath := fmt.Sprintf("/dev/pvc-%s", pvcMount.PVCUID)
+
+		// Format timestamp as ISO8601
+		timestamp := ""
+		if pvcMount.BackupTimestamp != nil {
+			timestamp = pvcMount.BackupTimestamp.Format("2006-01-02T15:04:05Z")
+		}
+
+		// Create PVC entry
+		pvcEntry := map[string]string{
+			"name":      pvcMount.PVCName,
+			"path":      devicePath,
+			"timestamp": timestamp,
+		}
+
+		backupMap[backupName] = append(backupMap[backupName], pvcEntry)
+	}
+
+	// Marshal to JSON
+	jsonBytes, err := json.Marshal(backupMap)
+	if err != nil {
+		// If marshaling fails, return empty JSON object (script will skip dual-path creation)
+		return "{}"
+	}
+
+	return string(jsonBytes)
 }
 
 // buildPodLabels creates labels for the pod
@@ -584,54 +725,6 @@ func buildPodAnnotations(config FileServerPodConfig) map[string]string {
 	}
 
 	return annotations
-}
-
-// buildInitContainerForDualPathSymlinks creates an init container that sets up symlinks
-// to provide dual-path access to the same PVCs:
-// - /restores_by_name/<backup-name>/<pvc-uid> (actual mount point)
-// - /restores_by_date/<date>/<pvc-name> (symlink to above)
-func buildInitContainerForDualPathSymlinks(pvcMounts []PVCMountInfo) corev1.Container {
-	// Build shell commands to create symlink structure
-	commands := []string{"set -e"} // Exit on error
-
-	// Create base directory
-	commands = append(commands, "mkdir -p /restores_by_date")
-
-	for _, pvcMount := range pvcMounts {
-		// Format date as YYYY-MM-DD
-		backupDate := formatBackupDate(pvcMount.BackupTimestamp)
-
-		// Source: /restores_by_name/<backup-name>/<pvc-uid>
-		sourcePath := fmt.Sprintf("/restores_by_name/%s/%s", pvcMount.BackupName, pvcMount.PVCUID)
-
-		// Target: /restores_by_date/<date>/<pvc-name>
-		targetDir := fmt.Sprintf("/restores_by_date/%s", backupDate)
-		targetPath := fmt.Sprintf("%s/%s", targetDir, pvcMount.PVCName)
-
-		// Create date directory and symlink
-		commands = append(commands,
-			fmt.Sprintf("mkdir -p %s", targetDir),
-			fmt.Sprintf("ln -sf %s %s", sourcePath, targetPath),
-		)
-	}
-
-	commands = append(commands, "echo 'Dual-path symlinks created successfully'")
-
-	return corev1.Container{
-		Name:  "setup-dual-path-symlinks",
-		Image: "busybox:latest",
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			strings.Join(commands, "\n"),
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-			},
-		},
-	}
 }
 
 // buildFileServerService builds a Service spec for exposing file server pod ports
@@ -727,8 +820,8 @@ func extractPVCMountsFromVMFR(vmfr *oadpv1alpha1.VirtualMachineFileRestore) []PV
 		// Find the most recent successfully completed restore for this PVC
 		// Restores are already sorted by timestamp (newest first) in processDiscoveryResults
 		for _, restoreInfo := range pvcRestore.Restores {
-			// Only include completed restores
-			if restoreInfo.Phase == "Completed" && restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
+			// Include both Completed and Finalizing phases (PVCs are ready in both cases)
+			if (restoreInfo.Phase == "Completed" || restoreInfo.Phase == "Finalizing") && restoreInfo.State == string(oadptypes.BackupDiscoveryStateAvailable) {
 				pvcMounts = append(pvcMounts, PVCMountInfo{
 					PVCName:           pvcRestore.PVCName,
 					PVCNamespace:      pvcRestore.PVCNamespace,
@@ -889,13 +982,6 @@ func buildSSHSidecar(
 	} else {
 		// Kubernetes-managed mode: mount PVCs directly
 		container.VolumeMounts = append(container.VolumeMounts, pvcVolumeMounts...)
-		if enableDualPath {
-			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-				ReadOnly:  true,
-			})
-		}
 	}
 
 	// Add Secret volume and init container for SSH configuration
@@ -943,15 +1029,15 @@ echo "Configuring public key authentication..."
 cp /credentials/publicKey /config/ssh_keys/authorized_keys
 chmod 600 /config/ssh_keys/authorized_keys
 
-# Set proper ownership (SSH server runs as PUID/PGID 1000)
-chown -R 1000:1000 /config
+# Note: No chown needed - OpenShift's restricted-v2 SCC doesn't allow it,
+# and EmptyDir volumes are created with pod's fsGroup ownership automatically
 
 echo "SSH configuration completed successfully (public key auth only)"
 `
 
 	return corev1.Container{
 		Name:  "setup-ssh-credentials",
-		Image: "busybox:latest",
+		Image: "quay.io/quay/busybox:latest",
 		Command: []string{
 			"/bin/sh",
 			"-c",
@@ -966,6 +1052,48 @@ echo "SSH configuration completed successfully (public key auth only)"
 				Name:      "ssh-credentials",
 				MountPath: "/credentials",
 				ReadOnly:  true,
+			},
+		},
+	}
+}
+
+// buildSSHInitContainerInline creates an init container that configures SSH from inline publicKey.
+func buildSSHInitContainerInline(publicKey string) corev1.Container {
+	// Shell script to configure SSH user from inline publicKey
+	// The publicKey is embedded directly in the script
+	setupScript := fmt.Sprintf(`#!/bin/sh
+set -e
+
+echo "Setting up SSH configuration from inline publicKey..."
+
+# Create SSH keys directory
+mkdir -p /config/ssh_keys
+
+# Write the public key to authorized_keys
+cat > /config/ssh_keys/authorized_keys <<'EOF'
+%s
+EOF
+
+chmod 600 /config/ssh_keys/authorized_keys
+
+# Note: No chown needed - OpenShift's restricted-v2 SCC doesn't allow it,
+# and EmptyDir volumes are created with pod's fsGroup ownership automatically
+
+echo "SSH configuration completed successfully"
+`, publicKey)
+
+	return corev1.Container{
+		Name:  "setup-ssh-credentials",
+		Image: "quay.io/quay/busybox:latest",
+		Command: []string{
+			"/bin/sh",
+			"-c",
+			setupScript,
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "ssh-config",
+				MountPath: "/config",
 			},
 		},
 	}
@@ -1060,13 +1188,6 @@ func buildFileBrowserSidecar(
 	} else {
 		// Kubernetes-managed mode: mount PVCs directly
 		container.VolumeMounts = append(container.VolumeMounts, pvcVolumeMounts...)
-		if enableDualPath {
-			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-				Name:      "restores-by-date",
-				MountPath: "/restores_by_date",
-				ReadOnly:  true,
-			})
-		}
 	}
 
 	// Init container to configure FileBrowser database and create user

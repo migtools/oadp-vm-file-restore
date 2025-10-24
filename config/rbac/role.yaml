@@ -10,6 +10,7 @@ rules:
   - namespaces
   - pods
   - secrets
+  - serviceaccounts
   - services
   verbs:
   - create
@@ -69,10 +70,41 @@ rules:
   - patch
   - update
 - apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - velero.io
   resources:
   - backups
   verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - velero.io
+  resources:
+  - datadownloads
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - velero.io
+  resources:
+  - downloadrequests
+  verbs:
+  - create
+  - delete
   - get
   - list
   - watch

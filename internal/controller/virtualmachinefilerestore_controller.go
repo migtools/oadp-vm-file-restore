@@ -27,7 +27,9 @@ import (
 
 	"github.com/go-logr/logr"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	veleroapiv2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -86,11 +88,16 @@ func (e ErrUnsupportedBackup) Error() string {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=restores,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=velero.io,resources=backups,verbs=get;list;watch
+// +kubebuilder:rbac:groups=velero.io,resources=downloadrequests,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=velero.io,resources=datadownloads,verbs=get;list;watch;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -118,8 +125,8 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		// Deletion path - handle finalizer-based cleanup
 		logger.V(0).Info("Executing deletion path")
 		reconcileSteps = []virtualmachinefilerestoreReconcileStepFunction{
-			// r.handleResourceDeletion,
-			// TBD handle resource deletion
+			r.handleVeleroRestoreCleanup,
+			r.handleResourceCleanup,
 		}
 
 	case vmfr.Status.Phase == "":
@@ -833,6 +840,17 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 				return false, err
 			}
 			logger.V(1).Info("Successfully updated PVCRestores with Velero Restore phases")
+		}
+
+		// Fix DataDownload PVC name mismatch (if any DataDownloads exist)
+		// This automatically patches DataDownload resources with correct PVC names
+		fixedCount, err := r.fixDataDownloadPVCNames(ctx, logger, vmfr)
+		if err != nil {
+			logger.Error(err, "Failed to fix DataDownload PVC names")
+			// Don't fail the reconciliation - log and continue
+			// The DataDownload will eventually timeout and we can retry
+		} else if fixedCount > 0 {
+			logger.V(0).Info("Fixed DataDownload PVC name mismatches", "count", fixedCount)
 		}
 
 		// If any restores still in progress, requeue periodically to check status
@@ -1843,6 +1861,66 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		logger.V(0).Info("Created temporary restore namespace", "namespace", namespaceName)
 	}
 
+	// Create ServiceAccount for file server pods with privileged SCC access
+	serviceAccountName := "vmfr-file-server"
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      serviceAccountName,
+			Namespace: namespaceName,
+			Labels: map[string]string{
+				constant.VMFROriginUUIDLabel: string(vmfr.UID),
+				constant.ManagedByLabel:      constant.ManagedByLabelValue,
+			},
+		},
+	}
+
+	err = r.Create(ctx, serviceAccount)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			logger.V(1).Info("ServiceAccount already exists", "serviceAccount", serviceAccountName, "namespace", namespaceName)
+		} else {
+			return "", fmt.Errorf("failed to create ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
+		}
+	} else {
+		logger.V(0).Info("Created ServiceAccount for file server", "serviceAccount", serviceAccountName, "namespace", namespaceName)
+	}
+
+	// Bind ServiceAccount to privileged SCC via RoleBinding
+	// This grants the file server pod permission to use privileged mode, hostPath volumes, and spc_t SELinux type
+	sccRoleBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "vmfr-file-server-privileged",
+			Namespace: namespaceName,
+			Labels: map[string]string{
+				constant.VMFROriginUUIDLabel: string(vmfr.UID),
+				constant.ManagedByLabel:      constant.ManagedByLabelValue,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "system:openshift:scc:privileged",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      serviceAccountName,
+				Namespace: namespaceName,
+			},
+		},
+	}
+
+	err = r.Create(ctx, sccRoleBinding)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			logger.V(1).Info("SCC RoleBinding already exists", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
+		} else {
+			return "", fmt.Errorf("failed to create SCC RoleBinding in namespace '%s': %w", namespaceName, err)
+		}
+	} else {
+		logger.V(0).Info("Bound ServiceAccount to privileged SCC", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
+	}
+
 	// Update VMFR status with the created namespace
 	patch := client.MergeFrom(vmfr.DeepCopy())
 	vmfr.Status.CreatedNamespace = namespaceName
@@ -1992,6 +2070,36 @@ func (r *VirtualMachineFileRestoreReconciler) createVeleroRestores(
 				},
 			},
 		}
+
+		// IMPLEMENTED FIX: DataDownload PVC Name Mismatch with kubevirt-velero-plugin
+		// When using Velero Data Mover with kubevirt-velero-plugin, there's a mismatch between
+		// the PVC name in the DataDownload spec and the actual restored PVC name:
+		//
+		// Problem:
+		//   - kubevirt-velero-plugin modifies PVC names during restore (adds backup name prefix + suffix)
+		//   - Example: "test-vm-rootdisk" becomes "vm-backup-test-vm-rootdisk-abc123"
+		//   - But DataDownload is created with original PVC name in spec.targetVolume.pvc
+		//   - DataDownload controller can't find the PVC and gets stuck (no progress)
+		//
+		// Automatic Fix (implemented in fixDataDownloadPVCNames function):
+		//   - Called in the WaitingForRestores phase during monitorVeleroRestores (see line 843)
+		//   - Lists DataDownload objects created by our Velero Restores (using VMFR UID label)
+		//   - For each DataDownload with empty/New status (not started):
+		//     - Finds the corresponding Velero Restore from owner references
+		//     - Finds the actual restored PVC name by listing PVCs with velero.io/restore-name label
+		//     - Matches PVC by original name annotation (constant.VMFROriginalPVCNameAnnotation)
+		//     - Patches DataDownload spec.targetVolume.pvc with the actual PVC name
+		//   - Returns count of DataDownloads that were patched
+		//   - Errors are logged but don't fail reconciliation (will retry on next reconcile)
+		//
+		// Implementation Details:
+		//   - See fixDataDownloadPVCNames function (line 2715)
+		//   - Uses JSON patch to update spec.targetVolume.pvc field
+		//   - Handles cases where PVC hasn't been created yet (will retry)
+		//   - Skips DataDownloads that are already in progress
+		//
+		// Impact: Critical for Block mode PVCs with Data Mover (VM disk restores)
+		// This fix enables automatic Data Mover restores without manual intervention
 
 		// Create Velero Restore object with generateName
 		restore := &veleroapi.Restore{
@@ -2158,12 +2266,13 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 
 		// Categorize by phase
 		switch restorePhase {
-		case veleroapi.RestorePhaseCompleted:
+		case veleroapi.RestorePhaseCompleted, veleroapi.RestorePhaseFinalizing:
+			// Treat Finalizing as completed since PVCs are already restored and available for mounting
 			completed++
 		case veleroapi.RestorePhaseFailed, veleroapi.RestorePhasePartiallyFailed, veleroapi.RestorePhaseFailedValidation:
 			failed++
-		case veleroapi.RestorePhaseNew, veleroapi.RestorePhaseInProgress, veleroapi.RestorePhaseFinalizing, veleroapi.RestorePhaseFinalizingPartiallyFailed, "":
-			// Finalizing* phases are transitional states - wait for terminal state
+		case veleroapi.RestorePhaseNew, veleroapi.RestorePhaseInProgress, "":
+			// Still in progress
 			inProgress++
 		default:
 			logger.V(1).Info("Unknown Velero Restore phase, treating as in-progress",
@@ -2220,13 +2329,20 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 					}
 
 					// Always update phase if it changed (even if metadata was already set)
-					if restoreInfo.Phase != restorePhase {
+					// Normalize Finalizing to Completed since from VMFR perspective they're equivalent
+					normalizedPhase := restorePhase
+					if restorePhase == veleroapi.RestorePhaseFinalizing {
+						normalizedPhase = veleroapi.RestorePhaseCompleted
+					}
+
+					if restoreInfo.Phase != normalizedPhase {
 						logger.V(1).Info("Updating RestoreInfo phase",
 							"pvcUID", pvcRestore.PVCUID,
 							"restoreName", restoreName,
 							"oldPhase", restoreInfo.Phase,
-							"newPhase", restorePhase)
-						restoreInfo.Phase = restorePhase
+							"newPhase", normalizedPhase,
+							"veleroPhase", restorePhase)
+						restoreInfo.Phase = normalizedPhase
 						statusUpdated = true
 					}
 				}
@@ -2388,16 +2504,39 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		return fmt.Errorf("no PVC mounts found in status")
 	}
 
-	// Populate the actual restored PVC names (which may differ from original names)
+	// Populate the actual restored PVC names and volumeMode (which may differ from original names)
+	// We need to query volumeMode to determine whether to use volumeMounts (Filesystem)
+	// or volumeDevices (Block) when mounting PVCs in the pod spec
 	for i := range pvcMounts {
 		restoredName, err := r.findRestoredPVCName(ctx, restoreNamespace, pvcMounts[i].VeleroRestoreName, pvcMounts[i].PVCName)
 		if err != nil {
 			return fmt.Errorf("failed to find restored PVC name for %s: %w", pvcMounts[i].PVCName, err)
 		}
 		pvcMounts[i].RestoredPVCName = restoredName
-		logger.V(1).Info("Resolved PVC name for file server",
+
+		// Query PVC to get its volumeMode
+		pvc := &corev1.PersistentVolumeClaim{}
+		err = r.Get(ctx, types.NamespacedName{
+			Name:      restoredName,
+			Namespace: restoreNamespace,
+		}, pvc)
+		if err != nil {
+			return fmt.Errorf("failed to get PVC %s to query volumeMode: %w", restoredName, err)
+		}
+
+		// Store volumeMode (defaults to Filesystem if not specified)
+		if pvc.Spec.VolumeMode != nil {
+			pvcMounts[i].VolumeMode = pvc.Spec.VolumeMode
+		} else {
+			// Default to Filesystem if not specified (per K8s API defaults)
+			defaultMode := corev1.PersistentVolumeFilesystem
+			pvcMounts[i].VolumeMode = &defaultMode
+		}
+
+		logger.V(1).Info("Resolved PVC info for file server",
 			"originalName", pvcMounts[i].PVCName,
-			"restoredName", restoredName)
+			"restoredName", restoredName,
+			"volumeMode", *pvcMounts[i].VolumeMode)
 	}
 
 	logger.V(0).Info("Creating file server resources",
@@ -2410,134 +2549,160 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	var sshConfig *SSHAccessConfig
 	var fileBrowserConfig *FileBrowserAccessConfig
 
-	// Configure SSH access if enabled
-	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil {
-		sshSpec := vmfr.Spec.FileAccess.SSH
+	// TODO: Re-enable SSH/FileBrowser sidecars after Increment 1 is complete
+	// For now, commenting out to focus on core file server functionality
+	/*
+		// Configure SSH access if enabled
+		if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil {
+			sshSpec := vmfr.Spec.FileAccess.SSH
 
-		// Determine username (default: constant.DefaultSSHUsername = "oadp")
-		username := sshSpec.Username
-		if username == "" {
-			username = constant.DefaultSSHUsername
-		}
-
-		// Use default SSH port
-		port := int32(constant.DefaultSSHPort)
-
-		// Determine which secret to use based on how credentials were provided
-		// (ensureCredentials() already validated/copied/generated as needed)
-		if sshSpec.CredentialsSecretRef != nil {
-			// Scenario 1: User provided CredentialsSecretRef
-			// Secret may be in restore namespace (original) or copied
-			secretName := sshSpec.CredentialsSecretRef.Name
-			secretNamespace := sshSpec.CredentialsSecretRef.Namespace
-			if secretNamespace == "" {
-				secretNamespace = r.OADPNamespace
+			// Determine username (default: constant.DefaultSSHUsername = "oadp")
+			username := sshSpec.Username
+			if username == "" {
+				username = constant.DefaultSSHUsername
 			}
 
-			// Determine actual secret name in restore namespace
-			var actualSecretName string
-			var err error
-			if secretNamespace == restoreNamespace {
-				// Secret was already in restore namespace, use original name
-				actualSecretName = secretName
+			// Use default SSH port
+			port := int32(constant.DefaultSSHPort)
+
+			// Handle three credential scenarios:
+			// 1. Secret reference provided
+			// 2. Inline publicKey provided
+			// 3. Neither (generate credentials)
+			if sshSpec.CredentialsSecretRef != nil {
+				// Scenario 1: Use existing Secret
+				secretName := sshSpec.CredentialsSecretRef.Name
+				secretNamespace := sshSpec.CredentialsSecretRef.Namespace
+				if secretNamespace == "" {
+					secretNamespace = vmfr.Namespace
+				}
+
+				// Validate that secret exists
+				secret := &corev1.Secret{}
+				if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret); err != nil {
+					return fmt.Errorf("failed to get SSH credentials secret %s/%s: %w", secretNamespace, secretName, err)
+				}
+
+				logger.V(0).Info("Using existing SSH credentials secret", "secretName", secretName, "secretNamespace", secretNamespace)
+
+				sshConfig = &SSHAccessConfig{
+					Username:                   username,
+					PublicKey:                  "", // Will be read from secret
+					CredentialsSecretName:      secretName,
+					CredentialsSecretNamespace: secretNamespace,
+					Port:                       port,
+				}
+			} else if sshSpec.PublicKey != "" {
+				// Scenario 2: Inline publicKey
+				logger.V(0).Info("Using inline SSH public key", "username", username)
+
+				sshConfig = &SSHAccessConfig{
+					Username:  username,
+					PublicKey: sshSpec.PublicKey,
+					Port:      port,
+				}
 			} else {
-				// Secret was copied - look it up by labels
-				actualSecretName, err = r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeSSH, true)
+				// Scenario 3: Generate SSH keypair and create secret
+				logger.V(0).Info("Generating SSH keypair (no publicKey or secret provided)", "username", username)
+
+				keyPair, err := function.GenerateSSHKeyPair(logger)
 				if err != nil {
-					return fmt.Errorf("failed to find copied SSH secret: %w", err)
+					return fmt.Errorf("failed to generate SSH keypair: %w", err)
+				}
+
+				// Create secret with generated credentials in restore namespace
+				secretName := fmt.Sprintf("%s-ssh-creds", vmfr.Name)
+				secret := function.CreateSSHCredentialsSecret(
+					secretName,
+					restoreNamespace,
+					username,
+					keyPair,
+					vmfr.Name,
+					vmfr.Namespace,
+					vmfr.UID,
+					logger,
+				)
+
+				if err := r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+					return fmt.Errorf("failed to create SSH credentials secret: %w", err)
+				}
+
+				logger.V(0).Info("Created SSH credentials secret", "secretName", secretName, "namespace", restoreNamespace)
+
+				sshConfig = &SSHAccessConfig{
+					Username:                   username,
+					PublicKey:                  "", // Will be read from secret
+					CredentialsSecretName:      secretName,
+					CredentialsSecretNamespace: restoreNamespace,
+					Port:                       port,
 				}
 			}
-
-			logger.V(1).Info("Using prepared SSH secret",
-				"secretName", actualSecretName,
-				"namespace", restoreNamespace)
-
-			sshConfig = &SSHAccessConfig{
-				Username:                   username,
-				CredentialsSecretName:      actualSecretName,
-				CredentialsSecretNamespace: restoreNamespace,
-				Port:                       port,
-			}
-		} else {
-			// Scenario 2 & 3: Inline publicKey or generated credentials - look up by labels
-			// Both scenarios now create secrets in ensureCredentials()
-			actualSecretName, err := r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeSSH, false)
-			if err != nil {
-				return fmt.Errorf("failed to find SSH secret: %w", err)
-			}
-
-			logger.V(1).Info("Using SSH secret",
-				"secretName", actualSecretName,
-				"namespace", restoreNamespace)
-
-			sshConfig = &SSHAccessConfig{
-				Username:                   username,
-				CredentialsSecretName:      actualSecretName,
-				CredentialsSecretNamespace: restoreNamespace,
-				Port:                       port,
-			}
 		}
-	}
 
-	// Configure FileBrowser access if enabled
-	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.FileBrowser != nil {
-		fbSpec := vmfr.Spec.FileAccess.FileBrowser
+		// Configure FileBrowser access if enabled
+		if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.FileBrowser != nil {
+			fbSpec := vmfr.Spec.FileAccess.FileBrowser
 
-		// Use default FileBrowser port
-		port := int32(constant.DefaultFileBrowserPort)
+			// Use default FileBrowser port
+			port := int32(constant.DefaultFileBrowserPort)
 
-		// Determine which secret to use
-		// (ensureCredentials() already validated/copied/generated as needed)
-		if fbSpec.CredentialsSecretRef != nil {
-			// Scenario 1: User provided CredentialsSecretRef
-			// Secret may be in restore namespace (original) or copied
-			secretName := fbSpec.CredentialsSecretRef.Name
-			secretNamespace := fbSpec.CredentialsSecretRef.Namespace
-			if secretNamespace == "" {
-				secretNamespace = r.OADPNamespace
-			}
+			// Handle credentials: either from secret or generated
+			if fbSpec.CredentialsSecretRef != nil {
+				// Use existing Secret
+				secretName := fbSpec.CredentialsSecretRef.Name
+				secretNamespace := fbSpec.CredentialsSecretRef.Namespace
+				if secretNamespace == "" {
+					secretNamespace = vmfr.Namespace
+				}
 
-			// Determine actual secret name in restore namespace
-			var actualSecretName string
-			var err error
-			if secretNamespace == restoreNamespace {
-				// Secret was already in restore namespace, use original name
-				actualSecretName = secretName
+				// Validate that secret exists
+				secret := &corev1.Secret{}
+				if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: secretNamespace}, secret); err != nil {
+					return fmt.Errorf("failed to get FileBrowser credentials secret %s/%s: %w", secretNamespace, secretName, err)
+				}
+
+				logger.V(0).Info("Using existing FileBrowser credentials secret", "secretName", secretName, "secretNamespace", secretNamespace)
+
+				fileBrowserConfig = &FileBrowserAccessConfig{
+					CredentialsSecretName:      secretName,
+					CredentialsSecretNamespace: secretNamespace,
+					Port:                       port,
+				}
 			} else {
-				// Secret was copied - look it up by labels
-				actualSecretName, err = r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeFileBrowser, true)
+				// Generate FileBrowser credentials and create secret
+				logger.V(0).Info("Generating FileBrowser credentials (no secret provided)")
+
+				credentials, err := function.GenerateFileBrowserCredentials("", logger) // Use default username
 				if err != nil {
-					return fmt.Errorf("failed to find copied FileBrowser secret: %w", err)
+					return fmt.Errorf("failed to generate FileBrowser credentials: %w", err)
+				}
+
+				// Create secret with generated credentials in restore namespace
+				secretName := fmt.Sprintf("%s-filebrowser-creds", vmfr.Name)
+				secret := function.CreateFileBrowserCredentialsSecret(
+					secretName,
+					restoreNamespace,
+					credentials,
+					vmfr.Name,
+					vmfr.Namespace,
+					vmfr.UID,
+					logger,
+				)
+
+				if err := r.Create(ctx, secret); err != nil && !apierrors.IsAlreadyExists(err) {
+					return fmt.Errorf("failed to create FileBrowser credentials secret: %w", err)
+				}
+
+				logger.V(0).Info("Created FileBrowser credentials secret", "secretName", secretName, "namespace", restoreNamespace, "username", credentials.Username)
+
+				fileBrowserConfig = &FileBrowserAccessConfig{
+					CredentialsSecretName:      secretName,
+					CredentialsSecretNamespace: restoreNamespace,
+					Port:                       port,
 				}
 			}
-
-			logger.V(1).Info("Using prepared FileBrowser secret",
-				"secretName", actualSecretName,
-				"namespace", restoreNamespace)
-
-			fileBrowserConfig = &FileBrowserAccessConfig{
-				CredentialsSecretName:      actualSecretName,
-				CredentialsSecretNamespace: restoreNamespace,
-				Port:                       port,
-			}
-		} else {
-			// Scenario 2: Generated credentials - look up by labels
-			actualSecretName, err := r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeFileBrowser, false)
-			if err != nil {
-				return fmt.Errorf("failed to find generated FileBrowser secret: %w", err)
-			}
-
-			logger.V(1).Info("Using generated FileBrowser secret",
-				"secretName", actualSecretName,
-				"namespace", restoreNamespace)
-
-			fileBrowserConfig = &FileBrowserAccessConfig{
-				CredentialsSecretName:      actualSecretName,
-				CredentialsSecretNamespace: restoreNamespace,
-				Port:                       port,
-			}
 		}
-	}
+	*/
 
 	// Build pod configuration with parsed access methods
 	podConfig := FileServerPodConfig{
@@ -2547,33 +2712,37 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		VMFRNamespace:        vmfr.Namespace,
 		VMFRUID:              string(vmfr.UID),
 		PVCMounts:            pvcMounts,
-		MainContainer:        ptr.To(buildVMFileServerMainContainer()), // Use VM file server for disk mounting
-		SSHAccess:            sshConfig,                                // Configured SSH access (or nil)
-		FileBrowserAccess:    fileBrowserConfig,                        // Configured FileBrowser access (or nil)
-		EnableDualPathAccess: true,                                     // Enable dual-path symlinks
-		UseInternalMounts:    false,                                    // Use Kubernetes-managed PVC mounts
+		MainContainer:        ptr.To(buildVMFileServerMainContainer(pvcMounts)), // Use VM file server for disk mounting
+		SSHAccess:            sshConfig,                                         // Configured SSH access (or nil)
+		FileBrowserAccess:    fileBrowserConfig,                                 // Configured FileBrowser access (or nil)
+		EnableDualPathAccess: true,                                              // Enable dual-path symlinks
+		UseInternalMounts:    false,                                             // Use Kubernetes-managed PVC mounts
 	}
 
 	logger.V(0).Info("File server configuration prepared",
 		"sshEnabled", sshConfig != nil,
 		"fileBrowserEnabled", fileBrowserConfig != nil)
 
-	// Build deployment spec (uses VM file server container)
-	deployment, err := buildFileServerDeployment(podConfig)
+	// Build pod spec (uses VM file server container)
+	// Note: Using Pod instead of Deployment because:
+	// 1. ReadWriteOnce PVCs can only be mounted by one pod
+	// 2. No cross-namespace owner references allowed (VMFR in OADP ns, Pod in temp ns)
+	// 3. Cleanup handled by namespace deletion (namespace has owner ref to VMFR)
+	pod, err := buildFileServerPodSpec(podConfig)
 	if err != nil {
-		return fmt.Errorf("failed to build deployment spec: %w", err)
+		return fmt.Errorf("failed to build pod spec: %w", err)
 	}
 
-	// Create the deployment
-	err = r.Create(ctx, deployment)
+	// Create the pod
+	err = r.Create(ctx, pod)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			logger.V(1).Info("File server deployment already exists", "deploymentName", deployment.Name)
+			logger.V(1).Info("File server pod already exists", "podName", pod.Name)
 		} else {
-			return fmt.Errorf("failed to create file server deployment: %w", err)
+			return fmt.Errorf("failed to create file server pod: %w", err)
 		}
 	} else {
-		logger.V(0).Info("Created file server deployment", "deploymentName", deployment.Name, "namespace", deployment.Namespace)
+		logger.V(0).Info("Created file server pod", "podName", pod.Name, "namespace", pod.Namespace)
 	}
 
 	// Build service configuration
@@ -2612,7 +2781,7 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	}
 
 	logger.V(0).Info("File server resources created successfully",
-		"deploymentName", deployment.Name,
+		"podName", pod.Name,
 		"serviceName", service.Name,
 		"namespace", restoreNamespace)
 
@@ -3040,5 +3209,464 @@ func (r *VirtualMachineFileRestoreReconciler) ensureCredentials(
 	}
 
 	logger.V(0).Info("All credentials ready for file server creation")
+	return nil
+}
+
+// fixDataDownloadPVCNames fixes the DataDownload PVC name mismatch issue caused by kubevirt-velero-plugin.
+// When using Velero Data Mover with kubevirt-velero-plugin, there's a mismatch between the PVC name
+// in the DataDownload spec and the actual restored PVC name:
+// - kubevirt-velero-plugin modifies PVC names during restore (adds backup name prefix + suffix)
+// - But DataDownload is created with the original PVC name in spec.targetVolume.pvc
+// - DataDownload controller can't find the PVC and gets stuck
+//
+// This function:
+// 1. Lists DataDownload resources created by our Velero Restores (using VMFR UID label)
+// 2. For each DataDownload with empty/pending status (not started):
+//   - Finds the corresponding Velero Restore from annotations
+//   - Finds the actual restored PVC name by listing PVCs with velero.io/restore-name label
+//   - Matches PVC by original name annotation (constant.VMFROriginalPVCNameAnnotation)
+//   - Patches DataDownload spec.targetVolume.pvc with the actual PVC name
+//
+// Returns the count of DataDownloads that were patched.
+func (r *VirtualMachineFileRestoreReconciler) fixDataDownloadPVCNames(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (int, error) {
+
+	// Get restore namespace where PVCs were created
+	restoreNamespace := vmfr.Status.CreatedNamespace
+	if restoreNamespace == "" {
+		logger.V(1).Info("Restore namespace not yet created, skipping DataDownload fix")
+		return 0, nil
+	}
+
+	// IMPORTANT: Velero creates DataDownload resources WITHOUT our custom VMFR UID label
+	// We can't list DataDownloads directly by VMFR UID. Instead, we need to:
+	// 1. First list Velero Restores created by this VMFR (they DO have our VMFR UID label)
+	// 2. Then find DataDownloads associated with those Velero Restores (via velero.io/restore-name label)
+
+	// Step 1: List all Velero Restores owned by this VMFR
+	restoreList := &veleroapi.RestoreList{}
+	restoreListOpts := []client.ListOption{
+		client.InNamespace(r.OADPNamespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		},
+	}
+
+	if err := r.List(ctx, restoreList, restoreListOpts...); err != nil {
+		logger.Error(err, "Failed to list Velero Restores for DataDownload lookup")
+		return 0, fmt.Errorf("failed to list Velero Restores: %w", err)
+	}
+
+	if len(restoreList.Items) == 0 {
+		logger.V(1).Info("No Velero Restores found for this VMFR, no DataDownloads to fix")
+		return 0, nil
+	}
+
+	logger.V(1).Info("Found Velero Restores for VMFR", "count", len(restoreList.Items))
+
+	// Step 2: For each Velero Restore, find associated DataDownloads
+	var dataDownloads []veleroapiv2alpha1.DataDownload
+	for _, restore := range restoreList.Items {
+		// List DataDownloads for this specific Velero Restore using velero.io/restore-name label
+		ddList := &veleroapiv2alpha1.DataDownloadList{}
+		ddListOpts := []client.ListOption{
+			client.InNamespace(r.OADPNamespace),
+			client.MatchingLabels{
+				"velero.io/restore-name": restore.Name,
+			},
+		}
+
+		if err := r.List(ctx, ddList, ddListOpts...); err != nil {
+			logger.Error(err, "Failed to list DataDownloads for Velero Restore", "restoreName", restore.Name)
+			continue // Continue with other restores even if one fails
+		}
+
+		dataDownloads = append(dataDownloads, ddList.Items...)
+	}
+
+	if len(dataDownloads) == 0 {
+		logger.V(1).Info("No DataDownload resources found for this VMFR's Velero Restores")
+		return 0, nil
+	}
+
+	logger.V(0).Info("Found DataDownload resources", "count", len(dataDownloads))
+
+	fixedCount := 0
+	for i := range dataDownloads {
+		dataDownload := &dataDownloads[i]
+
+		// Only process DataDownloads that haven't started yet
+		// Status.Phase is empty or "New" when DataDownload hasn't started
+		if dataDownload.Status.Phase != "" && dataDownload.Status.Phase != "New" {
+			logger.V(1).Info("DataDownload already in progress, skipping",
+				"name", dataDownload.Name,
+				"phase", dataDownload.Status.Phase)
+			continue
+		}
+
+		// Get the Velero Restore name from DataDownload owner references or labels
+		// DataDownload is owned by the Velero Restore that created it
+		veleroRestoreName := ""
+		for _, ownerRef := range dataDownload.OwnerReferences {
+			if ownerRef.Kind == "Restore" && ownerRef.APIVersion == "velero.io/v1" {
+				veleroRestoreName = ownerRef.Name
+				break
+			}
+		}
+
+		if veleroRestoreName == "" {
+			logger.V(1).Info("DataDownload has no Velero Restore owner reference, skipping",
+				"name", dataDownload.Name)
+			continue
+		}
+
+		// Get the original PVC name from DataDownload spec
+		originalPVCName := dataDownload.Spec.TargetVolume.PVC
+		if originalPVCName == "" {
+			logger.V(1).Info("DataDownload has no target PVC name, skipping",
+				"name", dataDownload.Name)
+			continue
+		}
+
+		logger.V(1).Info("Processing DataDownload",
+			"name", dataDownload.Name,
+			"veleroRestore", veleroRestoreName,
+			"originalPVCName", originalPVCName)
+
+		// Find the actual restored PVC name
+		actualPVCName, err := r.findRestoredPVCName(ctx, restoreNamespace, veleroRestoreName, originalPVCName)
+		if err != nil {
+			logger.V(1).Info("PVC not yet created for DataDownload, will retry later",
+				"dataDownload", dataDownload.Name,
+				"originalPVCName", originalPVCName,
+				"veleroRestore", veleroRestoreName,
+				"error", err.Error())
+			// Don't treat this as a hard error - PVC might not be created yet
+			continue
+		}
+
+		// Check if PVC name needs updating
+		if actualPVCName == originalPVCName {
+			logger.V(1).Info("DataDownload PVC name already correct, no patch needed",
+				"name", dataDownload.Name,
+				"pvcName", actualPVCName)
+			continue
+		}
+
+		logger.V(0).Info("Patching DataDownload with correct PVC name",
+			"dataDownload", dataDownload.Name,
+			"originalPVCName", originalPVCName,
+			"actualPVCName", actualPVCName)
+
+		// Patch the DataDownload with the actual PVC name
+		// Use JSON patch to update spec.targetVolume.pvc field
+		patch := client.RawPatch(
+			types.JSONPatchType,
+			[]byte(fmt.Sprintf(`[{"op": "replace", "path": "/spec/targetVolume/pvc", "value": "%s"}]`, actualPVCName)),
+		)
+
+		if err := r.Patch(ctx, dataDownload, patch); err != nil {
+			logger.Error(err, "Failed to patch DataDownload",
+				"name", dataDownload.Name,
+				"originalPVCName", originalPVCName,
+				"actualPVCName", actualPVCName)
+			return fixedCount, fmt.Errorf("failed to patch DataDownload %s: %w", dataDownload.Name, err)
+		}
+
+		fixedCount++
+		logger.V(0).Info("Successfully patched DataDownload",
+			"name", dataDownload.Name,
+			"originalPVCName", originalPVCName,
+			"actualPVCName", actualPVCName)
+	}
+
+	if fixedCount > 0 {
+		logger.V(0).Info("DataDownload PVC name fix completed",
+			"totalDataDownloads", len(dataDownloads),
+			"fixedCount", fixedCount)
+	}
+
+	return fixedCount, nil
+}
+
+// handleVeleroRestoreCleanup deletes Velero Restore objects created by this VMFR.
+// This finalizer runs first to ensure Velero Restores are cleaned up before
+// other resources that they may reference.
+func (r *VirtualMachineFileRestoreReconciler) handleVeleroRestoreCleanup(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (bool, error) {
+	if !controllerutil.ContainsFinalizer(vmfr, constant.VeleroRestoreCleanupFinalizer) {
+		logger.V(1).Info("VeleroRestoreCleanupFinalizer already removed, skipping")
+		return false, nil
+	}
+
+	logger.V(0).Info("Cleaning up Velero Restore objects")
+
+	// Find all Velero Restore objects created by this VMFR using label selector
+	restoreList := &veleroapi.RestoreList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(r.OADPNamespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		},
+	}
+
+	if err := r.List(ctx, restoreList, listOpts...); err != nil {
+		logger.Error(err, "Failed to list Velero Restore objects for cleanup")
+		return false, fmt.Errorf("failed to list Velero Restore objects: %w", err)
+	}
+
+	logger.V(0).Info("Found Velero Restore objects to delete", "count", len(restoreList.Items))
+
+	deletedCount := 0
+	for i := range restoreList.Items {
+		restore := &restoreList.Items[i]
+		logger.V(1).Info("Deleting Velero Restore", "name", restore.Name, "namespace", restore.Namespace)
+
+		if err := r.Delete(ctx, restore); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Velero Restore already deleted", "name", restore.Name)
+				continue
+			}
+			logger.Error(err, "Failed to delete Velero Restore", "name", restore.Name)
+			return false, fmt.Errorf("failed to delete Velero Restore %s: %w", restore.Name, err)
+		}
+		deletedCount++
+	}
+
+	logger.V(0).Info("Deleted Velero Restore objects", "count", deletedCount)
+
+	// Remove this finalizer to proceed to next cleanup step
+	patch := client.MergeFrom(vmfr.DeepCopy())
+	controllerutil.RemoveFinalizer(vmfr, constant.VeleroRestoreCleanupFinalizer)
+	if err := r.Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to remove VeleroRestoreCleanupFinalizer")
+		return false, fmt.Errorf("failed to remove VeleroRestoreCleanupFinalizer: %w", err)
+	}
+
+	logger.V(0).Info("Removed VeleroRestoreCleanupFinalizer")
+	return true, nil
+}
+
+// handleResourceCleanup cleans up namespace, PVCs, and secrets based on namespace ownership.
+// For temporary namespaces created by the controller, the entire namespace is deleted
+// (which cascades to all contained resources). For user-provided namespaces, only
+// resources created by this controller are individually deleted.
+func (r *VirtualMachineFileRestoreReconciler) handleResourceCleanup(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+) (bool, error) {
+	if !controllerutil.ContainsFinalizer(vmfr, constant.VMFileRestoreFinalizer) {
+		logger.V(1).Info("VMFileRestoreFinalizer already removed, skipping")
+		return false, nil
+	}
+
+	logger.V(0).Info("Cleaning up VMFR resources")
+
+	restoreNamespace := vmfr.Status.CreatedNamespace
+	if restoreNamespace == "" {
+		logger.V(0).Info("No restore namespace found in status, skipping resource cleanup")
+		patch := client.MergeFrom(vmfr.DeepCopy())
+		controllerutil.RemoveFinalizer(vmfr, constant.VMFileRestoreFinalizer)
+		if err := r.Patch(ctx, vmfr, patch); err != nil {
+			logger.Error(err, "Failed to remove VMFileRestoreFinalizer")
+			return false, fmt.Errorf("failed to remove VMFileRestoreFinalizer: %w", err)
+		}
+		logger.V(0).Info("Removed VMFileRestoreFinalizer (no namespace to clean)")
+		return false, nil
+	}
+
+	// Check if namespace exists and determine if it's controller-managed
+	namespace := &corev1.Namespace{}
+	err := r.Get(ctx, types.NamespacedName{Name: restoreNamespace}, namespace)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.V(0).Info("Restore namespace already deleted", "namespace", restoreNamespace)
+			patch := client.MergeFrom(vmfr.DeepCopy())
+			controllerutil.RemoveFinalizer(vmfr, constant.VMFileRestoreFinalizer)
+			if err := r.Patch(ctx, vmfr, patch); err != nil {
+				logger.Error(err, "Failed to remove VMFileRestoreFinalizer")
+				return false, fmt.Errorf("failed to remove VMFileRestoreFinalizer: %w", err)
+			}
+			logger.V(0).Info("Removed VMFileRestoreFinalizer (namespace already deleted)")
+			return false, nil
+		}
+		logger.Error(err, "Failed to get restore namespace", "namespace", restoreNamespace)
+		return false, fmt.Errorf("failed to get restore namespace: %w", err)
+	}
+
+	// Determine cleanup strategy based on namespace ownership
+	isTempNamespace := namespace.Labels != nil &&
+		namespace.Labels[constant.VMFRTempNamespaceLabel] == constant.TrueString
+
+	if isTempNamespace {
+		// Delete the entire temporary namespace - Kubernetes will cascade to all resources
+		logger.V(0).Info("Deleting temporary namespace created by controller",
+			"namespace", restoreNamespace)
+
+		if err := r.Delete(ctx, namespace); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Temporary namespace already deleted", "namespace", restoreNamespace)
+			} else {
+				logger.Error(err, "Failed to delete temporary namespace", "namespace", restoreNamespace)
+				return false, fmt.Errorf("failed to delete temporary namespace: %w", err)
+			}
+		} else {
+			logger.V(0).Info("Temporary namespace deletion initiated", "namespace", restoreNamespace)
+		}
+	} else {
+		// User-provided namespace - selectively delete only controller-created resources
+		logger.V(0).Info("Cleaning up controller resources in user-provided namespace",
+			"namespace", restoreNamespace)
+
+		// Delete PVCs restored by this VMFR's Velero Restore objects
+		if err := r.deleteRestoredPVCs(ctx, logger, vmfr, restoreNamespace); err != nil {
+			return false, err
+		}
+
+		// Delete secrets created or copied by this controller
+		if err := r.deleteControllerSecrets(ctx, logger, vmfr, restoreNamespace); err != nil {
+			return false, err
+		}
+
+		logger.V(0).Info("Completed cleanup of controller resources",
+			"namespace", restoreNamespace)
+	}
+
+	// Remove the main finalizer - VMFR can now be deleted
+	patch := client.MergeFrom(vmfr.DeepCopy())
+	controllerutil.RemoveFinalizer(vmfr, constant.VMFileRestoreFinalizer)
+	if err := r.Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to remove VMFileRestoreFinalizer")
+		return false, fmt.Errorf("failed to remove VMFileRestoreFinalizer: %w", err)
+	}
+
+	logger.V(0).Info("Removed VMFileRestoreFinalizer, VMFR cleanup complete")
+	return false, nil
+}
+
+// deleteRestoredPVCs removes PVCs that were created by this VMFR's Velero Restore operations.
+// PVCs are identified by the Velero restore label that matches restore names from VMFR status.
+func (r *VirtualMachineFileRestoreReconciler) deleteRestoredPVCs(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	namespace string,
+) error {
+	logger.V(0).Info("Deleting restored PVCs", "namespace", namespace)
+
+	// Extract unique Velero Restore names from VMFR status
+	restoreNames := make(map[string]bool)
+	for _, pvcRestore := range vmfr.Status.PVCRestores {
+		for _, restoreInfo := range pvcRestore.Restores {
+			if restoreInfo.VeleroRestoreName != "" {
+				restoreNames[restoreInfo.VeleroRestoreName] = true
+			}
+		}
+	}
+
+	if len(restoreNames) == 0 {
+		logger.V(1).Info("No Velero Restore names found in status, skipping PVC deletion")
+		return nil
+	}
+
+	logger.V(1).Info("Found Velero Restore names from status", "count", len(restoreNames))
+
+	// Delete PVCs for each Velero Restore using the restore label
+	deletedCount := 0
+	for restoreName := range restoreNames {
+		pvcList := &corev1.PersistentVolumeClaimList{}
+		listOpts := []client.ListOption{
+			client.InNamespace(namespace),
+			client.MatchingLabels{
+				"velero.io/restore-name": restoreName,
+			},
+		}
+
+		if err := r.List(ctx, pvcList, listOpts...); err != nil {
+			logger.Error(err, "Failed to list PVCs for Velero Restore", "restoreName", restoreName)
+			return fmt.Errorf("failed to list PVCs for restore %s: %w", restoreName, err)
+		}
+
+		logger.V(1).Info("Found PVCs for Velero Restore",
+			"restoreName", restoreName,
+			"pvcCount", len(pvcList.Items))
+
+		for i := range pvcList.Items {
+			pvc := &pvcList.Items[i]
+			logger.V(1).Info("Deleting PVC",
+				"pvcName", pvc.Name,
+				"namespace", pvc.Namespace,
+				"restoreName", restoreName)
+
+			if err := r.Delete(ctx, pvc); err != nil {
+				if apierrors.IsNotFound(err) {
+					logger.V(1).Info("PVC already deleted", "pvcName", pvc.Name)
+					continue
+				}
+				logger.Error(err, "Failed to delete PVC", "pvcName", pvc.Name)
+				return fmt.Errorf("failed to delete PVC %s: %w", pvc.Name, err)
+			}
+			deletedCount++
+		}
+	}
+
+	logger.V(0).Info("Deleted restored PVCs", "count", deletedCount, "namespace", namespace)
+	return nil
+}
+
+// deleteControllerSecrets removes secrets created or copied by this controller.
+// Secrets are identified by the VMFROriginUUIDLabel matching this VMFR's UID.
+// This includes both copied secrets (from other namespaces) and generated credentials.
+func (r *VirtualMachineFileRestoreReconciler) deleteControllerSecrets(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	namespace string,
+) error {
+	logger.V(0).Info("Deleting controller-created secrets", "namespace", namespace)
+
+	secretList := &corev1.SecretList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		},
+	}
+
+	if err := r.List(ctx, secretList, listOpts...); err != nil {
+		logger.Error(err, "Failed to list controller secrets")
+		return fmt.Errorf("failed to list controller secrets: %w", err)
+	}
+
+	logger.V(0).Info("Found controller-created secrets to delete", "count", len(secretList.Items))
+
+	deletedCount := 0
+	for i := range secretList.Items {
+		secret := &secretList.Items[i]
+		logger.V(1).Info("Deleting controller secret",
+			"secretName", secret.Name,
+			"namespace", secret.Namespace,
+			"isCopy", secret.Labels[constant.VMFRManagedCopyLabel] == constant.TrueString,
+			"credentialType", secret.Labels[constant.CredentialTypeLabel])
+
+		if err := r.Delete(ctx, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Secret already deleted", "secretName", secret.Name)
+				continue
+			}
+			logger.Error(err, "Failed to delete secret", "secretName", secret.Name)
+			return fmt.Errorf("failed to delete secret %s: %w", secret.Name, err)
+		}
+		deletedCount++
+	}
+
+	logger.V(0).Info("Deleted controller-created secrets", "count", deletedCount, "namespace", namespace)
 	return nil
 }

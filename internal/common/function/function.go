@@ -282,19 +282,37 @@ func CreateSSHCredentialsSecret(
 	vmfrUID apitypes.UID,
 	logger logr.Logger,
 ) *corev1.Secret {
-	secret := createCredentialsSecretBase(
-		generateNamePrefix,
-		namespace,
-		constant.CredentialTypeSSH,
-		vmfrName,
-		vmfrNamespace,
-		vmfrUID,
-	)
-
-	secret.StringData = map[string]string{
-		"username":   username,
-		"privateKey": keyPair.PrivateKey,
-		"publicKey":  keyPair.PublicKey,
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: generateNamePrefix,
+			Namespace:    namespace,
+			Labels: map[string]string{
+				constant.ManagedByLabel:             constant.ManagedByLabelValue,
+				constant.VMFROriginUUIDLabel:        string(vmfrUID),
+				"oadp.openshift.io/credential-type": "ssh",
+			},
+			Annotations: map[string]string{
+				constant.VMFROriginNameAnnotation:      vmfrName,
+				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
+				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
+			},
+			// IMPORTANT: Do NOT add cross-namespace owner references!
+			// Kubernetes does not allow owner references where the owner is in a different
+			// namespace than the owned resource (VMFR is in openshift-adp, secret is in
+			// temporary restore namespace). Cross-namespace owner references are rejected
+			// by Kubernetes admission controller, causing silent failures.
+			//
+			// Instead, we use:
+			// 1. Labels to track ownership (VMFROriginUUIDLabel already added above)
+			// 2. The temporary namespace has an owner reference to VMFR
+			// 3. When VMFR is deleted, the namespace is deleted, cascading to all resources
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"username":   username,
+			"privateKey": keyPair.PrivateKey,
+			"publicKey":  keyPair.PublicKey,
+		},
 	}
 
 	logger.V(1).Info("Created SSH credentials secret with generateName",
@@ -320,18 +338,36 @@ func CreateFileBrowserCredentialsSecret(
 	vmfrUID apitypes.UID,
 	logger logr.Logger,
 ) *corev1.Secret {
-	secret := createCredentialsSecretBase(
-		generateNamePrefix,
-		namespace,
-		constant.CredentialTypeFileBrowser,
-		vmfrName,
-		vmfrNamespace,
-		vmfrUID,
-	)
-
-	secret.StringData = map[string]string{
-		"username": credentials.Username,
-		"password": credentials.Password,
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: generateNamePrefix,
+			Namespace:    namespace,
+			Labels: map[string]string{
+				constant.ManagedByLabel:             constant.ManagedByLabelValue,
+				constant.VMFROriginUUIDLabel:        string(vmfrUID),
+				"oadp.openshift.io/credential-type": "filebrowser",
+			},
+			Annotations: map[string]string{
+				constant.VMFROriginNameAnnotation:      vmfrName,
+				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
+				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
+			},
+			// IMPORTANT: Do NOT add cross-namespace owner references!
+			// Kubernetes does not allow owner references where the owner is in a different
+			// namespace than the owned resource (VMFR is in openshift-adp, secret is in
+			// temporary restore namespace). Cross-namespace owner references are rejected
+			// by Kubernetes admission controller, causing silent failures.
+			//
+			// Instead, we use:
+			// 1. Labels to track ownership (VMFROriginUUIDLabel already added above)
+			// 2. The temporary namespace has an owner reference to VMFR
+			// 3. When VMFR is deleted, the namespace is deleted, cascading to all resources
+		},
+		Type: corev1.SecretTypeOpaque,
+		StringData: map[string]string{
+			"username": credentials.Username,
+			"password": credentials.Password,
+		},
 	}
 
 	logger.V(1).Info("Created FileBrowser credentials secret with generateName",
