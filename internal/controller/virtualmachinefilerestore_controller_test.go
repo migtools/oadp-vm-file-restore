@@ -1321,3 +1321,338 @@ func TestGetFilteredBackupsToServe(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessDiscoveryResults(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+	time2 := metav1.NewTime(time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
+	time3 := metav1.NewTime(time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
+
+	tests := []struct {
+		name                string
+		pvcDiscoveryResults []oadptypes.BackupDiscoveryProgress
+		expectedPVCCount    int
+		validateResults     func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo)
+	}{
+		{
+			name:                "empty discovery results",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{},
+			expectedPVCCount:    0,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 0 {
+					t.Errorf("Expected 0 PVC restores, got %d", len(pvcRestores))
+				}
+			},
+		},
+		{
+			name: "single successful backup with single PVC",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs: []oadptypes.PVCInfo{
+							{
+								PVCName:      "pvc-1",
+								PVCNamespace: "test-ns",
+								PVCUID:       "uid-1",
+								Size:         "10Gi",
+							},
+						},
+					},
+					Status:  oadptypes.BackupDiscoveryStatusCompleted,
+					Message: "Successfully discovered 1 PVCs",
+				},
+			},
+			expectedPVCCount: 1,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 1 {
+					t.Fatalf("Expected 1 PVC restore, got %d", len(pvcRestores))
+				}
+				if pvcRestores[0].PVCName != "pvc-1" {
+					t.Errorf("Expected PVC name 'pvc-1', got '%s'", pvcRestores[0].PVCName)
+				}
+				if len(pvcRestores[0].Restores) != 1 {
+					t.Fatalf("Expected 1 restore, got %d", len(pvcRestores[0].Restores))
+				}
+				if pvcRestores[0].Restores[0].State != string(oadptypes.BackupDiscoveryStateAvailable) {
+					t.Errorf("Expected state Available, got %s", pvcRestores[0].Restores[0].State)
+				}
+			},
+		},
+		{
+			name: "single successful backup with multiple PVCs",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs: []oadptypes.PVCInfo{
+							{PVCName: "pvc-1", PVCNamespace: "test-ns", PVCUID: "uid-1", Size: "10Gi"},
+							{PVCName: "pvc-2", PVCNamespace: "test-ns", PVCUID: "uid-2", Size: "20Gi"},
+							{PVCName: "pvc-3", PVCNamespace: "test-ns", PVCUID: "uid-3", Size: "30Gi"},
+						},
+					},
+					Status: oadptypes.BackupDiscoveryStatusCompleted,
+				},
+			},
+			expectedPVCCount: 3,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 3 {
+					t.Errorf("Expected 3 PVC restores, got %d", len(pvcRestores))
+				}
+			},
+		},
+		{
+			name: "multiple backups with same PVC groups them together",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs:      []oadptypes.PVCInfo{{PVCName: "pvc-1", PVCNamespace: "test-ns", PVCUID: "uid-1", Size: "10Gi"}},
+					},
+					Status: oadptypes.BackupDiscoveryStatusCompleted,
+				},
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-2",
+						Namespace: "openshift-adp",
+						CreatedAt: &time2,
+						PVCs:      []oadptypes.PVCInfo{{PVCName: "pvc-1", PVCNamespace: "test-ns", PVCUID: "uid-1", Size: "10Gi"}},
+					},
+					Status: oadptypes.BackupDiscoveryStatusCompleted,
+				},
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-3",
+						Namespace: "openshift-adp",
+						CreatedAt: &time3,
+						PVCs:      []oadptypes.PVCInfo{{PVCName: "pvc-1", PVCNamespace: "test-ns", PVCUID: "uid-1", Size: "10Gi"}},
+					},
+					Status: oadptypes.BackupDiscoveryStatusCompleted,
+				},
+			},
+			expectedPVCCount: 1,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 1 {
+					t.Fatalf("Expected 1 PVC restore, got %d", len(pvcRestores))
+				}
+				if len(pvcRestores[0].Restores) != 3 {
+					t.Fatalf("Expected 3 restores for PVC, got %d", len(pvcRestores[0].Restores))
+				}
+				// Verify sorted by timestamp (newest first)
+				if pvcRestores[0].Restores[0].VeleroBackupName != "backup-3" {
+					t.Errorf("Expected newest backup first, got %s", pvcRestores[0].Restores[0].VeleroBackupName)
+				}
+			},
+		},
+		{
+			name: "failed backup BackupNotFound creates synthetic entry",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs:      []oadptypes.PVCInfo{}, // No PVC data
+					},
+					Status:  oadptypes.BackupDiscoveryStatusFailed,
+					Message: "BackupNotFound: backup CRD object deleted from cluster",
+				},
+			},
+			expectedPVCCount: 1,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 1 {
+					t.Fatalf("Expected 1 synthetic PVC entry, got %d", len(pvcRestores))
+				}
+				if pvcRestores[0].PVCName != constant.BackupLevelFailurePVCName {
+					t.Errorf("Expected synthetic PVC name, got %s", pvcRestores[0].PVCName)
+				}
+				if pvcRestores[0].Restores[0].State != string(oadptypes.BackupDiscoveryStateBackupDeleted) {
+					t.Errorf("Expected BackupDeleted state, got %s", pvcRestores[0].Restores[0].State)
+				}
+			},
+		},
+		{
+			name: "failed backup BackupFilesMissing creates synthetic entry",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs:      []oadptypes.PVCInfo{},
+					},
+					Status:  oadptypes.BackupDiscoveryStatusFailed,
+					Message: "BackupFilesMissing: Backup files missing from storage",
+				},
+			},
+			expectedPVCCount: 1,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 1 {
+					t.Fatalf("Expected 1 synthetic PVC entry, got %d", len(pvcRestores))
+				}
+				if pvcRestores[0].Restores[0].State != string(oadptypes.BackupDiscoveryStateBackupMissing) {
+					t.Errorf("Expected BackupMissing state, got %s", pvcRestores[0].Restores[0].State)
+				}
+			},
+		},
+		{
+			name: "failed backup UnsupportedBackupFormat with PVC metadata",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs: []oadptypes.PVCInfo{
+							{PVCName: "pvc-1", PVCNamespace: "test-ns", PVCUID: "uid-1", Size: "10Gi"},
+						},
+					},
+					Status:  oadptypes.BackupDiscoveryStatusFailed,
+					Message: "UnsupportedBackupFormat: legacy plugin version",
+				},
+			},
+			expectedPVCCount: 1,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 1 {
+					t.Fatalf("Expected 1 PVC entry, got %d", len(pvcRestores))
+				}
+				if pvcRestores[0].PVCName != "pvc-1" {
+					t.Errorf("Expected real PVC name, got %s", pvcRestores[0].PVCName)
+				}
+				if pvcRestores[0].Restores[0].State != string(oadptypes.BackupDiscoveryStateUnsupportedPlugin) {
+					t.Errorf("Expected UnsupportedPlugin state, got %s", pvcRestores[0].Restores[0].State)
+				}
+				if pvcRestores[0].Restores[0].FailureReason == "" {
+					t.Error("Expected failure reason to be set")
+				}
+			},
+		},
+		{
+			name: "failed backup ExtractionFailed creates synthetic entry",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs:      []oadptypes.PVCInfo{},
+					},
+					Status:  oadptypes.BackupDiscoveryStatusFailed,
+					Message: "ExtractionFailed: unknown error",
+				},
+			},
+			expectedPVCCount: 1,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 1 {
+					t.Fatalf("Expected 1 synthetic PVC entry, got %d", len(pvcRestores))
+				}
+				if pvcRestores[0].Restores[0].State != string(oadptypes.BackupDiscoveryStateExtractionFailed) {
+					t.Errorf("Expected ExtractionFailed state, got %s", pvcRestores[0].Restores[0].State)
+				}
+			},
+		},
+		{
+			name: "skipped backup is ignored",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-1",
+						Namespace: "openshift-adp",
+						PVCs:      []oadptypes.PVCInfo{{PVCName: "pvc-1", PVCNamespace: "test-ns", PVCUID: "uid-1", Size: "10Gi"}},
+					},
+					Status: oadptypes.BackupDiscoveryStatusSkipped,
+				},
+			},
+			expectedPVCCount: 0,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 0 {
+					t.Errorf("Expected skipped backup to be ignored, got %d PVCs", len(pvcRestores))
+				}
+			},
+		},
+		{
+			name: "mixed successful and failed backups",
+			pvcDiscoveryResults: []oadptypes.BackupDiscoveryProgress{
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-success",
+						Namespace: "openshift-adp",
+						CreatedAt: &time1,
+						PVCs:      []oadptypes.PVCInfo{{PVCName: "pvc-1", PVCNamespace: "test-ns", PVCUID: "uid-1", Size: "10Gi"}},
+					},
+					Status: oadptypes.BackupDiscoveryStatusCompleted,
+				},
+				{
+					VeleroBackupInfo: oadptypes.VeleroBackupInfo{
+						Name:      "backup-failed",
+						Namespace: "openshift-adp",
+						CreatedAt: &time2,
+						PVCs:      []oadptypes.PVCInfo{},
+					},
+					Status:  oadptypes.BackupDiscoveryStatusFailed,
+					Message: "BackupNotFound: deleted",
+				},
+			},
+			expectedPVCCount: 2,
+			validateResults: func(t *testing.T, pvcRestores []oadpv1alpha1.PVCRestoreInfo) {
+				if len(pvcRestores) != 2 {
+					t.Errorf("Expected 2 PVC entries (1 real, 1 synthetic), got %d", len(pvcRestores))
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(vmfr).
+				WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: "openshift-adp",
+			}
+
+			err := reconciler.processDiscoveryResults(ctx, zap.New(), vmfr, tt.pvcDiscoveryResults)
+			if err != nil {
+				t.Fatalf("processDiscoveryResults() error = %v", err)
+			}
+
+			// Get updated VMFR
+			updated := &oadpv1alpha1.VirtualMachineFileRestore{}
+			err = fakeClient.Get(ctx, types.NamespacedName{Name: "test-vmfr", Namespace: "test-ns"}, updated)
+			if err != nil {
+				t.Fatalf("Failed to get updated VMFR: %v", err)
+			}
+
+			if len(updated.Status.PVCRestores) != tt.expectedPVCCount {
+				t.Errorf("Expected %d PVC restores in status, got %d", tt.expectedPVCCount, len(updated.Status.PVCRestores))
+			}
+
+			if tt.validateResults != nil {
+				tt.validateResults(t, updated.Status.PVCRestores)
+			}
+		})
+	}
+}
