@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -654,3 +655,62 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 		})
 	})
 })
+
+// TestErrUnsupportedBackup tests the Error() method of ErrUnsupportedBackup
+func TestErrUnsupportedBackup(t *testing.T) {
+	tests := []struct {
+		name           string
+		err            ErrUnsupportedBackup
+		expectedString string
+	}{
+		{
+			name: "basic error",
+			err: ErrUnsupportedBackup{
+				BackupName:   "test-backup",
+				PVCName:      "test-pvc",
+				PVCNamespace: "default",
+				PVCUID:       "uid-123",
+				PVCSize:      "10Gi",
+				Reason:       "unsupported plugin version",
+			},
+			expectedString: "backup test-backup created with unsupported kubevirt-velero-plugin",
+		},
+		{
+			name: "empty backup name",
+			err: ErrUnsupportedBackup{
+				BackupName: "",
+				PVCName:    "pvc-1",
+			},
+			expectedString: "backup  created with unsupported kubevirt-velero-plugin",
+		},
+		{
+			name: "with all fields",
+			err: ErrUnsupportedBackup{
+				BackupName:   "vm-backup-20250115",
+				PVCName:      "vm-disk-1",
+				PVCNamespace: "vms",
+				PVCUID:       "abc-123-xyz",
+				PVCSize:      "100Gi",
+				Reason:       "legacy plugin",
+			},
+			expectedString: "backup vm-backup-20250115 created with unsupported kubevirt-velero-plugin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.err.Error()
+			if result != tt.expectedString {
+				t.Errorf("Error() = %q, want %q", result, tt.expectedString)
+			}
+
+			// Verify fields are preserved
+			if tt.err.BackupName != "" && tt.err.BackupName != tt.err.BackupName {
+				t.Errorf("BackupName not preserved")
+			}
+			if tt.err.PVCName != "" && tt.err.PVCName != tt.err.PVCName {
+				t.Errorf("PVCName not preserved")
+			}
+		})
+	}
+}
