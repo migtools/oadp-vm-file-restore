@@ -2329,13 +2329,20 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 					}
 
 					// Always update phase if it changed (even if metadata was already set)
-					if restoreInfo.Phase != restorePhase {
+					// Normalize Finalizing to Completed since from VMFR perspective they're equivalent
+					normalizedPhase := restorePhase
+					if restorePhase == veleroapi.RestorePhaseFinalizing {
+						normalizedPhase = veleroapi.RestorePhaseCompleted
+					}
+
+					if restoreInfo.Phase != normalizedPhase {
 						logger.V(1).Info("Updating RestoreInfo phase",
 							"pvcUID", pvcRestore.PVCUID,
 							"restoreName", restoreName,
 							"oldPhase", restoreInfo.Phase,
-							"newPhase", restorePhase)
-						restoreInfo.Phase = restorePhase
+							"newPhase", normalizedPhase,
+							"veleroPhase", restorePhase)
+						restoreInfo.Phase = normalizedPhase
 						statusUpdated = true
 					}
 				}
@@ -2706,10 +2713,10 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		VMFRUID:              string(vmfr.UID),
 		PVCMounts:            pvcMounts,
 		MainContainer:        ptr.To(buildVMFileServerMainContainer(pvcMounts)), // Use VM file server for disk mounting
-		SSHAccess:            sshConfig,                                          // Configured SSH access (or nil)
-		FileBrowserAccess:    fileBrowserConfig,                                  // Configured FileBrowser access (or nil)
-		EnableDualPathAccess: true,                                               // Enable dual-path symlinks
-		UseInternalMounts:    false,                                              // Use Kubernetes-managed PVC mounts
+		SSHAccess:            sshConfig,                                         // Configured SSH access (or nil)
+		FileBrowserAccess:    fileBrowserConfig,                                 // Configured FileBrowser access (or nil)
+		EnableDualPathAccess: true,                                              // Enable dual-path symlinks
+		UseInternalMounts:    false,                                             // Use Kubernetes-managed PVC mounts
 	}
 
 	logger.V(0).Info("File server configuration prepared",
@@ -3215,10 +3222,10 @@ func (r *VirtualMachineFileRestoreReconciler) ensureCredentials(
 // This function:
 // 1. Lists DataDownload resources created by our Velero Restores (using VMFR UID label)
 // 2. For each DataDownload with empty/pending status (not started):
-//    - Finds the corresponding Velero Restore from annotations
-//    - Finds the actual restored PVC name by listing PVCs with velero.io/restore-name label
-//    - Matches PVC by original name annotation (constant.VMFROriginalPVCNameAnnotation)
-//    - Patches DataDownload spec.targetVolume.pvc with the actual PVC name
+//   - Finds the corresponding Velero Restore from annotations
+//   - Finds the actual restored PVC name by listing PVCs with velero.io/restore-name label
+//   - Matches PVC by original name annotation (constant.VMFROriginalPVCNameAnnotation)
+//   - Patches DataDownload spec.targetVolume.pvc with the actual PVC name
 //
 // Returns the count of DataDownloads that were patched.
 func (r *VirtualMachineFileRestoreReconciler) fixDataDownloadPVCNames(
