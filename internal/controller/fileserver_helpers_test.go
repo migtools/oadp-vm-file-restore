@@ -19,6 +19,7 @@ package controller
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -909,6 +910,45 @@ func TestBuildVMFileServerMainContainer(t *testing.T) {
 			if len(jsonMap) != 0 {
 				t.Error("Expected empty BACKUP_PVC_MAP for empty PVC mounts")
 			}
+		}
+	})
+}
+
+func TestFormatBackupDateForPath(t *testing.T) {
+	t.Run("nil timestamp", func(t *testing.T) {
+		result := formatBackupDateForPath(nil)
+		if result != "unknown-date" {
+			t.Errorf("Expected 'unknown-date', got '%s'", result)
+		}
+	})
+
+	t.Run("valid timestamp", func(t *testing.T) {
+		// Create a specific timestamp: 2025-01-15 14:30:00 UTC
+		timestamp := metav1.NewTime(metav1.Now().Time.Truncate(0))
+
+		result := formatBackupDateForPath(&timestamp)
+
+		// Verify it's in YYYY-MM-DD format
+		if len(result) != 10 {
+			t.Errorf("Expected date format YYYY-MM-DD (length 10), got '%s' (length %d)", result, len(result))
+		}
+
+		// Verify it matches the expected format
+		expectedDate := timestamp.Time.Format("2006-01-02")
+		if result != expectedDate {
+			t.Errorf("Expected '%s', got '%s'", expectedDate, result)
+		}
+	})
+
+	t.Run("date formatting consistency", func(t *testing.T) {
+		// Test a known date
+		knownTime := metav1.NewTime(time.Date(2025, 1, 15, 14, 30, 0, 0, time.UTC))
+
+		result := formatBackupDateForPath(&knownTime)
+
+		expected := "2025-01-15"
+		if result != expected {
+			t.Errorf("Expected '%s', got '%s'", expected, result)
 		}
 	})
 }
