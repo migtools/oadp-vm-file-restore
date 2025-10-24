@@ -739,3 +739,176 @@ func TestBuildBackupPVCMapJSON(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildVMFileServerMainContainer(t *testing.T) {
+	t.Run("basic container configuration", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "uid-123",
+				BackupName: "backup-1",
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Verify container name
+		if container.Name != "vm-file-server" {
+			t.Errorf("Expected container name 'vm-file-server', got '%s'", container.Name)
+		}
+
+		// Verify image
+		if container.Image != constant.VMFileServerImage {
+			t.Errorf("Expected image '%s', got '%s'", constant.VMFileServerImage, container.Image)
+		}
+
+		// Verify command
+		if len(container.Command) != 1 {
+			t.Errorf("Expected 1 command, got %d", len(container.Command))
+		} else if container.Command[0] != "/usr/local/bin/detect-and-mount.sh" {
+			t.Errorf("Expected command '/usr/local/bin/detect-and-mount.sh', got '%s'", container.Command[0])
+		}
+	})
+
+	t.Run("environment variables", func(t *testing.T) {
+		timestamp := metav1.Now()
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Should have HOME and BACKUP_PVC_MAP env vars
+		if len(container.Env) != 2 {
+			t.Errorf("Expected 2 environment variables, got %d", len(container.Env))
+		}
+
+		// Check HOME env var
+		var homeEnv *corev1.EnvVar
+		var backupMapEnv *corev1.EnvVar
+		for i := range container.Env {
+			if container.Env[i].Name == "HOME" {
+				homeEnv = &container.Env[i]
+			}
+			if container.Env[i].Name == "BACKUP_PVC_MAP" {
+				backupMapEnv = &container.Env[i]
+			}
+		}
+
+		if homeEnv == nil {
+			t.Error("Missing HOME environment variable")
+		} else if homeEnv.Value != "/tmp" {
+			t.Errorf("Expected HOME='/tmp', got '%s'", homeEnv.Value)
+		}
+
+		if backupMapEnv == nil {
+			t.Error("Missing BACKUP_PVC_MAP environment variable")
+		} else {
+			// Verify it's valid JSON
+			var jsonMap map[string][]map[string]string
+			if err := json.Unmarshal([]byte(backupMapEnv.Value), &jsonMap); err != nil {
+				t.Errorf("BACKUP_PVC_MAP is not valid JSON: %v", err)
+			}
+		}
+	})
+
+	t.Run("security context", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "uid-123",
+				BackupName: "backup-1",
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		if container.SecurityContext == nil {
+			t.Fatal("SecurityContext is nil")
+		}
+
+		// Should be privileged
+		if container.SecurityContext.Privileged == nil || !*container.SecurityContext.Privileged {
+			t.Error("Container should be privileged")
+		}
+
+		// Should run as qemu user (107)
+		if container.SecurityContext.RunAsUser == nil || *container.SecurityContext.RunAsUser != 107 {
+			t.Errorf("Expected RunAsUser=107, got %v", container.SecurityContext.RunAsUser)
+		}
+
+		// Should run as qemu group (107)
+		if container.SecurityContext.RunAsGroup == nil || *container.SecurityContext.RunAsGroup != 107 {
+			t.Errorf("Expected RunAsGroup=107, got %v", container.SecurityContext.RunAsGroup)
+		}
+	})
+
+	t.Run("resource requirements", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "uid-123",
+				BackupName: "backup-1",
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Verify requests
+		memRequest := container.Resources.Requests[corev1.ResourceMemory]
+		cpuRequest := container.Resources.Requests[corev1.ResourceCPU]
+
+		if memRequest.String() != "512Mi" {
+			t.Errorf("Expected memory request '512Mi', got '%s'", memRequest.String())
+		}
+		if cpuRequest.String() != "250m" {
+			t.Errorf("Expected CPU request '250m', got '%s'", cpuRequest.String())
+		}
+
+		// Verify limits
+		memLimit := container.Resources.Limits[corev1.ResourceMemory]
+		cpuLimit := container.Resources.Limits[corev1.ResourceCPU]
+
+		if memLimit.String() != "2Gi" {
+			t.Errorf("Expected memory limit '2Gi', got '%s'", memLimit.String())
+		}
+		if cpuLimit.String() != "1" {
+			t.Errorf("Expected CPU limit '1', got '%s'", cpuLimit.String())
+		}
+	})
+
+	t.Run("empty PVC mounts", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Should still create valid container
+		if container.Name != "vm-file-server" {
+			t.Errorf("Expected container name 'vm-file-server', got '%s'", container.Name)
+		}
+
+		// BACKUP_PVC_MAP should be empty JSON object
+		var backupMapEnv *corev1.EnvVar
+		for i := range container.Env {
+			if container.Env[i].Name == "BACKUP_PVC_MAP" {
+				backupMapEnv = &container.Env[i]
+				break
+			}
+		}
+
+		if backupMapEnv != nil {
+			var jsonMap map[string][]map[string]string
+			if err := json.Unmarshal([]byte(backupMapEnv.Value), &jsonMap); err != nil {
+				t.Errorf("BACKUP_PVC_MAP is not valid JSON: %v", err)
+			}
+			if len(jsonMap) != 0 {
+				t.Error("Expected empty BACKUP_PVC_MAP for empty PVC mounts")
+			}
+		}
+	})
+}
