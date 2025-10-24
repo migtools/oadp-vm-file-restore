@@ -2679,3 +2679,131 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 		})
 	}
 }
+
+func TestGetBackupMetadata(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	ctx := context.Background()
+
+	createdTime := metav1.NewTime(time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC))
+
+	tests := []struct {
+		name          string
+		backupInfo    oadptypes.VeleroBackupInfo
+		existingObjs  []client.Object
+		expectError   bool
+		errorContains string
+		validateFunc  func(t *testing.T, progress oadptypes.BackupDiscoveryProgress)
+	}{
+		{
+			name: "successfully gets backup metadata",
+			backupInfo: oadptypes.VeleroBackupInfo{
+				Name:      "test-backup",
+				Namespace: "openshift-adp",
+			},
+			existingObjs: []client.Object{
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-backup",
+						Namespace:         "openshift-adp",
+						CreationTimestamp: createdTime,
+					},
+				},
+			},
+			expectError: false,
+			validateFunc: func(t *testing.T, progress oadptypes.BackupDiscoveryProgress) {
+				if progress.VeleroBackupInfo.Name != "test-backup" {
+					t.Errorf("Expected backup name 'test-backup', got '%s'", progress.VeleroBackupInfo.Name)
+				}
+				if progress.VeleroBackupInfo.Namespace != "openshift-adp" {
+					t.Errorf("Expected backup namespace 'openshift-adp', got '%s'", progress.VeleroBackupInfo.Namespace)
+				}
+				if progress.VeleroBackupInfo.CreatedAt == nil {
+					t.Error("Expected CreatedAt to be set")
+				} else if !progress.VeleroBackupInfo.CreatedAt.Equal(&createdTime) {
+					t.Errorf("Expected CreatedAt %v, got %v", createdTime, progress.VeleroBackupInfo.CreatedAt)
+				}
+				if progress.Status != oadptypes.BackupDiscoveryStatusInProgress {
+					t.Errorf("Expected status InProgress, got %s", progress.Status)
+				}
+				if progress.Message != "Extracting PVC information" {
+					t.Errorf("Expected message 'Extracting PVC information', got '%s'", progress.Message)
+				}
+				if progress.LastUpdated == nil {
+					t.Error("Expected LastUpdated to be set")
+				}
+			},
+		},
+		{
+			name: "returns error when backup not found",
+			backupInfo: oadptypes.VeleroBackupInfo{
+				Name:      "nonexistent-backup",
+				Namespace: "openshift-adp",
+			},
+			existingObjs:  []client.Object{},
+			expectError:   true,
+			errorContains: "backup CRD object deleted from cluster",
+		},
+		{
+			name: "finds backup in specific namespace",
+			backupInfo: oadptypes.VeleroBackupInfo{
+				Name:      "backup-1",
+				Namespace: "namespace-2",
+			},
+			existingObjs: []client.Object{
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "backup-1",
+						Namespace:         "namespace-1",
+						CreationTimestamp: createdTime,
+					},
+				},
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "backup-1",
+						Namespace:         "namespace-2",
+						CreationTimestamp: createdTime,
+					},
+				},
+			},
+			expectError: false,
+			validateFunc: func(t *testing.T, progress oadptypes.BackupDiscoveryProgress) {
+				if progress.VeleroBackupInfo.Namespace != "namespace-2" {
+					t.Errorf("Expected namespace 'namespace-2', got '%s'", progress.VeleroBackupInfo.Namespace)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjs...).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			progress, err := reconciler.getBackupMetadata(ctx, tt.backupInfo)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+				if tt.validateFunc != nil {
+					tt.validateFunc(t, progress)
+				}
+			}
+		})
+	}
+}
