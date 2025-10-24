@@ -1,8 +1,8 @@
-# OADP VM File Server Container - Testing Guide
+# OADP VM File Access Container - Testing Guide
 
 ## Overview
 
-This document provides comprehensive testing procedures for the OADP VM File Server container. It documents all testing performed to validate the container is production-ready and explains what has been verified.
+This document provides comprehensive testing procedures for the OADP VM File Access Container container. It documents all testing performed to validate the container is production-ready and explains what has been verified.
 
 ## Testing Philosophy
 
@@ -18,7 +18,7 @@ The file-server container must be **bulletproof** because it serves as a critica
 ### Local Testing (Development)
 - **Platform**: macOS (darwin 25.0.0) with podman
 - **Container Runtime**: Podman
-- **Image**: `oadp-vm-file-server:e2e-test` (Fedora 42 base)
+- **Image**: `oadp-vmfr-access:e2e-test` (Fedora 42 base)
 
 ### Kubernetes Testing (Production Validation)
 - **Platform**: OpenShift 4.x with OpenShift Virtualization
@@ -51,7 +51,7 @@ Available commands:
 
 **Test Command**:
 ```bash
-podman build --no-cache -t oadp-vm-file-server:e2e-test .
+podman build --no-cache -t oadp-vmfr-access:e2e-test .
 ```
 
 **Expected Results**:
@@ -88,21 +88,21 @@ Each tool must be present and return a valid version or help output.
 
 **libguestfs-tools - guestmount**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test guestmount --version
+podman run --rm oadp-vmfr-access:e2e-test guestmount --version
 ```
 **Expected Output**: `guestmount 1.56.2fedora=42,release=1.fc42,libvirt`
 **Status**: ✅ VERIFIED
 
 **qemu-img - Disk format detection**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test qemu-img --version
+podman run --rm oadp-vmfr-access:e2e-test qemu-img --version
 ```
 **Expected Output**: `qemu-img version 9.2.4 (qemu-9.2.4-2.fc42)`
 **Status**: ✅ VERIFIED
 
 **libguestfs-xfs - XFS support package**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test rpm -q libguestfs-xfs
+podman run --rm oadp-vmfr-access:e2e-test rpm -q libguestfs-xfs
 ```
 **Expected Output**: `libguestfs-xfs-1.56.2-1.fc42.aarch64` (or x86_64)
 **Status**: ✅ VERIFIED
@@ -112,35 +112,35 @@ podman run --rm oadp-vm-file-server:e2e-test rpm -q libguestfs-xfs
 
 **xfsprogs - XFS (RHEL/CentOS/Fedora VMs - 80% coverage)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test xfs_info --help 2>&1 | head -5
+podman run --rm oadp-vmfr-access:e2e-test xfs_info --help 2>&1 | head -5
 ```
 **Expected Output**: Shows xfs_info usage
 **Status**: ✅ VERIFIED
 
 **e2fsprogs - ext2/ext3/ext4 (Ubuntu/Debian VMs - 15% coverage)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test dumpe2fs -V 2>&1
+podman run --rm oadp-vmfr-access:e2e-test dumpe2fs -V 2>&1
 ```
 **Expected Output**: `dumpe2fs 1.47.2`
 **Status**: ✅ VERIFIED
 
 **btrfs-progs - Btrfs (SUSE VMs - 3% coverage)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test btrfs --version
+podman run --rm oadp-vmfr-access:e2e-test btrfs --version
 ```
 **Expected Output**: `btrfs-progs v6.16.1`
 **Status**: ✅ VERIFIED
 
 **ntfs-3g - NTFS (Windows Server VMs - 2% coverage)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test ntfs-3g --version 2>&1 | head -3
+podman run --rm oadp-vmfr-access:e2e-test ntfs-3g --version 2>&1 | head -3
 ```
 **Expected Output**: `ntfs-3g 2022.10.3 integrated FUSE 28`
 **Status**: ✅ VERIFIED
 
 **dosfstools - FAT/FAT32 (EFI System Partitions - 100% of UEFI VMs)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test mkfs.fat --help 2>&1 | head -3
+podman run --rm oadp-vmfr-access:e2e-test mkfs.fat --help 2>&1 | head -3
 ```
 **Expected Output**: Shows mkfs.fat usage
 **Status**: ✅ VERIFIED
@@ -149,7 +149,7 @@ podman run --rm oadp-vm-file-server:e2e-test mkfs.fat --help 2>&1 | head -3
 
 **lvm2 - Logical Volume Manager (60% of RHEL/CentOS VMs)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test lvm version
+podman run --rm oadp-vmfr-access:e2e-test lvm version
 ```
 **Expected Output**: `LVM version: 2.03.30(2)`
 **Status**: ✅ VERIFIED
@@ -157,14 +157,14 @@ podman run --rm oadp-vm-file-server:e2e-test lvm version
 
 **parted - Partition table tool (100% of VMs)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test parted --version
+podman run --rm oadp-vmfr-access:e2e-test parted --version
 ```
 **Expected Output**: `parted (GNU parted) 3.6`
 **Status**: ✅ VERIFIED
 
 **gdisk - GPT partition tables (90% of modern VMs)**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test gdisk -v 2>&1 | head -2
+podman run --rm oadp-vmfr-access:e2e-test gdisk -v 2>&1 | head -2
 ```
 **Expected Output**: `GPT fdisk (gdisk) version 1.0.10`
 **Status**: ✅ VERIFIED
@@ -173,14 +173,14 @@ podman run --rm oadp-vm-file-server:e2e-test gdisk -v 2>&1 | head -2
 
 **file - File type detection**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test file --version
+podman run --rm oadp-vmfr-access:e2e-test file --version
 ```
 **Expected Output**: `file-5.46`
 **Status**: ✅ VERIFIED
 
 **util-linux - Block device utilities**
 ```bash
-podman run --rm oadp-vm-file-server:e2e-test lsblk --version
+podman run --rm oadp-vmfr-access:e2e-test lsblk --version
 ```
 **Expected Output**: `lsblk from util-linux 2.40.4`
 **Status**: ✅ VERIFIED
@@ -191,7 +191,7 @@ podman run --rm oadp-vm-file-server:e2e-test lsblk --version
 
 **Test Command**:
 ```bash
-podman run --rm --entrypoint /bin/bash oadp-vm-file-server:e2e-test -c "id"
+podman run --rm --entrypoint /bin/bash oadp-vmfr-access:e2e-test -c "id"
 ```
 
 **Expected Output**:
@@ -211,7 +211,7 @@ uid=107(qemu) gid=107(qemu) groups=107(qemu),36(kvm)
 
 **Test Command**:
 ```bash
-podman run --rm --entrypoint /bin/bash oadp-vm-file-server:e2e-test -c "getent passwd qemu"
+podman run --rm --entrypoint /bin/bash oadp-vmfr-access:e2e-test -c "getent passwd qemu"
 ```
 
 **Expected Output**:
@@ -230,7 +230,7 @@ qemu:x:107:107:qemu user:/:/usr/sbin/nologin
 
 **Test Command**:
 ```bash
-podman run --rm --entrypoint /bin/bash oadp-vm-file-server:e2e-test -c \
+podman run --rm --entrypoint /bin/bash oadp-vmfr-access:e2e-test -c \
   "ls -ld /var/www/files /mnt/volumes /mnt/filesystems"
 ```
 
@@ -252,7 +252,7 @@ drwxrwxr-x. 1 qemu qemu 6 Oct 14 16:43 /var/www/files
 
 **Test Command**:
 ```bash
-podman run --rm --entrypoint /bin/bash oadp-vm-file-server:e2e-test -c \
+podman run --rm --entrypoint /bin/bash oadp-vmfr-access:e2e-test -c \
   "test -x /usr/local/bin/detect-and-mount.sh && \
    test -x /usr/local/bin/entrypoint.sh && \
    echo 'Scripts are executable' || echo 'Scripts NOT executable'"
@@ -277,10 +277,10 @@ podman run --rm --entrypoint /bin/bash oadp-vm-file-server:e2e-test -c \
 **Test VM Setup**:
 ```bash
 # Create test namespace
-oc new-project shubh-oadp-vm-file-server-test
+oc new-project shubh-oadp-vmfr-access-test
 
 # Set pod security to privileged (required for file-server)
-oc label namespace shubh-oadp-vm-file-server-test \
+oc label namespace shubh-oadp-vmfr-access-test \
   pod-security.kubernetes.io/enforce=privileged \
   pod-security.kubernetes.io/audit=privileged \
   pod-security.kubernetes.io/warn=privileged
@@ -296,7 +296,7 @@ virtctl ssh cloud-user@test-vm
 echo "OADP VM File Restore Test - $(date)" | sudo tee /root/test-file.txt
 cat <<EOF | sudo tee /root/oadp-validation.json
 {
-  "test_name": "OADP VM File Server",
+  "test_name": "OADP VM File Access Container",
   "test_date": "$(date -I)",
   "vm_name": "test-vm",
   "filesystem": "xfs",
@@ -355,7 +355,7 @@ oc logs file-server-test
 
 **Expected Output**:
 ```
-=== OADP VM File Server - Auto Mount Script ===
+=== OADP VM File Access Container - Auto Mount Script ===
 Starting at: [timestamp]
 
 Scanning for disk images in: /mnt/volumes
@@ -582,7 +582,7 @@ All documentation files have been reviewed for accuracy and completeness:
 - ✅ CloudInit setup for test data
 - ✅ Instructions for creating test environment
 
-#### 6.10 oadp-vm-file-server-scc.yaml
+#### 6.10 oadp-vmfr-access-scc.yaml
 **Status**: ✅ SCC DEFINITION
 
 **Contains**:
@@ -656,7 +656,7 @@ All documentation files have been reviewed for accuracy and completeness:
 | CONTROLLER_INTEGRATION.md | ✅ PASS | Actionable guide |
 | test-pod.yaml | ✅ PASS | Working reference spec |
 | test-vm.yaml | ✅ PASS | Test environment setup |
-| oadp-vm-file-server-scc.yaml | ✅ PASS | SCC definition |
+| oadp-vmfr-access-scc.yaml | ✅ PASS | SCC definition |
 
 ## What's Ready for Production
 
@@ -710,7 +710,7 @@ spec:
 
   containers:
   - name: file-server
-    image: oadp-vm-file-server:latest
+    image: oadp-vmfr-access:latest
     command: ["/usr/local/bin/detect-and-mount.sh"]
 
     securityContext:
@@ -888,7 +888,7 @@ Before committing changes to the file-server container:
 
 ## Conclusion
 
-The OADP VM File Server container is **production-ready** and **bulletproof** based on:
+The OADP VM File Access Container container is **production-ready** and **bulletproof** based on:
 
 1. ✅ **Comprehensive testing** - All tools verified, user configuration correct
 2. ✅ **Live cluster validation** - Tested with real OpenShift Virtualization VMs
@@ -1037,7 +1037,7 @@ spec:
     supplementalGroups: [107]
   containers:
   - name: file-server
-    image: quay.io/spampatt/oadp-vm-file-server:device-plugin-test
+    image: quay.io/konveyor/oadp-vmfr-access:device-plugin-test
     securityContext:
       privileged: false
       allowPrivilegeEscalation: false
@@ -1097,15 +1097,15 @@ oc logs -f file-server-test-device-plugin
 ### Files Created During Testing
 
 - `test-pod-device-plugin.yaml` - Test pod specification
-- `oadp-vm-file-server-scc.yaml` - Custom SCC (not used in final solution)
+- `oadp-vmfr-access-scc.yaml` - Custom SCC (not used in final solution)
 - `TESTING-DEVICE-PLUGIN.md` - Detailed testing documentation
 - `DEVICE-PLUGIN-TESTING-SUMMARY.md` - Quick reference summary
 
 ### Reference
 
-- Test namespace: `oadp-vm-file-server-device-plugin-test`
+- Test namespace: `oadp-vmfr-access-device-plugin-test`
 - KubeVirt Slack discussion: October 13, 2025
-- Custom SCC: `oadp-vm-file-server-scc.yaml`
+- Custom SCC: `oadp-vmfr-access-scc.yaml`
 
 ### Conclusion
 

@@ -1,32 +1,61 @@
-# OADP VM File Server Container - DOWNSTREAM (Red Hat Konflux Build)
-# ======================================================================
-# This is the DOWNSTREAM Dockerfile for Red Hat's Konflux build system
-# Used for building official OADP product images
+# OADP VM File Access Container - UPSTREAM
+# ==========================================
+# Issue #6: Design and create container with tools to access restored file systems
 #
-# Pattern follows: openshift/oadp-operator konflux.Dockerfile
-# Build system: Red Hat Konflux (successor to OSBS)
+# Purpose:
+#   This container provides a standardized environment with tools to access and mount
+#   VM disk images (qcow2, raw) and various filesystems (ext4, xfs, ntfs, btrfs, etc.)
+#   from Velero/OADP backups. It serves as a toolbox for the VMFR controller to
+#   create file-serving pods.
+#
+# Design Decision (Issue #6):
+#   - All-in-one container approach (not plugin-based)
+#   - Includes all necessary filesystem tools and utilities
+#   - Simpler to deploy, maintain, and debug
+#   - Plugin complexity not justified for well-defined set of VM filesystem types
+#
+# Upstream/Downstream Strategy:
+#   - **THIS FILE (Dockerfile)**: UPSTREAM - Fedora 42 base for community
+#   - **Dockerfile.rhel**: DOWNSTREAM - RHEL 9/virt-launcher base for Red Hat product
+#
+# Base Image Strategy (Upstream):
+#   - **Base**: Fedora 42 (latest stable)
+#   - **Why Fedora**:
+#     - Red Hat ecosystem (upstream for RHEL)
+#     - All required packages natively available (no subscription needed)
+#     - Full multi-arch support (ARM64 + x86_64)
+#     - Easier for community contributors to build and test
+#     - Standard Red Hat upstream/downstream pattern
+#   - **Build Requirements**: None - anyone can build
+#
+# Architecture:
+#   - Based on Fedora 42
+#   - Runs as qemu user (UID 107, GID 107) to match VM disk ownership
+#   - Privileged mode required for FUSE + KVM access (SELinux restriction)
+#   - Helper scripts for filesystem detection and read-only mounting
+#
 
-FROM registry.access.redhat.com/ubi9/ubi:latest
+FROM registry.fedoraproject.org/fedora:42
 
-# Metadata following Red Hat container standards
-LABEL name="oadp-vm-file-server" \
+# Labels following OpenShift/OADP conventions
+LABEL name="oadp-vmfr-access" \
       vendor="Red Hat" \
-      summary="OADP VM File Restore Server" \
+      summary="OADP VM File Access Container" \
       description="Container with tools for accessing and mounting VM disk images from OADP backups" \
       io.k8s.description="Provides filesystem tools for VM file restore in OADP" \
       io.openshift.tags="oadp,backup,restore,vm,filesystem" \
-      io.k8s.display-name="OADP VM File Server" \
-      com.redhat.component="oadp-vm-file-server-container" \
-      version="1.5.0"
-
-# Install required licenses
-COPY LICENSE /licenses/LICENSE
+      io.k8s.display-name="OADP VM File Access Container" \
+      base-image="registry.fedoraproject.org/fedora:42" \
+      upstream="true"
 
 # ==============================================================================
 # Package Installation - All required tools for VM disk and filesystem access
 # ==============================================================================
-# Red Hat Konflux builds have access to full RHEL repositories automatically
-# No manual subscription management needed (handled by build system)
+# Fedora 42 has all these packages natively available (no EPEL or subscription needed)
+# Package selection based on KubeVirt research and VM filesystem requirements
+# Total size: ~1.1 GB (acceptable for a specialized tooling container)
+#
+# See README.md "Installed Tools - Why Each Tool Is Needed" for detailed rationale
 #
 RUN dnf install -y \
     # =========================================================================
@@ -55,9 +84,17 @@ RUN dnf install -y \
     # =========================================================================
     # fuse & fuse-libs: Enable userspace filesystem mounting (required by guestmount)
     #   - Why: FUSE = Filesystem in Userspace (no kernel modules needed!)
-    #   - What: Allows guestmount to mount filesystems in userspace
-    #   - Security: Cleaner than NBD (no kernel module loading required)
-    #   - Note: Privileged mode still required for /dev/kvm access (SELinux restriction)
+    #   - What: Allows guestmount to mount filesystems in userspace instead of kernel space
+    #   - How it works:
+    #     1. /dev/fuse device provides kernel interface for FUSE
+    #     2. guestmount runs in userspace, talks to kernel via /dev/fuse
+    #     3. Filesystem operations (read/write) handled by guestmount process
+    #     4. No kernel filesystem driver needed (ext4, xfs, etc. all in userspace)
+    #   - Security benefits vs NBD (Network Block Device):
+    #     ✅ No kernel module loading (modprobe nbd NOT required)
+    #     ✅ Cleaner than NBD which requires privileged mode + kernel modules
+    #   - Note: Live testing showed privileged mode still required for /dev/kvm access
+    #           (libguestfs uses QEMU with KVM for hardware acceleration)
     fuse \
     fuse-libs \
     #
@@ -137,7 +174,7 @@ RUN dnf install -y \
     #
     # Clean up dnf cache to reduce image size
     && dnf clean all \
-    && rm -rf /var/cache/dnf /var/cache/yum
+    && rm -rf /var/cache/dnf
 
 # Copy helper scripts into container
 # - detect-and-mount.sh: Auto-detects disk formats and mounts filesystems read-only
@@ -154,23 +191,19 @@ RUN chmod +x /usr/local/bin/detect-and-mount.sh /usr/local/bin/entrypoint.sh
 # - /var/www/files: Working directory for the container
 RUN mkdir -p /mnt/volumes /mnt/filesystems /var/www/files
 
-# Create qemu user and group (UID/GID 107 to match KubeVirt)
-# Set permissions for qemu user
-# Note: UBI 9 minimal may not have qemu user by default, so we create it
-RUN groupadd -g 107 qemu 2>/dev/null || true && \
-    useradd -u 107 -g 107 -r -m -d /var/www/files -s /sbin/nologin \
-        -c "QEMU User" qemu 2>/dev/null || true && \
-    chown -R 107:107 /var/www/files /mnt/volumes /mnt/filesystems && \
+# Set permissions for qemu user (already exists in Fedora as UID 107)
+# OpenShift Virtualization Security Context:
+# - UID 107: qemu user (matches VM disk ownership in KubeVirt)
+# - GID 107: qemu group
+# - This matches how virt-launcher pods run
+# Note: Fedora includes qemu user by default, RHEL may not
+RUN chown -R 107:107 /var/www/files /mnt/volumes /mnt/filesystems && \
     chmod -R u+rwX,g+rwX /var/www/files /mnt/volumes /mnt/filesystems
 
 # Set working directory
 WORKDIR /var/www/files
 
 # Run as qemu user (matches KubeVirt virt-launcher)
-# OpenShift Virtualization Security Context:
-# - UID 107: qemu user (matches VM disk ownership in KubeVirt)
-# - GID 107: qemu group
-# - This matches how virt-launcher pods run
 # Note: Pod security context will override this to 107:107 explicitly
 USER 107
 

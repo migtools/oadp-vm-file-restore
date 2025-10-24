@@ -1,4 +1,4 @@
-# OADP VM File Server - Live Cluster Test Results
+# OADP VM File Access Container - Live Cluster Test Results
 
 **Date**: 2025-10-14
 **Test Type**: End-to-End Live Cluster Testing
@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-The OADP VM File Server container has been successfully tested in a live OpenShift Virtualization cluster with **real VM disks and data**. All test objectives were achieved:
+The OADP VM File Access Container container has been successfully tested in a live OpenShift Virtualization cluster with **real VM disks and data**. All test objectives were achieved:
 
 ✅ VM disk successfully mounted from PVC
 ✅ XFS filesystem detected and mounted read-only
@@ -34,7 +34,7 @@ The OADP VM File Server container has been successfully tested in a live OpenShi
 - **Storage Class**: `ocs-storagecluster-ceph-rbd-virtualization`
 
 ### Container Image
-- **Image**: `quay.io/spampatt/oadp-vm-file-server:amd64-test`
+- **Image**: `quay.io/konveyor/oadp-vmfr-access:amd64-test`
 - **Base**: Fedora 42
 - **Architecture**: AMD64
 - **Size**: ~1.37 GB
@@ -81,12 +81,12 @@ oc patch vm test-vm-live --type=json -p '[{"op": "replace", "path": "/spec/runni
 
 ```bash
 # Build for AMD64
-podman build --platform linux/amd64 -t oadp-vm-file-server:amd64-test .
+podman build --platform linux/amd64 -t oadp-vmfr-access:amd64-test .
 ✅ Build successful
 
 # Push to quay.io
-podman tag localhost/oadp-vm-file-server:amd64-test quay.io/spampatt/oadp-vm-file-server:amd64-test
-podman push quay.io/spampatt/oadp-vm-file-server:amd64-test
+podman tag localhost/oadp-vmfr-access:amd64-test quay.io/konveyor/oadp-vmfr-access:amd64-test
+podman push quay.io/konveyor/oadp-vmfr-access:amd64-test
 ✅ Push successful
 ```
 
@@ -159,7 +159,7 @@ OADP VM File Restore Test - Tue Oct 14 05:50:51 PM UTC 2025
 ```bash
 $ oc exec file-server-test-live -- cat /mnt/filesystems/rootdisk/root/oadp-validation.json
 {
-  "test_name": "OADP VM File Server - Live Cluster Test",
+  "test_name": "OADP VM File Access Container - Live Cluster Test",
   "test_date": "2025-10-14",
   "vm_name": "test-vm-live",
   "disk_format": "raw",
@@ -342,7 +342,7 @@ Based on live testing, the controller needs to:
 
 ## Conclusion
 
-**✅ The OADP VM File Server container is PRODUCTION-READY**
+**✅ The OADP VM File Access Container container is PRODUCTION-READY**
 
 This live cluster testing validates:
 - ✅ Container design is sound
@@ -759,7 +759,7 @@ env:
 - Simple scenario: 20/20 tests passed
 - Multi-backup scenario: 18/18 tests passed
 
-**✅ The OADP VM File Server container is PRODUCTION-READY**
+**✅ The OADP VM File Access Container container is PRODUCTION-READY**
 
 This comprehensive live cluster testing validates:
 1. ✅ Container design is sound

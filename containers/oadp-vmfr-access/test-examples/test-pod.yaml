@@ -22,7 +22,7 @@
 #   - VM created with test data (test-vm)
 #   - VM stopped (safe for read-only mounting)
 #   - PVC containing VM disk: test-vm-rootdisk
-#   - Container image pushed: quay.io/spampatt/oadp-vm-file-server:dev
+#   - Container image: quay.io/konveyor/oadp-vmfr-access:latest
 #
 # ==============================================================================
 
@@ -30,9 +30,9 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: file-server-test
-  namespace: shubh-oadp-vm-file-server-test
+  namespace: oadp-vmfr-access-test
   labels:
-    app: oadp-vm-file-server
+    app: oadp-vmfr-access
     test: real-vm-disk
 spec:
   # Add pod-level security context to access qemu-owned VM disk
@@ -45,7 +45,7 @@ spec:
   containers:
   - name: file-server
     # Our container with all the tools (libguestfs, qemu-img, FUSE, etc.)
-    image: quay.io/spampatt/oadp-vm-file-server:dev
+    image: quay.io/konveyor/oadp-vmfr-access:latest
     imagePullPolicy: Always
 
     # Run detect-and-mount.sh to automatically mount VM disk filesystem

@@ -1,6 +1,6 @@
 # VMFR Controller Integration Guide (Issue #7)
 
-This document provides a complete checklist and implementation guide for the VMFR (VirtualMachineFileRestore) controller to create file-serving pods using the `oadp-vm-file-server` container.
+This document provides a complete checklist and implementation guide for the VMFR (VirtualMachineFileRestore) controller to create file-serving pods using the `oadp-vmfr-access` container.
 
 **Based on:** Live cluster testing completed in Issue #6 (OpenShift Virtualization)
 
@@ -41,7 +41,7 @@ Before the controller creates a file-server pod, verify these prerequisites:
 
 ### ✅ Image Requirements
 
-- [ ] **Container image available:** `quay.io/spampatt/oadp-vm-file-server:dev` (or your registry)
+- [ ] **Container image available:** `quay.io/konveyor/oadp-vmfr-access:latest`
 - [ ] **Image pull secrets configured** (if using private registry)
 
 ---
@@ -57,7 +57,7 @@ metadata:
   name: <vmfr-name>-file-server  # e.g., "fedora-vm-restore-file-server"
   namespace: <target-namespace>
   labels:
-    app: oadp-vm-file-server
+    app: oadp-vmfr-access
     vmfr: <vmfr-cr-name>
     vm: <original-vm-name>
   ownerReferences:
@@ -262,7 +262,7 @@ env:
 ```yaml
 containers:
 - name: file-server
-  image: quay.io/spampatt/oadp-vm-file-server:dev
+  image: quay.io/konveyor/oadp-vmfr-access:latest
   imagePullPolicy: Always  # Use Always for :dev, IfNotPresent for tagged versions
 
   # Run detect-and-mount.sh to automatically mount all disks
@@ -447,7 +447,7 @@ metadata:
   name: vmfr-fedora-vm-file-server
   namespace: oadp-vm-restore
   labels:
-    app: oadp-vm-file-server
+    app: oadp-vmfr-access
     vmfr: fedora-vm-restore
     vm: fedora-vm
   ownerReferences:
@@ -469,7 +469,7 @@ spec:
 
   containers:
   - name: file-server
-    image: quay.io/spampatt/oadp-vm-file-server:dev
+    image: quay.io/konveyor/oadp-vmfr-access:latest
     imagePullPolicy: Always
 
     # Run detect-and-mount.sh to automatically mount all disks
@@ -636,6 +636,6 @@ oc delete vmfr test-vm-restore
 
 **Last Updated:** Based on live cluster testing completed in Issue #6 (October 2025)
 
-**Container Image Version:** `quay.io/spampatt/oadp-vm-file-server:dev` (tested and verified)
+**Container Image Version:** `quay.io/konveyor/oadp-vmfr-access:latest`
 
 **Status:** ✅ Ready for controller implementation

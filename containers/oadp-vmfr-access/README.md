@@ -1,4 +1,4 @@
-# OADP VM File Server Container
+# OADP VM File Access Container
 
 Design and create container with tools to access restored file systems
 
@@ -107,7 +107,7 @@ After researching KubeVirt's approach and VM filesystem requirements, we chose a
 
 ### Comparison with Velero Plugins
 
-| Aspect | Velero Plugins | OADP VM File Server |
+| Aspect | Velero Plugins | OADP VM File Access Container |
 |--------|---------------|---------------------|
 | **Use Case** | Multiple cloud providers (AWS, Azure, GCP, etc.) | Fixed set of filesystems (ext4, xfs, ntfs, etc.) |
 | **Extensibility Need** | High - new providers constantly added | Low - filesystems are well-established |
@@ -587,8 +587,8 @@ For the VMFR controller (Issue #7), when creating file-server pods:
 
 **Quick Start (Upstream - Fedora 42):**
 ```bash
-cd containers/file-server/
-podman build -t oadp-vm-file-server:latest .
+cd containers/oadp-vmfr-access/
+podman build -t oadp-vmfr-access:latest .
 ```
 
 **For complete build instructions** (including RHEL 9 downstream builds, CI/CD integration, and troubleshooting), see **[BUILD.md](BUILD.md)**.
@@ -600,7 +600,7 @@ podman build -t oadp-vm-file-server:latest .
 Run the included test script:
 
 ```bash
-cd containers/file-server/
+cd containers/oadp-vmfr-access/
 ./test-container.sh all
 ```
 
@@ -619,7 +619,7 @@ podman run -it --privileged \
   --device /dev/fuse \
   --device /dev/kvm \
   -v /path/to/disk-images:/mnt/volumes \
-  oadp-vm-file-server:latest /bin/bash
+  oadp-vmfr-access:latest /bin/bash
 ```
 
 **Note:**
@@ -649,19 +649,17 @@ ls -la /mnt/filesystems/
 ## Directory Structure
 
 ```
-containers/file-server/
+containers/oadp-vmfr-access/
 ├── Dockerfile                              # Upstream container (Fedora 42)
-├── Dockerfile.rhel                         # Downstream container (RHEL 9)
+├── konflux.Dockerfile                      # Downstream container (RHEL 9)
 ├── README.md                               # This file - overview and concepts
 ├── BUILD.md                                # Complete build instructions
 ├── TESTING.md                              # Comprehensive testing guide
 ├── CONTROLLER_INTEGRATION.md               # Integration guide for Issue #7
-├── TESTING-DEVICE-PLUGIN.md                # Detailed device plugin testing
-├── DEVICE-PLUGIN-TESTING-SUMMARY.md        # Testing summary
 ├── test-container.sh                       # Automated validation script
-├── test-pod.yaml                           # Working pod spec (live tested)
-├── test-vm.yaml                            # Test VM creation manifest
-├── oadp-vm-file-server-scc.yaml            # SecurityContextConstraints
+├── test-examples/
+│   ├── test-pod.yaml                       # Working pod spec (live tested)
+│   └── oadp-vmfr-access-scc.yaml           # SecurityContextConstraints
 └── scripts/
     ├── detect-and-mount.sh                 # Filesystem detection and mounting
     └── entrypoint.sh                       # Default container entrypoint
@@ -732,7 +730,7 @@ VMFR controller watches for FileRestore CR:
                    │
 ┌──────────────────▼───────────────────┐
 │ File Server Pod                      │
-│ - Image: oadp-vm-file-server:latest  │
+│ - Image: oadp-vmfr-access:latest     │
 │ - Volumes:                           │
 │   - PVC → /mnt/volumes/disk.img      │
 │   - /dev/fuse → FUSE device          │
@@ -874,7 +872,7 @@ spec:
       level: "s0:c468,c664"  # Must match PVC's SELinux label
   containers:
   - name: file-server
-    image: oadp-vm-file-server:latest
+    image: quay.io/konveyor/oadp-vmfr-access:latest
     command: ["/usr/local/bin/detect-and-mount.sh"]
     securityContext:
       privileged: true    # Required for /dev/kvm access
