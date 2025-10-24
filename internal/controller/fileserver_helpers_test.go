@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -540,4 +541,201 @@ func TestExtractPVCMountsFromVMFR(t *testing.T) {
 	// This test would require importing the API types
 	// Skipping for now as it's tested indirectly via integration tests
 	t.Skip("Requires full API types setup")
+}
+
+func TestBuildBackupPVCMapJSON(t *testing.T) {
+	t.Run("single PVC in single backup", func(t *testing.T) {
+		timestamp := metav1.Now()
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "test-pvc-1",
+				PVCNamespace:    "test-ns",
+				PVCUID:          "uid-123",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		// Verify it's valid JSON
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		// Verify structure
+		if len(jsonMap) != 1 {
+			t.Errorf("Expected 1 backup in map, got %d", len(jsonMap))
+		}
+
+		backupPVCs, exists := jsonMap["backup-1"]
+		if !exists {
+			t.Fatal("Expected backup-1 in map")
+		}
+
+		if len(backupPVCs) != 1 {
+			t.Errorf("Expected 1 PVC in backup-1, got %d", len(backupPVCs))
+		}
+
+		pvc := backupPVCs[0]
+		if pvc["name"] != "test-pvc-1" {
+			t.Errorf("Expected PVC name 'test-pvc-1', got '%s'", pvc["name"])
+		}
+		if pvc["path"] != "/dev/pvc-uid-123" {
+			t.Errorf("Expected path '/dev/pvc-uid-123', got '%s'", pvc["path"])
+		}
+		if pvc["timestamp"] == "" {
+			t.Error("Expected non-empty timestamp")
+		}
+	})
+
+	t.Run("multiple PVCs in same backup", func(t *testing.T) {
+		timestamp := metav1.Now()
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+			{
+				PVCName:         "pvc-2",
+				PVCUID:          "uid-2",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		backupPVCs := jsonMap["backup-1"]
+		if len(backupPVCs) != 2 {
+			t.Errorf("Expected 2 PVCs in backup-1, got %d", len(backupPVCs))
+		}
+
+		// Verify both PVCs are present
+		pvcNames := make(map[string]bool)
+		for _, pvc := range backupPVCs {
+			pvcNames[pvc["name"]] = true
+		}
+
+		if !pvcNames["pvc-1"] || !pvcNames["pvc-2"] {
+			t.Error("Expected both pvc-1 and pvc-2 in result")
+		}
+	})
+
+	t.Run("PVCs across multiple backups", func(t *testing.T) {
+		timestamp1 := metav1.Now()
+		timestamp2 := metav1.NewTime(timestamp1.Add(-24 * 3600 * 1e9)) // 1 day earlier
+
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp1,
+			},
+			{
+				PVCName:         "pvc-2",
+				PVCUID:          "uid-2",
+				BackupName:      "backup-2",
+				BackupTimestamp: &timestamp2,
+			},
+			{
+				PVCName:         "pvc-3",
+				PVCUID:          "uid-3",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp1,
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		// Should have 2 backups
+		if len(jsonMap) != 2 {
+			t.Errorf("Expected 2 backups in map, got %d", len(jsonMap))
+		}
+
+		// backup-1 should have 2 PVCs
+		if len(jsonMap["backup-1"]) != 2 {
+			t.Errorf("Expected 2 PVCs in backup-1, got %d", len(jsonMap["backup-1"]))
+		}
+
+		// backup-2 should have 1 PVC
+		if len(jsonMap["backup-2"]) != 1 {
+			t.Errorf("Expected 1 PVC in backup-2, got %d", len(jsonMap["backup-2"]))
+		}
+	})
+
+	t.Run("PVC with nil timestamp", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: nil, // nil timestamp
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		pvc := jsonMap["backup-1"][0]
+		if pvc["timestamp"] != "" {
+			t.Errorf("Expected empty timestamp for nil BackupTimestamp, got '%s'", pvc["timestamp"])
+		}
+	})
+
+	t.Run("empty PVC mounts list", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		// Should return valid empty JSON object
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		if len(jsonMap) != 0 {
+			t.Errorf("Expected empty map, got %d entries", len(jsonMap))
+		}
+	})
+
+	t.Run("device path format", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "abc-123-xyz",
+				BackupName: "backup-1",
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		json.Unmarshal([]byte(result), &jsonMap)
+
+		expectedPath := "/dev/pvc-abc-123-xyz"
+		actualPath := jsonMap["backup-1"][0]["path"]
+
+		if actualPath != expectedPath {
+			t.Errorf("Expected device path '%s', got '%s'", expectedPath, actualPath)
+		}
+	})
 }
