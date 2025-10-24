@@ -714,3 +714,113 @@ func TestErrUnsupportedBackup(t *testing.T) {
 		})
 	}
 }
+
+func TestSortRestoresByTimestamp(t *testing.T) {
+	reconciler := &VirtualMachineFileRestoreReconciler{}
+
+	t.Run("sorts by timestamp newest first", func(t *testing.T) {
+		time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+		time2 := metav1.NewTime(time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
+		time3 := metav1.NewTime(time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
+
+		restores := []oadpv1alpha1.RestoreInfo{
+			{VeleroRestoreName: "restore-1", Timestamp: &time1},
+			{VeleroRestoreName: "restore-3", Timestamp: &time3},
+			{VeleroRestoreName: "restore-2", Timestamp: &time2},
+		}
+
+		reconciler.sortRestoresByTimestamp(restores)
+
+		// Should be sorted newest first: time3, time2, time1
+		if restores[0].VeleroRestoreName != "restore-3" {
+			t.Errorf("Expected restore-3 first, got %s", restores[0].VeleroRestoreName)
+		}
+		if restores[1].VeleroRestoreName != "restore-2" {
+			t.Errorf("Expected restore-2 second, got %s", restores[1].VeleroRestoreName)
+		}
+		if restores[2].VeleroRestoreName != "restore-1" {
+			t.Errorf("Expected restore-1 third, got %s", restores[2].VeleroRestoreName)
+		}
+	})
+
+	t.Run("handles nil timestamps", func(t *testing.T) {
+		time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+		time2 := metav1.NewTime(time.Date(2025, 1, 2, 10, 0, 0, 0, time.UTC))
+
+		restores := []oadpv1alpha1.RestoreInfo{
+			{VeleroRestoreName: "restore-nil", Timestamp: nil},
+			{VeleroRestoreName: "restore-2", Timestamp: &time2},
+			{VeleroRestoreName: "restore-1", Timestamp: &time1},
+		}
+
+		reconciler.sortRestoresByTimestamp(restores)
+
+		// Non-nil timestamps should come before nil
+		if restores[0].Timestamp == nil {
+			t.Error("Expected non-nil timestamp first")
+		}
+		if restores[1].Timestamp == nil {
+			t.Error("Expected non-nil timestamp second")
+		}
+		if restores[2].Timestamp != nil {
+			t.Error("Expected nil timestamp last")
+		}
+	})
+
+	t.Run("handles empty list", func(t *testing.T) {
+		restores := []oadpv1alpha1.RestoreInfo{}
+		reconciler.sortRestoresByTimestamp(restores)
+		// Should not panic
+		if len(restores) != 0 {
+			t.Error("Expected empty list to remain empty")
+		}
+	})
+
+	t.Run("handles single element", func(t *testing.T) {
+		time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+		restores := []oadpv1alpha1.RestoreInfo{
+			{VeleroRestoreName: "restore-1", Timestamp: &time1},
+		}
+
+		reconciler.sortRestoresByTimestamp(restores)
+
+		if len(restores) != 1 {
+			t.Errorf("Expected 1 element, got %d", len(restores))
+		}
+		if restores[0].VeleroRestoreName != "restore-1" {
+			t.Errorf("Expected restore-1, got %s", restores[0].VeleroRestoreName)
+		}
+	})
+
+	t.Run("handles equal timestamps", func(t *testing.T) {
+		time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+
+		restores := []oadpv1alpha1.RestoreInfo{
+			{VeleroRestoreName: "restore-1", Timestamp: &time1},
+			{VeleroRestoreName: "restore-2", Timestamp: &time1},
+			{VeleroRestoreName: "restore-3", Timestamp: &time1},
+		}
+
+		reconciler.sortRestoresByTimestamp(restores)
+
+		// All timestamps equal, order may vary but should not panic
+		if len(restores) != 3 {
+			t.Errorf("Expected 3 elements, got %d", len(restores))
+		}
+	})
+
+	t.Run("handles all nil timestamps", func(t *testing.T) {
+		restores := []oadpv1alpha1.RestoreInfo{
+			{VeleroRestoreName: "restore-1", Timestamp: nil},
+			{VeleroRestoreName: "restore-2", Timestamp: nil},
+			{VeleroRestoreName: "restore-3", Timestamp: nil},
+		}
+
+		reconciler.sortRestoresByTimestamp(restores)
+
+		// Should not panic, all zero times are equal
+		if len(restores) != 3 {
+			t.Errorf("Expected 3 elements, got %d", len(restores))
+		}
+	})
+}
