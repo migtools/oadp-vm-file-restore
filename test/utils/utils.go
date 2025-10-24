@@ -132,20 +132,59 @@ func IsCertManagerCRDsInstalled() bool {
 	return false
 }
 
-// LoadImageToKindClusterWithName loads a local docker image to the kind cluster
+// LoadImageToKindClusterWithName loads a local docker/podman image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
 	cluster := defaultKindCluster
 	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
 		cluster = v
 	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
 	kindBinary := defaultKindBinary
 	if v, ok := os.LookupEnv("KIND"); ok {
 		kindBinary = v
 	}
-	cmd := exec.Command(kindBinary, kindOptions...)
-	_, err := Run(cmd)
-	return err
+
+	// Determine which container tool is being used
+	containerTool := "docker"
+	if v, ok := os.LookupEnv("CONTAINER_TOOL"); ok {
+		containerTool = v
+	} else {
+		// Auto-detect: check if docker or podman is available
+		if _, err := exec.LookPath("docker"); err == nil {
+			containerTool = "docker"
+		} else if _, err := exec.LookPath("podman"); err == nil {
+			containerTool = "podman"
+		}
+	}
+
+	// For podman, we need to save the image to a tar and load from archive
+	// For docker, we can use the direct docker-image method
+	if containerTool == "podman" {
+		// Create temporary tar file (sanitize name: replace / and : with -)
+		sanitizedName := strings.ReplaceAll(strings.ReplaceAll(name, "/", "-"), ":", "-")
+		tarFile := fmt.Sprintf("/tmp/%s.tar", sanitizedName)
+		defer func() { _ = os.Remove(tarFile) }()
+
+		// Save image to tar using podman
+		saveCmd := exec.Command("podman", "save", "-o", tarFile, name)
+		if _, err := Run(saveCmd); err != nil {
+			return fmt.Errorf("failed to save image with podman: %w", err)
+		}
+
+		// Load tar into kind
+		loadCmd := exec.Command(kindBinary, "load", "image-archive", tarFile, "--name", cluster)
+		if _, err := Run(loadCmd); err != nil {
+			return fmt.Errorf("failed to load image archive into kind: %w", err)
+		}
+	} else {
+		// Docker: use direct docker-image loading
+		kindOptions := []string{"load", "docker-image", name, "--name", cluster}
+		cmd := exec.Command(kindBinary, kindOptions...)
+		if _, err := Run(cmd); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // GetNonEmptyLines converts given command output string into individual objects
