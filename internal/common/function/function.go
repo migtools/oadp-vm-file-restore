@@ -231,40 +231,6 @@ func min(a, b int) int {
 	return b
 }
 
-// createCredentialsSecretBase creates a Secret with common VMFR metadata using generateName.
-// Kubernetes will automatically append a random suffix to ensure uniqueness.
-// The secret can be looked up later using the VMFROriginUUIDLabel and CredentialTypeLabel.
-func createCredentialsSecretBase(
-	generateNamePrefix string,
-	namespace string,
-	credentialType string, // constant.CredentialTypeSSH or constant.CredentialTypeFileBrowser
-	vmfrName string,
-	vmfrNamespace string,
-	vmfrUID apitypes.UID,
-) *corev1.Secret {
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: generateNamePrefix,
-			Namespace:    namespace,
-			Labels: map[string]string{
-				constant.ManagedByLabel:      constant.ManagedByLabelValue,
-				constant.VMFROriginUUIDLabel: string(vmfrUID),
-				constant.CredentialTypeLabel: credentialType,
-			},
-			Annotations: map[string]string{
-				constant.VMFROriginNameAnnotation:      vmfrName,
-				constant.VMFROriginNamespaceAnnotation: vmfrNamespace,
-				"oadp.openshift.io/generated-by":       "oadp-vm-file-restore-controller",
-			},
-			// NOTE: No OwnerReferences - VMFR may be in different namespace than secret
-			// (e.g., VMFR in openshift-adp, secret in restore namespace)
-			// Cross-namespace owner references are rejected by Kubernetes
-			// Use labels + finalizer for cleanup instead
-		},
-		Type: corev1.SecretTypeOpaque,
-	}
-}
-
 // CreateSSHCredentialsSecret creates a Kubernetes Secret containing SSH credentials.
 // Uses generateName for automatic unique naming - Kubernetes appends a random suffix.
 // The Secret will contain:

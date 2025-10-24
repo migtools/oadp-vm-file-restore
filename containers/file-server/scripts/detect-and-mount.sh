@@ -63,8 +63,9 @@ set -uo pipefail
 # Default mount points
 # VOLUME_MOUNT_DIR: Where restored PVCs are mounted (controller provides this)
 # FS_MOUNT_DIR: Where VM filesystems will be mounted for user access
+# Changed from /mnt/filesystems to /restores for direct, organized access
 VOLUME_MOUNT_DIR="${VOLUME_MOUNT_DIR:-/mnt/volumes}"
-FS_MOUNT_DIR="${FS_MOUNT_DIR:-/mnt/filesystems}"
+FS_MOUNT_DIR="${FS_MOUNT_DIR:-/restores}"
 
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
@@ -248,14 +249,16 @@ process_disk_image() {
 # mount_with_structure - Mount backups using BACKUP_PVC_MAP structure
 #
 # Parses BACKUP_PVC_MAP environment variable and mounts each backup/PVC
-# in a structured directory layout:
-#   /mnt/filesystems/{backup-name}/{pvc-name}/
+# in an organized directory layout:
+#   /restores/<date>/<backup-name>/<pvc-name>/
+#
+# Example: /restores/2025-10-24/test-vm-backup-20250115/test-vm-disk-1/
 #
 # BACKUP_PVC_MAP format (JSON):
 #   {
 #     "backup-20240115": [
-#       {"name": "rootdisk", "path": "/mnt/volumes/backup-20240115/rootdisk"},
-#       {"name": "datadisk", "path": "/mnt/volumes/backup-20240115/datadisk"}
+#       {"name": "rootdisk", "path": "/dev/pvc-xxx", "timestamp": "2025-10-24T01:14:25Z"},
+#       {"name": "datadisk", "path": "/dev/pvc-yyy", "timestamp": "2025-10-24T01:14:25Z"}
 #     ],
 #     "backup-20240120": [...]
 #   }
@@ -263,43 +266,44 @@ process_disk_image() {
 # Returns:
 #   Exit code 0 on success
 mount_with_structure() {
-    log "Using structured mounting with BACKUP_PVC_MAP"
+    log "Using organized mounting with BACKUP_PVC_MAP"
+    log "Mounting at: /restores/<date>/<backup>/<pvc>/"
 
     local success_count=0
     local fail_count=0
-    local metadata_backups="[]"
 
-    # Parse JSON using Python (more reliable than jq for complex JSON)
-    python3 <<'PYEOF'
+    # Parse JSON and extract: backup_name, pvc_name, pvc_path, date
+    python3 <<'PYEOF' | while IFS='|' read -r backup_name pvc_name pvc_path backup_date; do
 import json, os, sys
+from datetime import datetime
 
-backup_map_str = os.environ.get('BACKUP_PVC_MAP', '{}')
 try:
-    backup_map = json.loads(backup_map_str)
+    backup_map = json.loads(os.environ.get('BACKUP_PVC_MAP', '{}'))
     for backup_name, pvcs in backup_map.items():
         for pvc in pvcs:
-            print(f"{backup_name}|{pvc['name']}|{pvc['path']}")
+            # Extract date from timestamp (YYYY-MM-DD)
+            backup_timestamp = pvc.get('timestamp', '')
+            if backup_timestamp:
+                try:
+                    dt = datetime.fromisoformat(backup_timestamp.replace('Z', '+00:00'))
+                    backup_date = dt.strftime('%Y-%m-%d')
+                except:
+                    backup_date = datetime.now().strftime('%Y-%m-%d')
+            else:
+                backup_date = datetime.now().strftime('%Y-%m-%d')
+
+            print(f"{backup_name}|{pvc.get('name', 'unknown')}|{pvc.get('path', '')}|{backup_date}")
 except Exception as e:
     print(f"ERROR: Failed to parse BACKUP_PVC_MAP: {e}", file=sys.stderr)
     sys.exit(1)
 PYEOF
 
-    local parse_status=$?
-    if [ $parse_status -ne 0 ]; then
-        error "Failed to parse BACKUP_PVC_MAP environment variable"
-        return 1
-    fi
+        # Skip if parsing failed
+        if [[ -z "$backup_name" ]] || [[ -z "$pvc_name" ]] || [[ -z "$pvc_path" ]]; then
+            continue
+        fi
 
-    # Read parsed output and mount each disk
-    python3 <<'PYEOF' | while IFS='|' read -r backup_name pvc_name pvc_path; do
-import json, os
-backup_map = json.loads(os.environ.get('BACKUP_PVC_MAP', '{}'))
-for backup_name, pvcs in backup_map.items():
-    for pvc in pvcs:
-        print(f"{backup_name}|{pvc['name']}|{pvc['path']}")
-PYEOF
-
-        log "Processing backup: $backup_name, PVC: $pvc_name"
+        log "Processing: $backup_date/$backup_name/$pvc_name"
 
         # Find disk image in the PVC path (can be regular file or block device)
         local disk_image=""
@@ -334,35 +338,32 @@ PYEOF
             continue
         }
 
-        # Create mount point: /mnt/filesystems/{backup}/{pvc}/
-        local mount_point="$FS_MOUNT_DIR/$backup_name/$pvc_name"
+        # Create mount point: /restores/<date>/<backup>/<pvc>/
+        local mount_point="$FS_MOUNT_DIR/$backup_date/$backup_name/$pvc_name"
         mkdir -p "$mount_point"
 
-        # Mount the disk
-        if mount_disk_with_guestmount "$disk_image" "$mount_point" "$backup_name/$pvc_name"; then
+        # Mount the disk directly at the organized path
+        if mount_disk_with_guestmount "$disk_image" "$mount_point" "$backup_date/$backup_name/$pvc_name"; then
             ((success_count++))
-            log "✓ Mounted $backup_name/$pvc_name successfully"
+            log "✓ Mounted $backup_date/$backup_name/$pvc_name successfully"
         else
             ((fail_count++))
-            error "Failed to mount $backup_name/$pvc_name"
+            error "Failed to mount $backup_date/$backup_name/$pvc_name"
         fi
     done
 
-    log "Structured mounting completed: $success_count successful, $fail_count failed"
+    log "Organized mounting completed: $success_count successful, $fail_count failed"
 
     # Generate METADATA.json
     generate_metadata
-
-    # Create dual-path directory structure for SSH browsing
-    create_dual_path_structure
 
     return 0
 }
 
 # generate_metadata - Create METADATA.json with mount information
 #
-# Generates a JSON file at /mnt/filesystems/METADATA.json with details
-# about all mounted backups and PVCs.
+# Generates a JSON file at /restores/METADATA.json with details
+# about all mounted backups and PVCs organized by date.
 #
 generate_metadata() {
     local metadata_file="$FS_MOUNT_DIR/METADATA.json"
@@ -371,14 +372,16 @@ generate_metadata() {
 
     # Use Python to generate JSON metadata
     python3 <<'PYEOF'
-import json, os, sys, subprocess
+import json, os, sys
 from datetime import datetime
 
 backup_map = json.loads(os.environ.get('BACKUP_PVC_MAP', '{}'))
-fs_mount_dir = os.environ.get('FS_MOUNT_DIR', '/mnt/filesystems')
+fs_mount_dir = os.environ.get('FS_MOUNT_DIR', '/restores')
 
 metadata = {
     "mounted_at": datetime.now().isoformat(),
+    "mount_structure": "date-organized",
+    "path_format": "/restores/<date>/<backup>/<pvc>/",
     "backups": [],
     "statistics": {
         "total_backups": len(backup_map),
@@ -395,7 +398,19 @@ for backup_name, pvcs in backup_map.items():
     }
 
     for pvc in pvcs:
-        mount_path = f"{fs_mount_dir}/{backup_name}/{pvc['name']}"
+        # Extract date from timestamp
+        backup_timestamp = pvc.get('timestamp', '')
+        if backup_timestamp:
+            try:
+                dt = datetime.fromisoformat(backup_timestamp.replace('Z', '+00:00'))
+                backup_date = dt.strftime('%Y-%m-%d')
+            except:
+                backup_date = datetime.now().strftime('%Y-%m-%d')
+        else:
+            backup_date = datetime.now().strftime('%Y-%m-%d')
+
+        # Build mount path: /restores/<date>/<backup>/<pvc>/
+        mount_path = f"{fs_mount_dir}/{backup_date}/{backup_name}/{pvc['name']}"
 
         # Check if mount successful (directory exists and not empty)
         mount_status = "success" if os.path.exists(mount_path) and os.listdir(mount_path) else "failed"
@@ -409,6 +424,7 @@ for backup_name, pvcs in backup_map.items():
             "pvc_name": pvc['name'],
             "source_path": pvc['path'],
             "mount_path": mount_path,
+            "backup_date": backup_date,
             "mount_status": mount_status
         }
 
@@ -501,119 +517,6 @@ auto_mount_all() {
     # List mounted filesystems
     log "Currently mounted filesystems:"
     mount | grep "$FS_MOUNT_DIR" || true
-
-    # Create dual-path directory structure for SSH browsing
-    create_dual_path_structure
-}
-
-# create_dual_path_structure - Create /restores_by_name and /restores_by_date directory structure
-#
-# This function creates a dual-path symlink structure for browsing restored filesystems:
-#   1. /restores_by_name/<backup-name>/<pvc-uid> -> /mnt/filesystems/pvc-<pvc-uid>/
-#   2. /restores_by_date/<date>/<pvc-name> -> /restores_by_name/<backup-name>/<pvc-uid>
-#
-# Requires BACKUP_PVC_MAP environment variable with backup metadata in JSON format:
-#   {"backup-name": [{"name": "pvc-name", "path": "/dev/pvc-{uid}", "timestamp": "2025-10-23T18:40:00Z"}]}
-#
-# Returns:
-#   Exit code 0 on success
-create_dual_path_structure() {
-    local restores_by_name="/restores_by_name"
-    local restores_by_date="/restores_by_date"
-
-    # Check if BACKUP_PVC_MAP is available
-    if [[ -z "$BACKUP_PVC_MAP" ]]; then
-        log "BACKUP_PVC_MAP not set, skipping dual-path structure creation"
-        return 0
-    fi
-
-    log "Creating dual-path directory structure for SSH browsing"
-
-    # Create base directories
-    mkdir -p "$restores_by_name" "$restores_by_date"
-
-    # Parse BACKUP_PVC_MAP using Python
-    python3 <<'PYEOF' | while IFS='|' read -r backup_name pvc_name pvc_uid backup_date; do
-import json, os, sys
-from datetime import datetime
-
-try:
-    backup_map = json.loads(os.environ.get('BACKUP_PVC_MAP', '{}'))
-    for backup_name, pvcs in backup_map.items():
-        for pvc in pvcs:
-            # Extract PVC UID from path
-            pvc_path = pvc.get('path', '')
-            if '/dev/pvc-' in pvc_path:
-                pvc_uid = pvc_path.split('/dev/pvc-')[-1]
-            elif pvc_path.startswith('pvc-'):
-                pvc_uid = pvc_path[4:]
-            else:
-                # Fallback: use last component of path
-                pvc_uid = pvc_path.rstrip('/').split('/')[-1]
-                if pvc_uid.startswith('pvc-'):
-                    pvc_uid = pvc_uid[4:]
-
-            # Format backup timestamp as YYYY-MM-DD
-            backup_timestamp = pvc.get('timestamp', '')
-            if backup_timestamp:
-                try:
-                    dt = datetime.fromisoformat(backup_timestamp.replace('Z', '+00:00'))
-                    backup_date = dt.strftime('%Y-%m-%d')
-                except:
-                    backup_date = datetime.now().strftime('%Y-%m-%d')
-            else:
-                backup_date = datetime.now().strftime('%Y-%m-%d')
-
-            print(f"{backup_name}|{pvc.get('name', 'unknown')}|{pvc_uid}|{backup_date}")
-except Exception as e:
-    print(f"ERROR: Failed to parse BACKUP_PVC_MAP: {e}", file=sys.stderr)
-    sys.exit(1)
-PYEOF
-
-        # Skip if parsing failed
-        if [[ -z "$backup_name" ]] || [[ -z "$pvc_uid" ]]; then
-            continue
-        fi
-
-        # Source mount is at /mnt/filesystems/{backup-name}/{pvc-name}/
-        local source_mount="$FS_MOUNT_DIR/$backup_name/$pvc_name"
-
-        # Check if source mount exists
-        if [[ ! -d "$source_mount" ]]; then
-            log "Warning: Source mount $source_mount does not exist, skipping"
-            continue
-        fi
-
-        # Create /restores_by_name/<backup-name>/<pvc-name> -> /mnt/filesystems/{backup-name}/{pvc-name}/
-        local backup_dir="$restores_by_name/$backup_name"
-        local name_symlink="$backup_dir/$pvc_name"
-
-        if [[ ! -d "$backup_dir" ]]; then
-            mkdir -p "$backup_dir"
-            log "Created directory: $backup_dir"
-        fi
-
-        if [[ ! -e "$name_symlink" ]]; then
-            ln -sf "$source_mount" "$name_symlink"
-            log "Created symlink: $name_symlink -> $source_mount"
-        fi
-
-        # Create /restores_by_date/<date>/<pvc-name> -> /restores_by_name/<backup-name>/<pvc-uid>
-        local date_dir="$restores_by_date/$backup_date"
-        local date_symlink="$date_dir/$pvc_name"
-
-        if [[ ! -d "$date_dir" ]]; then
-            mkdir -p "$date_dir"
-            log "Created directory: $date_dir"
-        fi
-
-        if [[ ! -e "$date_symlink" ]]; then
-            ln -sf "$name_symlink" "$date_symlink"
-            log "Created symlink: $date_symlink -> $name_symlink"
-        fi
-    done
-
-    log "Completed dual-path directory structure creation"
 }
 
 # main - Entry point for the script
@@ -636,8 +539,8 @@ main() {
 
     # Check if BACKUP_PVC_MAP is provided (controller mode)
     if [[ -n "${BACKUP_PVC_MAP:-}" ]]; then
-        log "Mode: Structured mounting (BACKUP_PVC_MAP provided)"
-        log "Creating directory structure: /mnt/filesystems/{backup}/{pvc}/"
+        log "Mode: Organized mounting (BACKUP_PVC_MAP provided)"
+        log "Creating directory structure: /restores/<date>/<backup>/<pvc>/"
         mount_with_structure
     elif [[ $# -eq 0 ]]; then
         log "Mode: Auto-discovery (scanning $VOLUME_MOUNT_DIR)"
@@ -653,7 +556,8 @@ main() {
     log "=========================================="
     log "Mounting operations completed"
     log "=========================================="
-    log "Filesystems mounted at: $FS_MOUNT_DIR"
+    log "Filesystems mounted at: $FS_MOUNT_DIR/<date>/<backup>/<pvc>/"
+    log "Example: $FS_MOUNT_DIR/2025-10-24/test-vm-backup-20250115/test-vm-disk-1/"
     log ""
     log "To access files:"
     log "  kubectl exec <pod> -- ls -la $FS_MOUNT_DIR/"

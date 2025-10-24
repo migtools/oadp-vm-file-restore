@@ -136,12 +136,15 @@ const (
 	FileServerPodPrefix      = "vmfr-fileserver"
 	FileServerServicePrefix  = "vmfr-service"
 
-	// VM file server container image for mounting VM disk images
-	VMFileServerImage = "quay.io/spampatt/oadp-vm-file-server:dual-path-fix"
+	// Container images for file serving
+	VMFileServerImage       = "quay.io/migi/oadp-vm-file-server:latest"       // Main VM file server for mounting VM disk images
+	SSHSidecarImage         = "quay.io/migtools/oadp-vmfr-sshd:latest"        // SSH sidecar for SSH/SFTP/SCP/rsync access
+	FileBrowserSidecarImage = "quay.io/migtools/oadp-vmfr-filebrowser:latest" // FileBrowser sidecar for HTTPS web-based file browser
 
 	// Default ports for file access methods
-	DefaultSSHPort         = 22
-	DefaultFileBrowserPort = 443
+	// Using unprivileged ports (>1024) since sidecars run as non-root
+	DefaultSSHPort         = 2222 // SSH on unprivileged port (standard 22 requires root)
+	DefaultFileBrowserPort = 8443 // HTTPS on unprivileged port (standard 443 requires root)
 
 	// Default usernames for file access methods
 	DefaultSSHUsername         = "oadp"

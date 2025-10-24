@@ -92,14 +92,8 @@ func TestBuildFileServerPodSpec_DefaultMainContainer(t *testing.T) {
 			t.Fatal("Pod has no volumes")
 		}
 
-		// Verify dual-path init container exists
-		if len(pod.Spec.InitContainers) == 0 {
-			t.Fatal("Pod has no init containers for dual-path setup")
-		}
-		initContainer := pod.Spec.InitContainers[0]
-		if initContainer.Name != "setup-dual-path-symlinks" {
-			t.Errorf("Expected init container 'setup-dual-path-symlinks', got '%s'", initContainer.Name)
-		}
+		// Note: Dual-path init containers have been removed in the new architecture
+		// The new implementation uses internal mounts with mount propagation instead
 	})
 }
 
@@ -139,7 +133,7 @@ func TestBuildFileServerPodSpec_SSHSidecar(t *testing.T) {
 		// Find SSH container
 		var sshContainer *corev1.Container
 		for i := range pod.Spec.Containers {
-			if pod.Spec.Containers[i].Name == "ssh-server" {
+			if pod.Spec.Containers[i].Name == "sshd" {
 				sshContainer = &pod.Spec.Containers[i]
 				break
 			}
@@ -150,22 +144,12 @@ func TestBuildFileServerPodSpec_SSHSidecar(t *testing.T) {
 		}
 
 		// Verify SSH container image
-		if sshContainer.Image != "lscr.io/linuxserver/openssh-server:latest" {
-			t.Errorf("Unexpected SSH image: %s", sshContainer.Image)
+		if sshContainer.Image != constant.SSHSidecarImage {
+			t.Errorf("Unexpected SSH image: %s (expected %s)", sshContainer.Image, constant.SSHSidecarImage)
 		}
 
-		// Verify SSH init container exists
-		var sshInitContainer *corev1.Container
-		for i := range pod.Spec.InitContainers {
-			if pod.Spec.InitContainers[i].Name == "setup-ssh-credentials" {
-				sshInitContainer = &pod.Spec.InitContainers[i]
-				break
-			}
-		}
-
-		if sshInitContainer == nil {
-			t.Fatal("SSH init container not found")
-		}
+		// Note: SSH init containers have been removed in the new architecture
+		// The new implementation uses inline initialization scripts instead
 	})
 }
 
@@ -215,22 +199,12 @@ func TestBuildFileServerPodSpec_FileBrowserSidecar(t *testing.T) {
 		}
 
 		// Verify FileBrowser container image
-		if fbContainer.Image != "filebrowser/filebrowser:latest" {
-			t.Errorf("Unexpected FileBrowser image: %s", fbContainer.Image)
+		if fbContainer.Image != constant.FileBrowserSidecarImage {
+			t.Errorf("Unexpected FileBrowser image: %s (expected %s)", fbContainer.Image, constant.FileBrowserSidecarImage)
 		}
 
-		// Verify FileBrowser init container exists
-		var fbInitContainer *corev1.Container
-		for i := range pod.Spec.InitContainers {
-			if pod.Spec.InitContainers[i].Name == "setup-filebrowser" {
-				fbInitContainer = &pod.Spec.InitContainers[i]
-				break
-			}
-		}
-
-		if fbInitContainer == nil {
-			t.Fatal("FileBrowser init container not found")
-		}
+		// Note: FileBrowser init containers have been removed in the new architecture
+		// The new implementation uses inline initialization scripts instead
 	})
 }
 
@@ -280,7 +254,7 @@ func TestBuildFileServerPodSpec_BothSidecars(t *testing.T) {
 			containerNames[container.Name] = true
 		}
 
-		expectedContainers := []string{"file-server", "ssh-server", "filebrowser"}
+		expectedContainers := []string{"file-server", "sshd", "filebrowser"}
 		for _, name := range expectedContainers {
 			if !containerNames[name] {
 				t.Errorf("Missing container: %s", name)
