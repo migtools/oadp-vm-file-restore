@@ -3114,6 +3114,572 @@ func mustParseQuantity(s string) resource.Quantity {
 	return q
 }
 
+func TestMonitorVeleroRestores(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	ctx := context.Background()
+
+	time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+
+	tests := []struct {
+		name                string
+		vmfr                *oadpv1alpha1.VirtualMachineFileRestore
+		existingRestores    []*velerov1api.Restore
+		expectedCompleted   int
+		expectedFailed      int
+		expectedInProgress  int
+		expectedUpdated     bool
+		expectError         bool
+		errorContains       string
+		validateResults     func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore)
+	}{
+		{
+			name: "no Velero Restores found returns error",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+			},
+			existingRestores:   []*velerov1api.Restore{},
+			expectError:        true,
+			errorContains:      "no Velero Restores found",
+			expectedCompleted:  0,
+			expectedFailed:     0,
+			expectedInProgress: 0,
+			expectedUpdated:    false,
+		},
+		{
+			name: "single completed restore updates status",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseCompleted,
+					},
+				},
+			},
+			expectedCompleted:  1,
+			expectedFailed:     0,
+			expectedInProgress: 0,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				if vmfr.Status.PVCRestores[0].Restores[0].Phase != velerov1api.RestorePhaseCompleted {
+					t.Errorf("Expected phase Completed, got %s", vmfr.Status.PVCRestores[0].Restores[0].Phase)
+				}
+			},
+		},
+		{
+			name: "finalizing restore treated as completed",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseFinalizing,
+					},
+				},
+			},
+			expectedCompleted:  1,
+			expectedFailed:     0,
+			expectedInProgress: 0,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// Finalizing should be normalized to Completed
+				if vmfr.Status.PVCRestores[0].Restores[0].Phase != velerov1api.RestorePhaseCompleted {
+					t.Errorf("Expected phase Completed (normalized from Finalizing), got %s", vmfr.Status.PVCRestores[0].Restores[0].Phase)
+				}
+			},
+		},
+		{
+			name: "failed restore updates count and status",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseFailed,
+					},
+				},
+			},
+			expectedCompleted:  0,
+			expectedFailed:     1,
+			expectedInProgress: 0,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				if vmfr.Status.PVCRestores[0].Restores[0].Phase != velerov1api.RestorePhaseFailed {
+					t.Errorf("Expected phase Failed, got %s", vmfr.Status.PVCRestores[0].Restores[0].Phase)
+				}
+			},
+		},
+		{
+			name: "in-progress restore updates count",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseInProgress,
+					},
+				},
+			},
+			expectedCompleted:  0,
+			expectedFailed:     0,
+			expectedInProgress: 1,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				if vmfr.Status.PVCRestores[0].Restores[0].Phase != velerov1api.RestorePhaseInProgress {
+					t.Errorf("Expected phase InProgress, got %s", vmfr.Status.PVCRestores[0].Restores[0].Phase)
+				}
+			},
+		},
+		{
+			name: "multiple restores with mixed phases",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+								{
+									VeleroBackupName:      "backup-2",
+									VeleroRestoreName:     "restore-2",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+								{
+									VeleroBackupName:      "backup-3",
+									VeleroRestoreName:     "restore-3",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseCompleted,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-2",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-2",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseFailed,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-3",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-3",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseInProgress,
+					},
+				},
+			},
+			expectedCompleted:  1,
+			expectedFailed:     1,
+			expectedInProgress: 1,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				if vmfr.Status.PVCRestores[0].Restores[0].Phase != velerov1api.RestorePhaseCompleted {
+					t.Errorf("Expected restore-1 phase Completed, got %s", vmfr.Status.PVCRestores[0].Restores[0].Phase)
+				}
+				if vmfr.Status.PVCRestores[0].Restores[1].Phase != velerov1api.RestorePhaseFailed {
+					t.Errorf("Expected restore-2 phase Failed, got %s", vmfr.Status.PVCRestores[0].Restores[1].Phase)
+				}
+				if vmfr.Status.PVCRestores[0].Restores[2].Phase != velerov1api.RestorePhaseInProgress {
+					t.Errorf("Expected restore-3 phase InProgress, got %s", vmfr.Status.PVCRestores[0].Restores[2].Phase)
+				}
+			},
+		},
+		{
+			name: "skips synthetic PVC entries",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      constant.BackupLevelFailurePVCName, // Synthetic entry
+								PVCNamespace: "vm-ns",
+								PVCUID:       "synthetic-uid",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName: "backup-1",
+									State:            string(oadptypes.BackupDiscoveryStateBackupDeleted),
+									Timestamp:        &time1,
+								},
+							},
+						},
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-2",
+									VeleroRestoreName:     "restore-2",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-2",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-2",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseCompleted,
+					},
+				},
+			},
+			expectedCompleted:  1,
+			expectedFailed:     0,
+			expectedInProgress: 0,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// Synthetic entry should not be updated
+				if vmfr.Status.PVCRestores[0].PVCName != constant.BackupLevelFailurePVCName {
+					t.Error("Expected first entry to be synthetic")
+				}
+				// Real PVC should be updated
+				if vmfr.Status.PVCRestores[1].Restores[0].Phase != velerov1api.RestorePhaseCompleted {
+					t.Errorf("Expected real PVC phase Completed, got %s", vmfr.Status.PVCRestores[1].Restores[0].Phase)
+				}
+			},
+		},
+		{
+			name: "populates restore metadata if missing",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName: "backup-1",
+									// Missing VeleroRestoreName and VeleroRestoreNamespace
+									State:     string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp: &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseCompleted,
+					},
+				},
+			},
+			expectedCompleted:  1,
+			expectedFailed:     0,
+			expectedInProgress: 0,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				if vmfr.Status.PVCRestores[0].Restores[0].VeleroRestoreName != "restore-1" {
+					t.Errorf("Expected VeleroRestoreName to be populated with 'restore-1', got '%s'", vmfr.Status.PVCRestores[0].Restores[0].VeleroRestoreName)
+				}
+				if vmfr.Status.PVCRestores[0].Restores[0].VeleroRestoreNamespace != "openshift-adp" {
+					t.Errorf("Expected VeleroRestoreNamespace to be 'openshift-adp', got '%s'", vmfr.Status.PVCRestores[0].Restores[0].VeleroRestoreNamespace)
+				}
+				if vmfr.Status.PVCRestores[0].Restores[0].Phase != velerov1api.RestorePhaseCompleted {
+					t.Errorf("Expected phase Completed, got %s", vmfr.Status.PVCRestores[0].Restores[0].Phase)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{tt.vmfr}
+			for _, restore := range tt.existingRestores {
+				objects = append(objects, restore)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: "openshift-adp",
+			}
+
+			completed, failed, inProgress, statusUpdated, err := reconciler.monitorVeleroRestores(ctx, zap.New(), tt.vmfr)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+			}
+
+			if completed != tt.expectedCompleted {
+				t.Errorf("Expected completed=%d, got %d", tt.expectedCompleted, completed)
+			}
+			if failed != tt.expectedFailed {
+				t.Errorf("Expected failed=%d, got %d", tt.expectedFailed, failed)
+			}
+			if inProgress != tt.expectedInProgress {
+				t.Errorf("Expected inProgress=%d, got %d", tt.expectedInProgress, inProgress)
+			}
+			if statusUpdated != tt.expectedUpdated {
+				t.Errorf("Expected statusUpdated=%v, got %v", tt.expectedUpdated, statusUpdated)
+			}
+
+			if tt.validateResults != nil {
+				tt.validateResults(t, tt.vmfr)
+			}
+		})
+	}
+}
+
 func TestCreateVeleroRestores(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = oadpv1alpha1.AddToScheme(scheme)
