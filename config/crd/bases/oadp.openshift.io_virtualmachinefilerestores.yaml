@@ -133,6 +133,9 @@ spec:
                         type: string
                     type: object
                 type: object
+                x-kubernetes-validations:
+                - message: At least one of ssh or fileBrowser must be specified
+                  rule: has(self.ssh) || has(self.fileBrowser)
               namespacePrefix:
                 description: |-
                   NamespacePrefix specifies a prefix for automatically generated temporary namespaces.

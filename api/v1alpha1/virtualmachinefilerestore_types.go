@@ -96,6 +96,7 @@ type VirtualMachineFileRestoreSpec struct {
 }
 
 // FileAccessSpec defines the file access methods available for the restored files
+// +kubebuilder:validation:XValidation:rule="has(self.ssh) || has(self.fileBrowser)",message="At least one of ssh or fileBrowser must be specified"
 type FileAccessSpec struct {
 	// SSH provides read-only access to restored files via chrooted OpenSSH.
 	// Supports SFTP, SCP, and rsync for file transfer only (no interactive shell access).

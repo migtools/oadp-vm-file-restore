@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"strings"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -96,8 +95,8 @@ type FileServerPodConfig struct {
 
 	// PVCMounts is the list of PVCs to mount in the file server
 	// These will be mounted in all containers (main + sidecars) at:
-	// - /restores_by_name/<backup-name>/<pvc-uid>
-	// - /restores_by_date/<date>/<pvc-name> (via symlinks)
+	// - /restores/<date>/<backup-name>/<pvc-name>/
+	// Example: /restores/2025-10-24/test-vm-backup-20250115/test-vm-disk-1/
 	PVCMounts []PVCMountInfo
 
 	// MainContainer is the primary container that mounts the PVCs
@@ -113,10 +112,9 @@ type FileServerPodConfig struct {
 	// If nil, FileBrowser access is disabled
 	FileBrowserAccess *FileBrowserAccessConfig
 
-	// EnableDualPathAccess creates symlinks for dual-path PVC access
-	// If true, an init container creates symlinks:
-	// - /restores_by_name/<backup>/<uid> (actual mount)
-	// - /restores_by_date/<date>/<name> (symlink)
+	// EnableDualPathAccess is deprecated and no longer used
+	// Paths are now organized as: /restores/<date>/<backup>/<pvc-name>/
+	// Kept for backward compatibility but has no effect
 	EnableDualPathAccess bool
 
 	// UseInternalMounts enables the main container to perform internal mount(2) syscalls
@@ -191,26 +189,21 @@ type ServiceConfig struct {
 // - Main container handles primary file access (default: busybox HTTP server)
 // - SSH sidecar (optional): provides SSH/SFTP/SCP/rsync access
 // - FileBrowser sidecar (optional): provides HTTPS web-based file browser
-// - PVCs are mounted at dual paths for flexible access (via symlinks)
 //
 // Mount modes:
 // 1. Kubernetes-managed (UseInternalMounts=false, default):
-//   - PVCs mounted by kubelet at /restores_by_name/<backup>/<uid>
+//   - PVCs mounted by kubelet at /restores/<date>/<backup-name>/<pvc-name>/
+//   - Example: /restores/2025-10-24/test-vm-backup-20250115/test-vm-disk-1/
 //   - Simple and secure, no privileges required
+//   - Organized by date for easy browsing
 //
 // 2. Internal mount(2) (UseInternalMounts=true):
 //   - Main container performs mount(2) syscalls internally
 //   - Sidecars see mounts via mount propagation (Bidirectional → HostToContainer)
 //   - Requires privileged security context or SYS_ADMIN capability
 //   - Useful when main container needs mount flexibility
-//
-// Mount paths (Kubernetes-managed mode):
-// - /restores_by_name/<backup-name>/<pvc-uid> (primary mount)
-// - /restores_by_date/<backup-date>/<pvc-name> (symlink, if EnableDualPathAccess=true)
-//
-// Mount paths (Internal mount mode):
-// - SharedMountPath (e.g., /mnt/restore) - main container mounts here
-// - Sidecars see the same SharedMountPath via propagation
+//   - SharedMountPath (e.g., /mnt/restore) - main container mounts here
+//   - Sidecars see the same SharedMountPath via propagation
 func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 	// Validate required config
 	if config.PodName == "" {
@@ -251,8 +244,8 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		})
 	}
 
-	// Note: /restores_by_name and /restores_by_date are created by the script at runtime
-	// No need to create EmptyDir volumes - script creates these as regular directories
+	// Note: /restores directory structure is created by Kubernetes mounts
+	// No emptyDir volumes needed for the /restores hierarchy
 
 	// Add /dev/fuse hostPath volume (required for guestmount FUSE filesystem)
 	allVolumes = append(allVolumes, corev1.Volume{
@@ -318,16 +311,13 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		allInitContainers = append(allInitContainers, fileBrowserInitContainers...)
 	}
 
-	// Dual-path symlink structure is now created by the file server detect-and-mount.sh script
-	// after mounting filesystems, eliminating the init container dependency issue
-
 	// Build or use default main container
 	var mainContainer corev1.Container
 	if config.MainContainer != nil {
 		mainContainer = *config.MainContainer
 	} else {
 		// Default main container: simple busybox HTTP server
-		mainContainer = buildDefaultMainContainer(pvcVolumeMounts, config.EnableDualPathAccess)
+		mainContainer = buildDefaultMainContainer(pvcVolumeMounts)
 	}
 
 	// Configure main container based on mount mode
@@ -343,7 +333,33 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 
 		// Also mount PVC volumes so main container can access them for internal mounting
 		// These are the "source" volumes that main will mount into SharedMountPath
+		// Add both volumeMounts (for Filesystem PVCs) and volumeDevices (for Block PVCs)
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, pvcVolumeMounts...)
+		mainContainer.VolumeDevices = append(mainContainer.VolumeDevices, pvcVolumeDevices...)
+
+		// Add /dev/fuse and /dev/kvm devices (required for guestmount with Block mode PVCs)
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "fuse-device",
+			MountPath: "/dev/fuse",
+		})
+		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+			Name:      "kvm-device",
+			MountPath: "/dev/kvm",
+		})
+
+		// For Block mode PVCs: Add filesystems emptyDir at /restores/ for FUSE mounts
+		// For Filesystem mode PVCs: Don't mount filesystems emptyDir (PVCs are already mounted at /restores/*)
+		if len(pvcVolumeDevices) > 0 {
+			// Block mode: Mount filesystems emptyDir at /restores/ where guestmount will create FUSE mounts
+			// Structure: /restores/<date>/<backup>/<pvc>/
+			// CRITICAL: Use Bidirectional propagation so sidecars can see the FUSE mounts
+			mountPropagation := corev1.MountPropagationBidirectional
+			mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+				Name:             "filesystems",
+				MountPath:        "/restores",
+				MountPropagation: &mountPropagation,
+			})
+		}
 
 		// Apply security context for mount(2) privileges
 		if config.MainContainerSecurityContext != nil {
@@ -360,23 +376,26 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, pvcVolumeMounts...)
 		mainContainer.VolumeDevices = append(mainContainer.VolumeDevices, pvcVolumeDevices...)
 
-		// Add /dev/fuse device mount (required for guestmount)
+		// Add /dev/fuse and /dev/kvm devices (required for guestmount with Block mode PVCs)
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
 			Name:      "fuse-device",
 			MountPath: "/dev/fuse",
 		})
-
-		// Add /dev/kvm device mount (required for KVM acceleration)
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
 			Name:      "kvm-device",
 			MountPath: "/dev/kvm",
 		})
 
-		// Add filesystems mount point (where guestmount will create filesystem mounts)
-		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
-			Name:      "filesystems",
-			MountPath: "/mnt/filesystems",
-		})
+		// For Block mode PVCs: Add filesystems emptyDir at /restores/ for FUSE mounts
+		// For Filesystem mode PVCs: Don't mount filesystems emptyDir (PVCs are already mounted at /restores/*)
+		if len(pvcVolumeDevices) > 0 {
+			// Block mode: Mount filesystems emptyDir at /restores/ where guestmount will create FUSE mounts
+			// Structure: /restores/<date>/<backup>/<pvc>/
+			mainContainer.VolumeMounts = append(mainContainer.VolumeMounts, corev1.VolumeMount{
+				Name:      "filesystems",
+				MountPath: "/restores",
+			})
+		}
 	}
 
 	// Combine main container with sidecars
@@ -404,6 +423,9 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 			Containers:         containers,
 			Volumes:            allVolumes,
 			RestartPolicy:      corev1.RestartPolicyAlways,
+			// Share process namespace when SSH is enabled
+			// This allows containers to work together and enables sshd to manage processes
+			ShareProcessNamespace: ptr.To(config.SSHAccess != nil),
 			// Pod-level security context
 			// Required for accessing VM disk images with qemu user/group permissions
 			SecurityContext: &corev1.PodSecurityContext{
@@ -433,75 +455,13 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 	return pod, nil
 }
 
-// buildFileServerDeployment builds a Deployment spec for serving files from restored PVCs.
-// This wraps the pod spec from buildFileServerPodSpec in a Deployment for better lifecycle management.
-//
-// Using a Deployment instead of a bare Pod provides:
-// - Automatic pod restart on failure
-// - Better integration with Kubernetes lifecycle (no cross-namespace owner reference issues)
-// - Production-ready deployment patterns
-// - Simplified updates and rollbacks
-func buildFileServerDeployment(config FileServerPodConfig) (*appsv1.Deployment, error) {
-	// Build the pod spec using existing buildFileServerPodSpec function
-	pod, err := buildFileServerPodSpec(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build pod spec for deployment: %w", err)
-	}
-
-	// Extract pod template from the built pod
-	podTemplate := corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels:      pod.Labels,
-			Annotations: pod.Annotations,
-		},
-		Spec: pod.Spec,
-	}
-
-	// Build selector labels - must match pod template labels
-	selectorLabels := map[string]string{
-		constant.VMFROriginUUIDLabel: config.VMFRUID,
-		"app":                        "vmfr-file-server",
-	}
-
-	// Build deployment
-	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        config.PodName, // Use same name as pod would have
-			Namespace:   config.PodNamespace,
-			Labels:      pod.Labels,
-			Annotations: pod.Annotations,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To(int32(1)), // Single replica for file server
-			Selector: &metav1.LabelSelector{
-				MatchLabels: selectorLabels,
-			},
-			Template: podTemplate,
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RecreateDeploymentStrategyType, // Recreate to avoid conflicts with PVC mounts
-			},
-		},
-	}
-
-	// IMPORTANT: Do NOT add cross-namespace owner references!
-	// Kubernetes garbage collector rejects owner references where the owner
-	// is in a different namespace than the owned resource.
-	//
-	// Instead of owner references, we use:
-	// 1. Labels to track ownership (already added above)
-	// 2. Finalizers on the VMFR to clean up resources on deletion
-	//
-	// The label constant.VMFROriginUUIDLabel uniquely identifies the owning VMFR
-	// Name and namespace are stored in annotations for reference
-	// and allow the controller to find and delete this Deployment during finalizer cleanup.
-
-	return deployment, nil
-}
-
 // buildPVCVolumesAndMounts creates volumes, volume mounts, and volume devices for PVCs.
 // Handles both Block and Filesystem mode PVCs correctly:
 // - Block mode PVCs: VM disks stored as raw block devices, exposed via volumeDevices at /dev/pvc-{uid}
-// - Filesystem mode PVCs: Traditional file storage, mounted via volumeMounts at /restores_by_name/{backup}/{uid}
+// - Filesystem mode PVCs: Mounted at /restores/<date>/<backup-name>/<pvc-name>/
+//
+// Path structure: /restores/<YYYY-MM-DD>/<backup-name>/<pvc-name>/
+// Example: /restores/2025-10-24/test-vm-backup-20250115/test-vm-disk-1/
 //
 // Returns:
 // - volumes: Kubernetes Volume objects referencing the PVCs
@@ -547,9 +507,11 @@ func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []core
 				DevicePath: devicePath,
 			})
 		} else {
-			// Filesystem mode: Mount at /restores_by_name/<backup-name>/<pvc-uid>
-			// Traditional file access for filesystem-based storage
-			mountPath := fmt.Sprintf("/restores_by_name/%s/%s", pvcMount.BackupName, pvcMount.PVCUID)
+			// Filesystem mode: Mount at /restores/<date>/<backup-name>/<pvc-name>/
+			// Organized by date for easy browsing, with backup name and PVC name for clarity
+			// Format: /restores/2025-10-24/test-vm-backup-20250115/test-vm-disk-1/
+			date := formatBackupDateForPath(pvcMount.BackupTimestamp)
+			mountPath := fmt.Sprintf("/restores/%s/%s/%s", date, pvcMount.BackupName, pvcMount.PVCName)
 			volumeMounts = append(volumeMounts, corev1.VolumeMount{
 				Name:      volumeName,
 				MountPath: mountPath,
@@ -561,8 +523,17 @@ func buildPVCVolumesAndMounts(pvcMounts []PVCMountInfo) ([]corev1.Volume, []core
 	return volumes, volumeMounts, volumeDevices
 }
 
+// formatBackupDateForPath formats a backup timestamp as YYYY-MM-DD for directory structure
+// Returns "unknown-date" if timestamp is nil
+func formatBackupDateForPath(timestamp *metav1.Time) string {
+	if timestamp == nil {
+		return "unknown-date"
+	}
+	return timestamp.Time.Format("2006-01-02")
+}
+
 // buildDefaultMainContainer creates a default busybox HTTP server container
-func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount, enableDualPath bool) corev1.Container {
+func buildDefaultMainContainer(pvcVolumeMounts []corev1.VolumeMount) corev1.Container {
 	volumeMounts := make([]corev1.VolumeMount, len(pvcVolumeMounts))
 	copy(volumeMounts, pvcVolumeMounts)
 
@@ -607,7 +578,7 @@ func buildVMFileServerMainContainer(pvcMounts []PVCMountInfo) corev1.Container {
 			},
 			{
 				Name:  "BACKUP_PVC_MAP",
-				Value: backupPVCMap, // JSON mapping of backups to PVCs for dual-path structure
+				Value: backupPVCMap, // JSON mapping of backups to PVCs for the file server script
 			},
 		},
 
@@ -634,9 +605,12 @@ func buildVMFileServerMainContainer(pvcMounts []PVCMountInfo) corev1.Container {
 }
 
 // buildBackupPVCMapJSON builds a JSON string mapping backup names to PVC information
-// This is used by the file server script to create the dual-path directory structure
+// This is used by the file server script to understand the backup/PVC structure
 //
 // Format: {"backup-name": [{"name": "pvc-name", "path": "/dev/pvc-{uid}", "timestamp": "2025-10-23T18:40:00Z"}]}
+//
+// The "path" field refers to the device path for block mode PVCs, used by libguestfs/QEMU
+// PVCs are actually mounted by Kubernetes at: /restores/<date>/<backup-name>/<pvc-name>/
 //
 // Example output:
 //
@@ -652,9 +626,8 @@ func buildBackupPVCMapJSON(pvcMounts []PVCMountInfo) string {
 	for _, pvcMount := range pvcMounts {
 		backupName := pvcMount.BackupName
 
-		// Build device path based on volumeMode
-		// Block mode: /dev/pvc-{uid}
-		// Filesystem mode: /restores_by_name/{backup}/{uid} (but we use the UID-based path for consistency)
+		// Build device path for block mode PVCs (used by libguestfs/QEMU)
+		// Note: Filesystem mode PVCs are mounted by Kubernetes at /restores/<date>/<backup>/<pvc-name>/
 		devicePath := fmt.Sprintf("/dev/pvc-%s", pvcMount.PVCUID)
 
 		// Format timestamp as ISO8601
@@ -869,14 +842,6 @@ func gatherServicePorts(sshConfig *SSHAccessConfig, fileBrowserConfig *FileBrows
 	return ports
 }
 
-// formatBackupDate formats a timestamp as YYYY-MM-DD for mount path organization
-func formatBackupDate(timestamp *metav1.Time) string {
-	if timestamp == nil {
-		return "unknown-date"
-	}
-	return timestamp.Time.Format("2006-01-02")
-}
-
 // buildDefaultHTTPServicePort creates a default service port for HTTP access
 func buildDefaultHTTPServicePort() corev1.ServicePort {
 	return corev1.ServicePort{
@@ -890,14 +855,14 @@ func buildDefaultHTTPServicePort() corev1.ServicePort {
 // buildSSHSidecar creates an SSH sidecar container with associated volumes and init containers.
 //
 // The SSH server provides read-only SFTP/SCP/rsync access to restored PVC data.
-// Credentials can come from inline config, a Secret, or controller-generated keys.
+// Uses custom OADP SSH image with chroot environment for enhanced security.
 //
 // Implementation details:
-// - Uses linuxserver/openssh-server image for flexibility and security
-// - Runs as non-root user for better security posture
-// - Configures restricted read-only shell environment
-// - Supports both public key and password authentication
-// - Init container sets up SSH user configuration from inline or Secret credentials
+// - Uses constant.SSHSidecarImage (quay.io/migtools/oadp-vmfr-sshd:latest)
+// - Runs as root for authentication and chroot (security hardened with capabilities)
+// - Read-only root filesystem with emptyDir volumes for runtime directories
+// - Supports public key authentication only
+// - Chroot environment restricts access to /oadp directory
 //
 //nolint:unparam // Some parameters used in future mount modes
 func buildSSHSidecar(
@@ -909,11 +874,11 @@ func buildSSHSidecar(
 	enableDualPath bool,
 ) (corev1.Container, []corev1.Volume, []corev1.Container) {
 
-	// SSH server container using linuxserver/openssh-server
-	// This image provides a secure, configurable SSH server that runs as non-root
+	// SSH server container using custom OADP SSH image
+	// This image provides a secure, chroot-based SSH server with read-only access
 	container := corev1.Container{
-		Name:  "ssh-server",
-		Image: "lscr.io/linuxserver/openssh-server:latest",
+		Name:  "sshd",
+		Image: constant.SSHSidecarImage,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "ssh",
@@ -921,195 +886,185 @@ func buildSSHSidecar(
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
-		Env: []corev1.EnvVar{
-			{
-				Name:  "PUID",
-				Value: "1000", // Run as non-root user
-			},
-			{
-				Name:  "PGID",
-				Value: "1000",
-			},
-			{
-				Name:  "USER_NAME",
-				Value: config.Username,
-			},
-			{
-				// Port configuration for SSH service
-				Name:  "SSH_PORT",
-				Value: fmt.Sprintf("%d", config.Port),
-			},
-			{
-				// Disable password authentication (only public key auth is supported)
-				Name:  "PASSWORD_ACCESS",
-				Value: "false",
-			},
-			{
-				// Enable public key authentication
-				Name:  "PUBLIC_KEY_DIR",
-				Value: "/config/ssh_keys",
+		// SecurityContext for SSH server
+		// SSHD needs to run as root for authentication and chroot
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                ptr.To(int64(0)),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
+			Capabilities: &corev1.Capabilities{
+				Add: []corev1.Capability{
+					"AUDIT_WRITE",     // Required for PAM audit logging (RHEL requirement)
+					"CHOWN",           // Required to set ownership of SSH directory at startup
+					"DAC_READ_SEARCH", // Allows reading files regardless of ownership/permissions
+					"MKNOD",           // Required to create device nodes in /oadp/dev
+					"SETGID",          // Required for sshd to drop privileges
+					"SETUID",          // Required for sshd to drop privileges
+					"SYS_CHROOT",      // Required for ChrootDirectory
+				},
+				Drop: []corev1.Capability{"ALL"},
 			},
 		},
 	}
 
-	// Add shared volume for SSH server config and user home directory
-	// This is needed for SSH server to store its configuration and user data
+	// Add volumes for read-only root filesystem
 	var volumes []corev1.Volume
-	sshConfigVolume := corev1.Volume{
-		Name: "ssh-config",
+
+	// EmptyDir volumes for runtime directories (required for read-only root filesystem)
+	sshEtcVolume := corev1.Volume{
+		Name: "ssh-etc",
 		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: resource.NewQuantity(10*1024*1024, resource.BinarySI), // 10Mi
+			},
 		},
 	}
-	volumes = append(volumes, sshConfigVolume)
-
-	// Mount the SSH config volume
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      "ssh-config",
-		MountPath: "/config",
-	})
-
-	// Configure volume mounts based on mount mode
-	if useInternalMounts {
-		// Internal mount mode: use shared mount volume with propagation
-		mountPropagation := corev1.MountPropagationHostToContainer
-		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:             sharedMountVolumeName,
-			MountPath:        sharedMountPath,
-			ReadOnly:         true,
-			MountPropagation: &mountPropagation,
-		})
-	} else {
-		// Kubernetes-managed mode: mount PVCs directly
-		container.VolumeMounts = append(container.VolumeMounts, pvcVolumeMounts...)
+	sshRunVolume := corev1.Volume{
+		Name: "ssh-run",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: resource.NewQuantity(10*1024*1024, resource.BinarySI), // 10Mi
+			},
+		},
+	}
+	sshTmpVolume := corev1.Volume{
+		Name: "ssh-tmp",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: resource.NewQuantity(50*1024*1024, resource.BinarySI), // 50Mi
+			},
+		},
+	}
+	sshDevVolume := corev1.Volume{
+		Name: "ssh-dev",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: resource.NewQuantity(1*1024*1024, resource.BinarySI), // 1Mi
+			},
+		},
+	}
+	sshOadpEtcVolume := corev1.Volume{
+		Name: "ssh-oadp-etc",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: resource.NewQuantity(1*1024*1024, resource.BinarySI), // 1Mi
+			},
+		},
 	}
 
-	// Add Secret volume and init container for SSH configuration
-	// The controller ensures the Secret exists before pod creation (via ensureCredentials)
-	var initContainers []corev1.Container
+	volumes = append(volumes, sshEtcVolume, sshRunVolume, sshTmpVolume, sshDevVolume, sshOadpEtcVolume)
 
-	// Credentials from Secret: mount the secret and use init container to configure
+	// Mount runtime directories
+	container.VolumeMounts = append(container.VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "ssh-etc",
+			MountPath: "/etc",
+		},
+		corev1.VolumeMount{
+			Name:      "ssh-run",
+			MountPath: "/run",
+		},
+		corev1.VolumeMount{
+			Name:      "ssh-tmp",
+			MountPath: "/tmp",
+		},
+		corev1.VolumeMount{
+			Name:      "ssh-dev",
+			MountPath: "/oadp/dev",
+		},
+		corev1.VolumeMount{
+			Name:      "ssh-oadp-etc",
+			MountPath: "/oadp/etc",
+		},
+	)
+
+	// Add Secret volume for SSH credentials
+	// The controller ensures the Secret exists before pod creation (via ensureCredentials)
 	credentialsVolume := corev1.Volume{
-		Name: "ssh-credentials",
+		Name: "ssh-secret",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName: config.CredentialsSecretName,
+				SecretName:  config.CredentialsSecretName,
+				DefaultMode: ptr.To(int32(0400)),
 			},
 		},
 	}
 	volumes = append(volumes, credentialsVolume)
 
-	// Init container to set up SSH configuration from Secret
-	initContainer := buildSSHInitContainerFromSecret()
-	initContainers = append(initContainers, initContainer)
+	// Mount secret at /ssh-config for entrypoint script
+	container.VolumeMounts = append(container.VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "ssh-secret",
+			MountPath: "/ssh-config",
+			ReadOnly:  true,
+		},
+		// Also mount authorized_keys directly from secret to avoid permission issues
+		corev1.VolumeMount{
+			Name:      "ssh-secret",
+			MountPath: "/oadp/.ssh/authorized_keys",
+			SubPath:   "authorized_keys",
+			ReadOnly:  true,
+		},
+	)
+
+	// Configure volume mounts for restored data based on PVC mode
+	// SSH chroot is at /oadp/, so we mount at /oadp/restores/
+	// Users (chrooted to /oadp/) see files at /restores/<date>/<backup>/<pvc>/
+	if useInternalMounts {
+		// Internal mount mode: use filesystems volume with propagation
+		// The vm-file-server container mounts filesystems at /restores and creates FUSE mounts there
+		// Sidecars need mount propagation to see those FUSE mounts
+		mountPropagation := corev1.MountPropagationHostToContainer
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:             "filesystems",
+			MountPath:        "/oadp/restores",
+			ReadOnly:         true,
+			MountPropagation: &mountPropagation,
+		})
+	} else {
+		// Kubernetes-managed mode: different approach for Filesystem vs Block PVCs
+		if len(pvcVolumeMounts) > 0 {
+			// Filesystem mode PVCs: Mount PVCs directly at /oadp/restores/<date>/<backup>/<pvc>/
+			// Adjust paths from /restores/* to /oadp/restores/* for chroot environment
+			for _, mount := range pvcVolumeMounts {
+				adjustedMount := mount
+				adjustedMount.MountPath = "/oadp" + mount.MountPath
+				container.VolumeMounts = append(container.VolumeMounts, adjustedMount)
+			}
+		} else {
+			// Block mode PVCs: Mount the shared filesystems emptyDir at /oadp/restores/
+			// The vm-file-server container creates FUSE mounts inside this shared volume
+			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+				Name:      "filesystems",
+				MountPath: "/oadp/restores",
+				ReadOnly:  true,
+			})
+		}
+	}
+
+	// No init containers needed - the custom image handles all setup
+	var initContainers []corev1.Container
 
 	return container, volumes, initContainers
-}
-
-// buildSSHInitContainerFromSecret creates an init container that configures SSH from a Secret.
-// The Secret must contain the publicKey field for public key authentication.
-// Password authentication is not supported - only public key auth is enabled.
-func buildSSHInitContainerFromSecret() corev1.Container {
-	// Shell script to configure SSH user from Secret credentials
-	setupScript := `#!/bin/sh
-set -e
-
-echo "Setting up SSH configuration from Secret..."
-
-# Create SSH keys directory
-mkdir -p /config/ssh_keys
-
-# Copy public key from secret for key-based authentication
-if [ ! -f /credentials/publicKey ]; then
-    echo "ERROR: publicKey not found in Secret"
-    exit 1
-fi
-
-echo "Configuring public key authentication..."
-cp /credentials/publicKey /config/ssh_keys/authorized_keys
-chmod 600 /config/ssh_keys/authorized_keys
-
-# Note: No chown needed - OpenShift's restricted-v2 SCC doesn't allow it,
-# and EmptyDir volumes are created with pod's fsGroup ownership automatically
-
-echo "SSH configuration completed successfully (public key auth only)"
-`
-
-	return corev1.Container{
-		Name:  "setup-ssh-credentials",
-		Image: "quay.io/quay/busybox:latest",
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			setupScript,
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "ssh-config",
-				MountPath: "/config",
-			},
-			{
-				Name:      "ssh-credentials",
-				MountPath: "/credentials",
-				ReadOnly:  true,
-			},
-		},
-	}
-}
-
-// buildSSHInitContainerInline creates an init container that configures SSH from inline publicKey.
-func buildSSHInitContainerInline(publicKey string) corev1.Container {
-	// Shell script to configure SSH user from inline publicKey
-	// The publicKey is embedded directly in the script
-	setupScript := fmt.Sprintf(`#!/bin/sh
-set -e
-
-echo "Setting up SSH configuration from inline publicKey..."
-
-# Create SSH keys directory
-mkdir -p /config/ssh_keys
-
-# Write the public key to authorized_keys
-cat > /config/ssh_keys/authorized_keys <<'EOF'
-%s
-EOF
-
-chmod 600 /config/ssh_keys/authorized_keys
-
-# Note: No chown needed - OpenShift's restricted-v2 SCC doesn't allow it,
-# and EmptyDir volumes are created with pod's fsGroup ownership automatically
-
-echo "SSH configuration completed successfully"
-`, publicKey)
-
-	return corev1.Container{
-		Name:  "setup-ssh-credentials",
-		Image: "quay.io/quay/busybox:latest",
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			setupScript,
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "ssh-config",
-				MountPath: "/config",
-			},
-		},
-	}
 }
 
 // buildFileBrowserSidecar creates a FileBrowser sidecar container with associated volumes and init containers.
 //
 // The FileBrowser server provides web-based file browsing access to restored PVC data.
-// Credentials are read from a Secret containing username and password.
+// Uses custom OADP FileBrowser image with TLS support and read-only permissions.
 //
 // Implementation details:
-// - Uses filebrowser/filebrowser official image
-// - Runs on the specified port (defaults to 443 in API, but often 8443 in practice)
+// - Uses constant.FileBrowserSidecarImage (quay.io/migtools/oadp-vmfr-filebrowser:latest)
+// - Runs as non-root (UID 1000) with read-only root filesystem
+// - Serves HTTPS on port 8443 with TLS certificates from OpenShift service CA
 // - Configured with authentication from Secret credentials
-// - Init container sets up FileBrowser database and user configuration
-// - Serves files in read-only mode for safety
+// - Read-only file browser with download capabilities
+// - Custom branding for OADP VM File Restore
 //
 //nolint:unparam // Some parameters used in future mount modes
 func buildFileBrowserSidecar(
@@ -1121,145 +1076,170 @@ func buildFileBrowserSidecar(
 	enableDualPath bool,
 ) (corev1.Container, []corev1.Volume, []corev1.Container) {
 
-	// FileBrowser container using official filebrowser/filebrowser image
-	// This provides a modern, lightweight web-based file browser
+	// FileBrowser always serves from /restores/
+	// For Filesystem mode PVCs: /restores/<date>/<backup>/<pvc>/ (Kubernetes mounts)
+	// For Block mode PVCs: /restores/<date>/<backup>/<pvc>/ (guestmount FUSE mounts in shared emptyDir)
+	fbRoot := "/restores"
+
+	// FileBrowser container using custom OADP FileBrowser image
+	// This image provides TLS support and read-only configuration
 	container := corev1.Container{
 		Name:  "filebrowser",
-		Image: "filebrowser/filebrowser:latest",
+		Image: constant.FileBrowserSidecarImage,
+		// Command to initialize FileBrowser with credentials from secret
+		// The initialization script is defined in sidecar_scripts.go
+		Command: []string{"/bin/bash", "-c"},
+		Args:    []string{fileBrowserInitScript},
 		Ports: []corev1.ContainerPort{
 			{
-				Name:          "http",
+				Name:          "https",
 				ContainerPort: config.Port,
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
-		// FileBrowser command-line arguments
-		// --noauth: disabled because we want authentication
-		// --port: listening port
-		// --database: path to database file
-		// --root: root directory to serve (we'll use / to serve all mount points)
-		Args: []string{
-			"--port", fmt.Sprintf("%d", config.Port),
-			"--database", "/config/filebrowser.db",
-			"--root", "/",
-			"--address", "0.0.0.0",
+		// Environment variables for FileBrowser configuration
+		Env: []corev1.EnvVar{
+			{
+				Name:  "FB_ROOT",
+				Value: fbRoot, // Serve from appropriate directory based on PVC mode
+			},
+			{
+				Name:  "FB_PORT",
+				Value: fmt.Sprintf("%d", config.Port),
+			},
+			{
+				Name:  "FB_ADDRESS",
+				Value: "0.0.0.0",
+			},
+			{
+				Name:  "FB_DATABASE",
+				Value: "/database/filebrowser.db",
+			},
+			{
+				Name:  "FB_BRANDING_NAME",
+				Value: "OADP VM File Restore Browser",
+			},
+		},
+		// SecurityContext for FileBrowser
+		// Runs as non-root with minimal permissions
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                ptr.To(int64(1000)),
+			RunAsGroup:               ptr.To(int64(1000)),
+			RunAsNonRoot:             ptr.To(true),
+			ReadOnlyRootFilesystem:   ptr.To(true),
+			AllowPrivilegeEscalation: ptr.To(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
 		},
 	}
 
-	// Add volumes for FileBrowser configuration and database
+	// Add volumes for FileBrowser
 	var volumes []corev1.Volume
 
-	// Config volume for FileBrowser database
-	configVolume := corev1.Volume{
-		Name: "filebrowser-config",
+	// Database volume for FileBrowser state (in-memory)
+	databaseVolume := corev1.Volume{
+		Name: "database",
 		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: resource.NewQuantity(10*1024*1024, resource.BinarySI), // 10Mi
+			},
 		},
 	}
-	volumes = append(volumes, configVolume)
+	volumes = append(volumes, databaseVolume)
 
-	// Mount the config volume
-	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      "filebrowser-config",
-		MountPath: "/config",
-	})
+	// Tmp volume for read-only root filesystem
+	tmpVolume := corev1.Volume{
+		Name: "tmp",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: resource.NewQuantity(10*1024*1024, resource.BinarySI), // 10Mi
+			},
+		},
+	}
+	volumes = append(volumes, tmpVolume)
+
+	// TLS certificates from OpenShift service CA
+	// Note: This secret is auto-generated by OpenShift when the service has the annotation:
+	//   service.beta.openshift.io/serving-cert-secret-name: filebrowser-tls
+	tlsVolume := corev1.Volume{
+		Name: "filebrowser-tls",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName:  "filebrowser-tls",
+				DefaultMode: ptr.To(int32(0400)),
+			},
+		},
+	}
+	volumes = append(volumes, tlsVolume)
 
 	// Add credentials Secret volume
 	credentialsVolume := corev1.Volume{
 		Name: "filebrowser-credentials",
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
-				SecretName: config.CredentialsSecretName,
+				SecretName:  config.CredentialsSecretName,
+				DefaultMode: ptr.To(int32(0400)),
 			},
 		},
 	}
 	volumes = append(volumes, credentialsVolume)
 
-	// Configure volume mounts based on mount mode
+	// Mount volumes
+	container.VolumeMounts = append(container.VolumeMounts,
+		corev1.VolumeMount{
+			Name:      "database",
+			MountPath: "/database",
+		},
+		corev1.VolumeMount{
+			Name:      "tmp",
+			MountPath: "/tmp",
+		},
+		corev1.VolumeMount{
+			Name:      "filebrowser-tls",
+			MountPath: "/etc/filebrowser-tls",
+			ReadOnly:  true,
+		},
+		corev1.VolumeMount{
+			Name:      "filebrowser-credentials",
+			MountPath: "/etc/filebrowser-credentials",
+			ReadOnly:  true,
+		},
+	)
+
+	// Configure volume mounts for restored data based on PVC mode
 	if useInternalMounts {
-		// Internal mount mode: use shared mount volume with propagation
+		// Internal mount mode: use filesystems volume with propagation
+		// The vm-file-server container mounts filesystems at /restores and creates FUSE mounts there
+		// Sidecars need mount propagation to see those FUSE mounts
 		mountPropagation := corev1.MountPropagationHostToContainer
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-			Name:             sharedMountVolumeName,
-			MountPath:        sharedMountPath,
+			Name:             "filesystems",
+			MountPath:        "/restores",
 			ReadOnly:         true,
 			MountPropagation: &mountPropagation,
 		})
 	} else {
-		// Kubernetes-managed mode: mount PVCs directly
-		container.VolumeMounts = append(container.VolumeMounts, pvcVolumeMounts...)
+		// Kubernetes-managed mode: different approach for Filesystem vs Block PVCs
+		if len(pvcVolumeMounts) > 0 {
+			// Filesystem mode PVCs: Mount PVCs directly at /restores/<date>/<backup>/<pvc>/
+			// Each PVC is mounted by Kubernetes at its organized path
+			container.VolumeMounts = append(container.VolumeMounts, pvcVolumeMounts...)
+		} else {
+			// Block mode PVCs: Mount the shared filesystems emptyDir at /restores/
+			// The vm-file-server container creates FUSE mounts inside this shared volume
+			container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+				Name:      "filesystems",
+				MountPath: "/restores",
+				ReadOnly:  true,
+			})
+		}
 	}
 
-	// Init container to configure FileBrowser database and create user
+	// No init containers needed - the custom image handles all setup
 	var initContainers []corev1.Container
-	initContainer := buildFileBrowserInitContainer()
-	initContainers = append(initContainers, initContainer)
 
 	return container, volumes, initContainers
-}
-
-// buildFileBrowserInitContainer creates an init container that initializes FileBrowser.
-// Sets up the database, creates a user from Secret credentials, and configures settings.
-func buildFileBrowserInitContainer() corev1.Container {
-	// Shell script to initialize FileBrowser database and create user
-	// The filebrowser CLI is used to configure the database before the server starts
-	setupScript := `#!/bin/sh
-set -e
-
-echo "Initializing FileBrowser configuration..."
-
-# Read credentials from Secret
-if [ ! -f /credentials/username ] || [ ! -f /credentials/password ]; then
-    echo "ERROR: username or password not found in Secret"
-    exit 1
-fi
-
-USERNAME=$(cat /credentials/username)
-PASSWORD=$(cat /credentials/password)
-
-echo "Creating FileBrowser database and user..."
-
-# Initialize the database (creates default admin user)
-/filebrowser config init --database /config/filebrowser.db
-
-# Set the root directory to / (will serve all mounted paths)
-/filebrowser config set --database /config/filebrowser.db --root /
-
-# Set address and port (these are defaults, but being explicit)
-/filebrowser config set --database /config/filebrowser.db --address 0.0.0.0
-
-# Delete the default admin user
-/filebrowser users rm admin --database /config/filebrowser.db || true
-
-# Create the user from Secret credentials
-echo "Creating user: $USERNAME"
-echo "$PASSWORD" | /filebrowser users add "$USERNAME" --database /config/filebrowser.db --perm.create=false --perm.delete=false --perm.modify=false --perm.rename=false
-
-# Set permissions to read-only
-/filebrowser users update "$USERNAME" --database /config/filebrowser.db --perm.create=false --perm.delete=false --perm.modify=false --perm.rename=false
-
-echo "FileBrowser initialization completed successfully"
-echo "User '$USERNAME' created with read-only permissions"
-`
-
-	return corev1.Container{
-		Name:  "setup-filebrowser",
-		Image: "filebrowser/filebrowser:latest",
-		Command: []string{
-			"/bin/sh",
-			"-c",
-			setupScript,
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "filebrowser-config",
-				MountPath: "/config",
-			},
-			{
-				Name:      "filebrowser-credentials",
-				MountPath: "/credentials",
-				ReadOnly:  true,
-			},
-		},
-	}
 }
