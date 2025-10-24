@@ -284,8 +284,8 @@ func CreateSSHCredentialsSecret(
 ) *corev1.Secret {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			GenerateName: generateNamePrefix,
+			Namespace:    namespace,
 			Labels: map[string]string{
 				constant.ManagedByLabel:             constant.ManagedByLabelValue,
 				constant.VMFROriginUUIDLabel:        string(vmfrUID),
@@ -340,8 +340,8 @@ func CreateFileBrowserCredentialsSecret(
 ) *corev1.Secret {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
+			GenerateName: generateNamePrefix,
+			Namespace:    namespace,
 			Labels: map[string]string{
 				constant.ManagedByLabel:             constant.ManagedByLabelValue,
 				constant.VMFROriginUUIDLabel:        string(vmfrUID),

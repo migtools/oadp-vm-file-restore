@@ -2269,11 +2269,10 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 		case veleroapi.RestorePhaseCompleted, veleroapi.RestorePhaseFinalizing:
 			// Treat Finalizing as completed since PVCs are already restored and available for mounting
 			completed++
-		case veleroapi.RestorePhaseFailed, veleroapi.RestorePhasePartiallyFailed, veleroapi.RestorePhaseFailedValidation,
-			"FinalizingPartiallyFailed": // Velero is finalizing a partially failed restore
+		case veleroapi.RestorePhaseFailed, veleroapi.RestorePhasePartiallyFailed, veleroapi.RestorePhaseFailedValidation:
 			failed++
-		case veleroapi.RestorePhaseNew, veleroapi.RestorePhaseInProgress, veleroapi.RestorePhaseFinalizing, veleroapi.RestorePhaseFinalizingPartiallyFailed, "":
-			// Finalizing* phases are transitional states - wait for terminal state
+		case veleroapi.RestorePhaseNew, veleroapi.RestorePhaseInProgress, "":
+			// Still in progress
 			inProgress++
 		default:
 			logger.V(1).Info("Unknown Velero Restore phase, treating as in-progress",
@@ -2782,7 +2781,6 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 	return nil
 }
 
-<<<<<<< HEAD
 // ensureSecretInRestoreNamespace ensures a secret is available in the restore namespace.
 // If the secret is already in the restore namespace, it validates and returns the secret name.
 // If the secret is in a different namespace, it validates the source, copies it to the restore
@@ -3205,7 +3203,8 @@ func (r *VirtualMachineFileRestoreReconciler) ensureCredentials(
 
 	logger.V(0).Info("All credentials ready for file server creation")
 	return nil
-=======
+}
+
 // fixDataDownloadPVCNames fixes the DataDownload PVC name mismatch issue caused by kubevirt-velero-plugin.
 // When using Velero Data Mover with kubevirt-velero-plugin, there's a mismatch between the PVC name
 // in the DataDownload spec and the actual restored PVC name:
@@ -3384,7 +3383,6 @@ func (r *VirtualMachineFileRestoreReconciler) fixDataDownloadPVCNames(
 	}
 
 	return fixedCount, nil
->>>>>>> d832fcc (Add Block mode PVC support and DataDownload PVC name auto-fix)
 }
 
 // handleVeleroRestoreCleanup deletes Velero Restore objects created by this VMFR.
