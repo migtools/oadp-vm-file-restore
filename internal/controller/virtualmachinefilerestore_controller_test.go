@@ -1146,3 +1146,178 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestGetFilteredBackupsToServe(t *testing.T) {
+	reconciler := &VirtualMachineFileRestoreReconciler{}
+
+	tests := []struct {
+		name            string
+		vmfrSpec        oadpv1alpha1.VirtualMachineFileRestoreSpec
+		vmbdStatus      oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus
+		expectedBackups []string // backup names
+		expectError     bool
+		errorContains   string
+	}{
+		{
+			name: "no selection returns all valid backups",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{}, // empty selection
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{Name: "backup-1", Namespace: "openshift-adp"},
+					{Name: "backup-2", Namespace: "openshift-adp"},
+					{Name: "backup-3", Namespace: "openshift-adp"},
+				},
+			},
+			expectedBackups: []string{"backup-1", "backup-2", "backup-3"},
+			expectError:     false,
+		},
+		{
+			name: "single valid selection",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{"backup-2"},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{Name: "backup-1", Namespace: "openshift-adp"},
+					{Name: "backup-2", Namespace: "openshift-adp"},
+					{Name: "backup-3", Namespace: "openshift-adp"},
+				},
+			},
+			expectedBackups: []string{"backup-2"},
+			expectError:     false,
+		},
+		{
+			name: "multiple valid selections",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{"backup-1", "backup-3"},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{Name: "backup-1", Namespace: "openshift-adp"},
+					{Name: "backup-2", Namespace: "openshift-adp"},
+					{Name: "backup-3", Namespace: "openshift-adp"},
+				},
+			},
+			expectedBackups: []string{"backup-1", "backup-3"},
+			expectError:     false,
+		},
+		{
+			name: "invalid selection returns error",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{"nonexistent-backup"},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{Name: "backup-1", Namespace: "openshift-adp"},
+					{Name: "backup-2", Namespace: "openshift-adp"},
+				},
+			},
+			expectError:   true,
+			errorContains: "selected backups not found in discovery results",
+		},
+		{
+			name: "multiple invalid selections lists all missing",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{"missing-1", "missing-2"},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{Name: "backup-1", Namespace: "openshift-adp"},
+				},
+			},
+			expectError:   true,
+			errorContains: "missing-1",
+		},
+		{
+			name: "mixed valid and invalid selections returns error",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{"backup-1", "nonexistent"},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{Name: "backup-1", Namespace: "openshift-adp"},
+					{Name: "backup-2", Namespace: "openshift-adp"},
+				},
+			},
+			expectError:   true,
+			errorContains: "nonexistent",
+		},
+		{
+			name: "empty valid backups list",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{},
+			},
+			expectedBackups: []string{},
+			expectError:     false,
+		},
+		{
+			name: "selection from empty valid backups",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{"backup-1"},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{},
+			},
+			expectError:   true,
+			errorContains: "backup-1",
+		},
+		{
+			name: "preserves selection order",
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				SelectedBackups: []string{"backup-3", "backup-1", "backup-2"},
+			},
+			vmbdStatus: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{Name: "backup-1", Namespace: "openshift-adp"},
+					{Name: "backup-2", Namespace: "openshift-adp"},
+					{Name: "backup-3", Namespace: "openshift-adp"},
+				},
+			},
+			expectedBackups: []string{"backup-3", "backup-1", "backup-2"},
+			expectError:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+				Spec: tt.vmfrSpec,
+			}
+			vmbd := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Status: tt.vmbdStatus,
+			}
+
+			backups, err := reconciler.getFilteredBackupsToServe(vmfr, vmbd)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+
+				if len(backups) != len(tt.expectedBackups) {
+					t.Errorf("Expected %d backups, got %d", len(tt.expectedBackups), len(backups))
+				}
+
+				for i, expectedName := range tt.expectedBackups {
+					if i >= len(backups) {
+						break
+					}
+					if backups[i].Name != expectedName {
+						t.Errorf("Expected backup[%d] = '%s', got '%s'", i, expectedName, backups[i].Name)
+					}
+				}
+			}
+		})
+	}
+}
