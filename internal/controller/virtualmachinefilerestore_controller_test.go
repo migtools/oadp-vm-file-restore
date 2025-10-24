@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	veleroapiv2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -2136,6 +2137,544 @@ func TestHandleVeleroRestoreCleanup(t *testing.T) {
 			if tt.expectDeletedCount != expectedToDelete {
 				t.Errorf("Test setup error: expectDeletedCount=%d but calculated %d restores should be deleted",
 					tt.expectDeletedCount, expectedToDelete)
+			}
+		})
+	}
+}
+
+func TestFixDataDownloadPVCNames(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	_ = veleroapiv2alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name               string
+		vmfr               *oadpv1alpha1.VirtualMachineFileRestore
+		existingRestores   []*velerov1api.Restore
+		existingDataDownloads []*veleroapiv2alpha1.DataDownload
+		existingPVCs       []*corev1.PersistentVolumeClaim
+		expectFixedCount   int
+		expectError        bool
+		errorContains      string
+	}{
+		{
+			name: "no restore namespace returns zero",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "", // No namespace yet
+				},
+			},
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "no velero restores found returns zero",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "no datadownloads found returns zero",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "datadownload already in progress is skipped",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingDataDownloads: []*veleroapiv2alpha1.DataDownload{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "velero.io/v1",
+								Kind:       "Restore",
+								Name:       "velero-restore-1",
+							},
+						},
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "original-pvc",
+						},
+					},
+					Status: veleroapiv2alpha1.DataDownloadStatus{
+						Phase: veleroapiv2alpha1.DataDownloadPhaseInProgress,
+					},
+				},
+			},
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "datadownload with no owner reference is skipped",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingDataDownloads: []*veleroapiv2alpha1.DataDownload{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-no-owner",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						// No OwnerReferences
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "original-pvc",
+						},
+					},
+				},
+			},
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "datadownload with no target PVC is skipped",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingDataDownloads: []*veleroapiv2alpha1.DataDownload{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-no-pvc",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "velero.io/v1",
+								Kind:       "Restore",
+								Name:       "velero-restore-1",
+							},
+						},
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "", // Empty PVC name
+						},
+					},
+				},
+			},
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "PVC not yet created continues without error",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingDataDownloads: []*veleroapiv2alpha1.DataDownload{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "velero.io/v1",
+								Kind:       "Restore",
+								Name:       "velero-restore-1",
+							},
+						},
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "original-pvc",
+						},
+					},
+				},
+			},
+			// No PVCs exist
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "PVC name already correct skips patch",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingDataDownloads: []*veleroapiv2alpha1.DataDownload{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "velero.io/v1",
+								Kind:       "Restore",
+								Name:       "velero-restore-1",
+							},
+						},
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "original-pvc", // Same as actual
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "original-pvc",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "original-pvc",
+						},
+					},
+				},
+			},
+			expectFixedCount: 0,
+			expectError:      false,
+		},
+		{
+			name: "successful PVC name patch increments count",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingDataDownloads: []*veleroapiv2alpha1.DataDownload{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "velero.io/v1",
+								Kind:       "Restore",
+								Name:       "velero-restore-1",
+							},
+						},
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "original-pvc",
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-xyz123",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "original-pvc",
+						},
+					},
+				},
+			},
+			expectFixedCount: 1,
+			expectError:      false,
+		},
+		{
+			name: "multiple datadownloads requiring patches",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "velero-restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingDataDownloads: []*veleroapiv2alpha1.DataDownload{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "velero.io/v1",
+								Kind:       "Restore",
+								Name:       "velero-restore-1",
+							},
+						},
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "pvc-1",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dd-2",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "velero.io/v1",
+								Kind:       "Restore",
+								Name:       "velero-restore-1",
+							},
+						},
+					},
+					Spec: veleroapiv2alpha1.DataDownloadSpec{
+						TargetVolume: veleroapiv2alpha1.TargetVolumeSpec{
+							PVC: "pvc-2",
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1-abc",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-2-xyz",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "velero-restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-2",
+						},
+					},
+				},
+			},
+			expectFixedCount: 2,
+			expectError:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{tt.vmfr}
+			for _, restore := range tt.existingRestores {
+				objects = append(objects, restore)
+			}
+			for _, dd := range tt.existingDataDownloads {
+				objects = append(objects, dd)
+			}
+			for _, pvc := range tt.existingPVCs {
+				objects = append(objects, pvc)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: "openshift-adp",
+			}
+
+			fixedCount, err := reconciler.fixDataDownloadPVCNames(ctx, zap.New(), tt.vmfr)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+			}
+
+			if fixedCount != tt.expectFixedCount {
+				t.Errorf("Expected fixedCount=%d, got %d", tt.expectFixedCount, fixedCount)
 			}
 		})
 	}
