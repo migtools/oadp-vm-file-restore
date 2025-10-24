@@ -824,3 +824,115 @@ func TestSortRestoresByTimestamp(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildFailedProgress(t *testing.T) {
+	reconciler := &VirtualMachineFileRestoreReconciler{}
+
+	t.Run("builds failed progress with all fields", func(t *testing.T) {
+		createdAt := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+		backupInfo := oadptypes.VeleroBackupInfo{
+			Name:      "test-backup",
+			Namespace: "openshift-adp",
+			CreatedAt: &createdAt,
+		}
+
+		result := reconciler.buildFailedProgress(backupInfo, "DiscoveryFailed", "failed to discover PVCs")
+
+		// Verify backup info copied correctly
+		if result.VeleroBackupInfo.Name != "test-backup" {
+			t.Errorf("Expected name 'test-backup', got '%s'", result.VeleroBackupInfo.Name)
+		}
+		if result.VeleroBackupInfo.Namespace != "openshift-adp" {
+			t.Errorf("Expected namespace 'openshift-adp', got '%s'", result.VeleroBackupInfo.Namespace)
+		}
+		if result.VeleroBackupInfo.CreatedAt != &createdAt {
+			t.Error("CreatedAt timestamp not preserved")
+		}
+
+		// Verify PVCs is empty list
+		if result.VeleroBackupInfo.PVCs == nil {
+			t.Error("Expected PVCs to be non-nil empty slice")
+		}
+		if len(result.VeleroBackupInfo.PVCs) != 0 {
+			t.Errorf("Expected empty PVCs list, got %d items", len(result.VeleroBackupInfo.PVCs))
+		}
+
+		// Verify status
+		if result.Status != oadptypes.BackupDiscoveryStatusFailed {
+			t.Errorf("Expected status Failed, got %s", result.Status)
+		}
+
+		// Verify message format
+		expectedMessage := "DiscoveryFailed: failed to discover PVCs"
+		if result.Message != expectedMessage {
+			t.Errorf("Expected message '%s', got '%s'", expectedMessage, result.Message)
+		}
+
+		// Verify LastUpdated is set
+		if result.LastUpdated == nil {
+			t.Error("Expected LastUpdated to be set")
+		}
+	})
+
+	t.Run("builds failed progress with empty reason and message", func(t *testing.T) {
+		backupInfo := oadptypes.VeleroBackupInfo{
+			Name:      "backup-2",
+			Namespace: "velero",
+		}
+
+		result := reconciler.buildFailedProgress(backupInfo, "", "")
+
+		if result.VeleroBackupInfo.Name != "backup-2" {
+			t.Errorf("Expected name 'backup-2', got '%s'", result.VeleroBackupInfo.Name)
+		}
+
+		// Message should still be formatted, even if empty
+		expectedMessage := ": "
+		if result.Message != expectedMessage {
+			t.Errorf("Expected message '%s', got '%s'", expectedMessage, result.Message)
+		}
+
+		if result.Status != oadptypes.BackupDiscoveryStatusFailed {
+			t.Errorf("Expected status Failed, got %s", result.Status)
+		}
+	})
+
+	t.Run("builds failed progress with nil CreatedAt", func(t *testing.T) {
+		backupInfo := oadptypes.VeleroBackupInfo{
+			Name:      "backup-3",
+			Namespace: "test-ns",
+			CreatedAt: nil,
+		}
+
+		result := reconciler.buildFailedProgress(backupInfo, "Timeout", "discovery timeout exceeded")
+
+		if result.VeleroBackupInfo.CreatedAt != nil {
+			t.Error("Expected CreatedAt to remain nil")
+		}
+
+		expectedMessage := "Timeout: discovery timeout exceeded"
+		if result.Message != expectedMessage {
+			t.Errorf("Expected message '%s', got '%s'", expectedMessage, result.Message)
+		}
+	})
+
+	t.Run("sets LastUpdated to current time", func(t *testing.T) {
+		backupInfo := oadptypes.VeleroBackupInfo{
+			Name:      "backup-time-test",
+			Namespace: "test-ns",
+		}
+
+		before := time.Now()
+		result := reconciler.buildFailedProgress(backupInfo, "Error", "test error")
+		after := time.Now()
+
+		if result.LastUpdated == nil {
+			t.Fatal("Expected LastUpdated to be set")
+		}
+
+		// LastUpdated should be between before and after
+		if result.LastUpdated.Time.Before(before) || result.LastUpdated.Time.After(after) {
+			t.Error("LastUpdated should be set to current time")
+		}
+	})
+}
