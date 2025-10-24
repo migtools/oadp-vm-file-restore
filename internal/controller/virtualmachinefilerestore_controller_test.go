@@ -34,6 +34,7 @@ import (
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -1839,6 +1840,302 @@ func TestGetDiscoveryResource(t *testing.T) {
 				} else if discovery.Name != tt.vmfrSpec.BackupsDiscoveryRef {
 					t.Errorf("Expected discovery name '%s', got '%s'", tt.vmfrSpec.BackupsDiscoveryRef, discovery.Name)
 				}
+			}
+		})
+	}
+}
+
+func TestHandleVeleroRestoreCleanup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name                  string
+		vmfr                  *oadpv1alpha1.VirtualMachineFileRestore
+		existingRestores      []*velerov1api.Restore
+		expectRequeue         bool
+		expectError           bool
+		errorContains         string
+		expectFinalizerRemoved bool
+		expectDeletedCount     int
+	}{
+		{
+			name: "finalizer not present returns false",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-vmfr",
+					Namespace:  "test-ns",
+					UID:        "test-uid",
+					Finalizers: []string{}, // No finalizer
+				},
+			},
+			existingRestores:       []*velerov1api.Restore{},
+			expectRequeue:          false,
+			expectError:            false,
+			expectFinalizerRemoved: false,
+		},
+		{
+			name: "no restores to cleanup removes finalizer",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VeleroRestoreCleanupFinalizer,
+						constant.VMFileRestoreFinalizer,
+					},
+				},
+			},
+			existingRestores:       []*velerov1api.Restore{},
+			expectRequeue:          true,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectDeletedCount:     0,
+		},
+		{
+			name: "deletes single velero restore",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VeleroRestoreCleanupFinalizer,
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			expectRequeue:          true,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectDeletedCount:     1,
+		},
+		{
+			name: "deletes multiple velero restores",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VeleroRestoreCleanupFinalizer,
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-2",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-3",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			expectRequeue:          true,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectDeletedCount:     3,
+		},
+		{
+			name: "skips restores without matching label",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VeleroRestoreCleanupFinalizer,
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-other",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "other-uid",
+						},
+					},
+				},
+			},
+			expectRequeue:          true,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectDeletedCount:     1, // Only restore-1 should be deleted
+		},
+		{
+			name: "skips restores in different namespace",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VeleroRestoreCleanupFinalizer,
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-other-ns",
+						Namespace: "other-namespace",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			expectRequeue:          true,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectDeletedCount:     1, // Only OADP namespace restore should be deleted
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Build list of objects to initialize fake client
+			objects := []client.Object{tt.vmfr}
+			for _, restore := range tt.existingRestores {
+				objects = append(objects, restore)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: "openshift-adp",
+			}
+
+			requeue, err := reconciler.handleVeleroRestoreCleanup(ctx, zap.New(), tt.vmfr)
+
+			// Validate error expectations
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+			}
+
+			// Validate requeue expectation
+			if requeue != tt.expectRequeue {
+				t.Errorf("Expected requeue=%v, got %v", tt.expectRequeue, requeue)
+			}
+
+			// Get updated VMFR to check finalizer
+			updated := &oadpv1alpha1.VirtualMachineFileRestore{}
+			err = fakeClient.Get(ctx, types.NamespacedName{Name: tt.vmfr.Name, Namespace: tt.vmfr.Namespace}, updated)
+			if err != nil {
+				t.Fatalf("Failed to get updated VMFR: %v", err)
+			}
+
+			// Validate finalizer removal
+			hasFinalizer := controllerutil.ContainsFinalizer(updated, constant.VeleroRestoreCleanupFinalizer)
+			if tt.expectFinalizerRemoved && hasFinalizer {
+				t.Error("Expected finalizer to be removed, but it's still present")
+			}
+			if !tt.expectFinalizerRemoved && !hasFinalizer && len(tt.vmfr.Finalizers) > 0 {
+				// Only check if original had finalizers
+				for _, f := range tt.vmfr.Finalizers {
+					if f == constant.VeleroRestoreCleanupFinalizer {
+						t.Error("Expected finalizer to remain, but it was removed")
+						break
+					}
+				}
+			}
+
+			// Validate deletion count by checking remaining restores
+			remainingRestores := &velerov1api.RestoreList{}
+			listOpts := []client.ListOption{
+				client.InNamespace("openshift-adp"),
+				client.MatchingLabels{
+					constant.VMFROriginUUIDLabel: string(tt.vmfr.UID),
+				},
+			}
+			err = fakeClient.List(ctx, remainingRestores, listOpts...)
+			if err != nil {
+				t.Fatalf("Failed to list remaining restores: %v", err)
+			}
+
+			// Count how many restores should have been deleted (in OADP namespace with matching label)
+			expectedToDelete := 0
+			for _, r := range tt.existingRestores {
+				if r.Namespace == "openshift-adp" && r.Labels[constant.VMFROriginUUIDLabel] == string(tt.vmfr.UID) {
+					expectedToDelete++
+				}
+			}
+
+			// After deletion, there should be 0 matching restores left
+			if len(remainingRestores.Items) != 0 {
+				t.Errorf("Expected 0 remaining restores, found %d", len(remainingRestores.Items))
+			}
+
+			// Verify expected deletion count matches what we calculated
+			if tt.expectDeletedCount != expectedToDelete {
+				t.Errorf("Test setup error: expectDeletedCount=%d but calculated %d restores should be deleted",
+					tt.expectDeletedCount, expectedToDelete)
 			}
 		})
 	}
