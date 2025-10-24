@@ -1,0 +1,8 @@
+apiVersion: oadp.openshift.io/v1alpha1
+kind: VirtualMachineBackupsDiscovery
+metadata:
+  name: test-vm-discovery
+  namespace: openshift-adp
+spec:
+  virtualMachineName: test-vm
+  virtualMachineNamespace: vm-test-ns
