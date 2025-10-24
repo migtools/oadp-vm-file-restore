@@ -1656,3 +1656,190 @@ func TestProcessDiscoveryResults(t *testing.T) {
 		})
 	}
 }
+
+func TestGetVeleroBackup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		existingObjs  []client.Object
+		backupName    string
+		backupNS      string
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name: "finds existing backup",
+			existingObjs: []client.Object{
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-backup",
+						Namespace: "openshift-adp",
+					},
+				},
+			},
+			backupName:  "test-backup",
+			backupNS:    "openshift-adp",
+			expectError: false,
+		},
+		{
+			name:          "returns error when backup not found",
+			existingObjs:  []client.Object{},
+			backupName:    "nonexistent-backup",
+			backupNS:      "openshift-adp",
+			expectError:   true,
+			errorContains: "failed to get Velero backup",
+		},
+		{
+			name: "finds backup with specific namespace",
+			existingObjs: []client.Object{
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "backup-1",
+						Namespace: "namespace-1",
+					},
+				},
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "backup-1",
+						Namespace: "namespace-2",
+					},
+				},
+			},
+			backupName:  "backup-1",
+			backupNS:    "namespace-2",
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjs...).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			backup, err := reconciler.getVeleroBackup(ctx, tt.backupName, tt.backupNS)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+				if backup == nil {
+					t.Error("Expected backup to be returned, got nil")
+				} else if backup.Name != tt.backupName {
+					t.Errorf("Expected backup name '%s', got '%s'", tt.backupName, backup.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestGetDiscoveryResource(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		existingObjs  []client.Object
+		vmfrSpec      oadpv1alpha1.VirtualMachineFileRestoreSpec
+		vmfrNamespace string
+		expectError   bool
+	}{
+		{
+			name: "finds existing discovery resource",
+			existingObjs: []client.Object{
+				&oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-discovery",
+						Namespace: "test-ns",
+					},
+				},
+			},
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				BackupsDiscoveryRef: "test-discovery",
+			},
+			vmfrNamespace: "test-ns",
+			expectError:   false,
+		},
+		{
+			name:         "returns error when discovery not found",
+			existingObjs: []client.Object{},
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				BackupsDiscoveryRef: "nonexistent-discovery",
+			},
+			vmfrNamespace: "test-ns",
+			expectError:   true,
+		},
+		{
+			name: "finds discovery in same namespace only",
+			existingObjs: []client.Object{
+				&oadpv1alpha1.VirtualMachineBackupsDiscovery{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "discovery-1",
+						Namespace: "other-ns",
+					},
+				},
+			},
+			vmfrSpec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				BackupsDiscoveryRef: "discovery-1",
+			},
+			vmfrNamespace: "test-ns",
+			expectError:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjs...).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: tt.vmfrNamespace,
+				},
+				Spec: tt.vmfrSpec,
+			}
+
+			discovery, err := reconciler.getDiscoveryResource(ctx, vmfr)
+
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+				if discovery == nil {
+					t.Error("Expected discovery to be returned, got nil")
+				} else if discovery.Name != tt.vmfrSpec.BackupsDiscoveryRef {
+					t.Errorf("Expected discovery name '%s', got '%s'", tt.vmfrSpec.BackupsDiscoveryRef, discovery.Name)
+				}
+			}
+		})
+	}
+}
