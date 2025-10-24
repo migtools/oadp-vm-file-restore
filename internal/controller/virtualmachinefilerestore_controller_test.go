@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -935,4 +936,213 @@ func TestBuildFailedProgress(t *testing.T) {
 			t.Error("LastUpdated should be set to current time")
 		}
 	})
+}
+
+func TestFindRestoredPVCName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name              string
+		existingPVCs      []*corev1.PersistentVolumeClaim
+		restoreNamespace  string
+		veleroRestoreName string
+		originalPVCName   string
+		expectedPVCName   string
+		expectError       bool
+		errorContains     string
+	}{
+		{
+			name: "finds PVC by restore label and annotation",
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-abc123",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "test-restore",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "original-pvc-name",
+						},
+					},
+				},
+			},
+			restoreNamespace:  "restore-ns",
+			veleroRestoreName: "test-restore",
+			originalPVCName:   "original-pvc-name",
+			expectedPVCName:   "restored-pvc-abc123",
+			expectError:       false,
+		},
+		{
+			name:              "returns error when no PVCs exist",
+			existingPVCs:      []*corev1.PersistentVolumeClaim{},
+			restoreNamespace:  "restore-ns",
+			veleroRestoreName: "test-restore",
+			originalPVCName:   "original-pvc-name",
+			expectError:       true,
+			errorContains:     "PVC not found for restore test-restore with original name original-pvc-name",
+		},
+		{
+			name: "skips PVCs with wrong restore label",
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "wrong-restore-pvc",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "different-restore",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "original-pvc-name",
+						},
+					},
+				},
+			},
+			restoreNamespace:  "restore-ns",
+			veleroRestoreName: "test-restore",
+			originalPVCName:   "original-pvc-name",
+			expectError:       true,
+			errorContains:     "PVC not found",
+		},
+		{
+			name: "skips PVCs with wrong annotation value",
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "wrong-annotation-pvc",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "test-restore",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "different-pvc-name",
+						},
+					},
+				},
+			},
+			restoreNamespace:  "restore-ns",
+			veleroRestoreName: "test-restore",
+			originalPVCName:   "original-pvc-name",
+			expectError:       true,
+			errorContains:     "PVC not found",
+		},
+		{
+			name: "skips PVCs with nil annotations",
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "no-annotations-pvc",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "test-restore",
+						},
+						Annotations: nil,
+					},
+				},
+			},
+			restoreNamespace:  "restore-ns",
+			veleroRestoreName: "test-restore",
+			originalPVCName:   "original-pvc-name",
+			expectError:       true,
+			errorContains:     "PVC not found",
+		},
+		{
+			name: "finds correct PVC among multiple candidates",
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pvc-1",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "test-restore",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "other-pvc",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pvc-2",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "test-restore",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "target-pvc",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pvc-3",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "test-restore",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "another-pvc",
+						},
+					},
+				},
+			},
+			restoreNamespace:  "restore-ns",
+			veleroRestoreName: "test-restore",
+			originalPVCName:   "target-pvc",
+			expectedPVCName:   "pvc-2",
+			expectError:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := make([]client.Object, len(tt.existingPVCs))
+			for i, pvc := range tt.existingPVCs {
+				objects[i] = pvc
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			name, err := reconciler.findRestoredPVCName(ctx, tt.restoreNamespace, tt.veleroRestoreName, tt.originalPVCName)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+				if name != tt.expectedPVCName {
+					t.Errorf("Expected PVC name '%s', got '%s'", tt.expectedPVCName, name)
+				}
+			}
+		})
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		(len(s) > 0 && len(substr) > 0 && stringContains(s, substr)))
+}
+
+func stringContains(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
