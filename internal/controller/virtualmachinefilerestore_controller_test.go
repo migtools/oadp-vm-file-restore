@@ -3680,6 +3680,521 @@ func TestMonitorVeleroRestores(t *testing.T) {
 	}
 }
 
+func TestValidateRestoredPVCs(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
+
+	tests := []struct {
+		name          string
+		vmfr          *oadpv1alpha1.VirtualMachineFileRestore
+		existingPVCs  []*corev1.PersistentVolumeClaim
+		expectAllValid bool
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name: "error when restore namespace is empty",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "", // Empty namespace
+				},
+			},
+			expectAllValid: false,
+			expectError:    true,
+			errorContains:  "restore namespace not found in status",
+		},
+		{
+			name: "error when no completed PVC restores found",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName: "backup-1",
+									Phase:            velerov1api.RestorePhaseFailed, // Not completed
+									State:            string(oadptypes.BackupDiscoveryStateAvailable),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectAllValid: false,
+			expectError:    true,
+			errorContains:  "no completed PVC restores found",
+		},
+		{
+			name: "all PVCs in Pending state are valid",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimPending,
+					},
+				},
+			},
+			expectAllValid: true,
+			expectError:    false,
+		},
+		{
+			name: "all PVCs in Bound state are valid",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						VolumeName: "pv-1",
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimBound,
+					},
+				},
+			},
+			expectAllValid: true,
+			expectError:    false,
+		},
+		{
+			name: "PVC in Lost state returns error",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimLost,
+					},
+				},
+			},
+			expectAllValid: false,
+			expectError:    true,
+			errorContains:  "PVC pvc-1 is in Lost state",
+		},
+		{
+			name: "PVC not yet created returns allValid false",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs:   []*corev1.PersistentVolumeClaim{}, // No PVCs exist
+			expectAllValid: false,
+			expectError:    false, // Not an error, just not all valid yet
+		},
+		{
+			name: "multiple PVCs all valid",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-2",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-2",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimPending,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-2",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-2",
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimBound,
+					},
+				},
+			},
+			expectAllValid: true,
+			expectError:    false,
+		},
+		{
+			name: "skips synthetic PVC entries",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      constant.BackupLevelFailurePVCName, // Synthetic entry
+								PVCNamespace: "vm-ns",
+								PVCUID:       "synthetic-uid",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName: "failed-backup",
+									State:            string(oadptypes.BackupDiscoveryStateBackupDeleted),
+									Timestamp:        &time1,
+								},
+							},
+						},
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimBound,
+					},
+				},
+			},
+			expectAllValid: true,
+			expectError:    false,
+		},
+		{
+			name: "mixed PVC states - some pending, some bound",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-2",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "uid-2",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:             &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingPVCs: []*corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimPending,
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-2",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-2",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						VolumeName: "pv-2",
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimBound,
+					},
+				},
+			},
+			expectAllValid: true,
+			expectError:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{tt.vmfr}
+			for _, pvc := range tt.existingPVCs {
+				objects = append(objects, pvc)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: "openshift-adp",
+			}
+
+			allValid, err := reconciler.validateRestoredPVCs(ctx, zap.New(), tt.vmfr)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error containing '%s', got nil", tt.errorContains)
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing '%s', got '%s'", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+			}
+
+			if allValid != tt.expectAllValid {
+				t.Errorf("Expected allValid=%v, got %v", tt.expectAllValid, allValid)
+			}
+		})
+	}
+}
+
 func TestCreateVeleroRestores(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = oadpv1alpha1.AddToScheme(scheme)
