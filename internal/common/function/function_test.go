@@ -23,6 +23,7 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
 
@@ -686,4 +687,181 @@ func TestValidateFileBrowserSecret(t *testing.T) {
 			t.Errorf("Expected password at minimum length to pass validation, got error: %v", err)
 		}
 	})
+}
+
+func TestCheckVeleroRestoreMetadata(t *testing.T) {
+	t.Run("returns true when label exists", func(t *testing.T) {
+		obj := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+				Labels: map[string]string{
+					constant.VMFROriginUUIDLabel: "test-uuid-123",
+				},
+			},
+		}
+
+		result := CheckVeleroRestoreMetadata(obj)
+		if !result {
+			t.Error("Expected true when VMFROriginUUIDLabel exists")
+		}
+	})
+
+	t.Run("returns false when label does not exist", func(t *testing.T) {
+		obj := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+				Labels: map[string]string{
+					"other-label": "value",
+				},
+			},
+		}
+
+		result := CheckVeleroRestoreMetadata(obj)
+		if result {
+			t.Error("Expected false when VMFROriginUUIDLabel does not exist")
+		}
+	})
+
+	t.Run("returns false when labels are nil", func(t *testing.T) {
+		obj := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+			},
+		}
+
+		result := CheckVeleroRestoreMetadata(obj)
+		if result {
+			t.Error("Expected false when labels are nil")
+		}
+	})
+
+	t.Run("returns true with empty label value", func(t *testing.T) {
+		obj := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-pod",
+				Namespace: "default",
+				Labels: map[string]string{
+					constant.VMFROriginUUIDLabel: "",
+				},
+			},
+		}
+
+		result := CheckVeleroRestoreMetadata(obj)
+		if !result {
+			t.Error("Expected true when VMFROriginUUIDLabel exists even with empty value")
+		}
+	})
+}
+
+func TestFormatSizeHumanReadable(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "1 byte",
+			input:    "1",
+			expected: "1",
+		},
+		{
+			name:     "1 KiB",
+			input:    "1024",
+			expected: "1Ki",
+		},
+		{
+			name:     "1 MiB",
+			input:    "1048576",
+			expected: "1Mi",
+		},
+		{
+			name:     "1 GiB",
+			input:    "1073741824",
+			expected: "1Gi",
+		},
+		{
+			name:     "5 GiB",
+			input:    "5368709120",
+			expected: "5Gi",
+		},
+		{
+			name:     "30 GiB",
+			input:    "32212254720",
+			expected: "30Gi",
+		},
+		{
+			name:     "1 TiB",
+			input:    "1099511627776",
+			expected: "1Ti",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			quantity := resource.MustParse(tt.input)
+			result := FormatSizeHumanReadable(quantity)
+
+			if result != tt.expected {
+				t.Errorf("FormatSizeHumanReadable(%s) = %s, want %s", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMin(t *testing.T) {
+	tests := []struct {
+		name     string
+		a        int
+		b        int
+		expected int
+	}{
+		{
+			name:     "a less than b",
+			a:        5,
+			b:        10,
+			expected: 5,
+		},
+		{
+			name:     "b less than a",
+			a:        10,
+			b:        5,
+			expected: 5,
+		},
+		{
+			name:     "equal values",
+			a:        7,
+			b:        7,
+			expected: 7,
+		},
+		{
+			name:     "negative values",
+			a:        -5,
+			b:        -10,
+			expected: -10,
+		},
+		{
+			name:     "zero and positive",
+			a:        0,
+			b:        5,
+			expected: 0,
+		},
+		{
+			name:     "zero and negative",
+			a:        0,
+			b:        -5,
+			expected: -5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := min(tt.a, tt.b)
+			if result != tt.expected {
+				t.Errorf("min(%d, %d) = %d, want %d", tt.a, tt.b, result, tt.expected)
+			}
+		})
+	}
 }
