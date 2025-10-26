@@ -185,6 +185,7 @@ func GenerateSSHKeyPair(logger logr.Logger) (*SSHKeyPair, error) {
 
 	// Encode public key in OpenSSH authorized_keys format
 	// Format: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... [optional comment]
+	// ssh.MarshalAuthorizedKey includes a trailing newline, which is required by SSH servers
 	publicKeyStr := string(ssh.MarshalAuthorizedKey(sshPublicKey))
 
 	logger.V(1).Info("Successfully generated SSH ED25519 keypair",
@@ -192,7 +193,7 @@ func GenerateSSHKeyPair(logger logr.Logger) (*SSHKeyPair, error) {
 
 	return &SSHKeyPair{
 		PrivateKey: privateKeyStr,
-		PublicKey:  strings.TrimSpace(publicKeyStr), // Remove trailing newline
+		PublicKey:  publicKeyStr, // Keep trailing newline - required by SSH
 	}, nil
 }
 

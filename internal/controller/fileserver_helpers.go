@@ -1090,7 +1090,7 @@ func buildSSHSidecar(
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  config.CredentialsSecretName,
-				DefaultMode: ptr.To(int32(0400)),
+				DefaultMode: ptr.To(int32(0444)), // Readable by all (needed for oadp user to read authorized_keys)
 			},
 		},
 	}
@@ -1274,7 +1274,7 @@ func buildFileBrowserSidecar(
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  config.CredentialsSecretName,
-				DefaultMode: ptr.To(int32(0400)),
+				DefaultMode: ptr.To(int32(0444)), // Readable by all (needed for file browser container user)
 			},
 		},
 	}
