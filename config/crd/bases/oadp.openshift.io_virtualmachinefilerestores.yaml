@@ -91,6 +91,12 @@ spec:
                         required:
                         - name
                         type: object
+                      exposeExternally:
+                        description: |-
+                          ExposeExternally enables creation of an OpenShift Route for the FileBrowser service.
+                          When enabled, creates a Route with reencrypt TLS termination for external HTTPS access.
+                          Only effective on OpenShift clusters.
+                        type: boolean
                     type: object
                   ssh:
                     description: |-
@@ -101,7 +107,7 @@ spec:
                       credentialsSecretRef:
                         description: |-
                           CredentialsSecretRef references a Secret containing SSH authentication credentials.
-                          The Secret must have a "publicKey" key for SSH key-based authentication.
+                          The Secret must have an "authorized_keys" key for SSH key-based authentication.
                           The "username" key is optional and defaults to "oadp" if not provided.
                           Note: Only SSH key-based authentication is supported; password authentication is not available.
                           Takes precedence over inline Username and PublicKey fields.
@@ -242,6 +248,78 @@ spec:
               fileServingInfo:
                 description: Information about the file serving resources that have
                   been created.
+                properties:
+                  fileBrowser:
+                    description: FileBrowser contains HTTPS file browser access information,
+                      if enabled.
+                    properties:
+                      clusterAccess:
+                        description: |-
+                          ClusterAccess provides the internal HTTPS URL, usable from within the cluster network.
+                          Example: "https://vmfr-browser.restore-tmp.svc.cluster.local"
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a Secret containing login credentials for the file browser:
+                          - "username"
+                          - "password"
+                          If not specified, the controller creates and manages this Secret automatically.
+                        properties:
+                          name:
+                            description: Name of the Secret
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace where the Secret is located.
+                              Defaults to the OADP namespace when not specified.
+                              Note: Secrets outside TemporaryRestoreNamespace are automatically
+                              copied to that namespace for mounting in the serving pod.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      publicAccess:
+                        description: |-
+                          PublicAccess provides the external HTTPS URL, if exposed via Route or Ingress.
+                          Example: "https://restore-files.apps.example.com"
+                        type: string
+                    type: object
+                  ssh:
+                    description: SSH contains SSH/SFTP/SCP/rsync access information,
+                      if enabled.
+                    properties:
+                      clusterAccess:
+                        description: |-
+                          ClusterAccess provides the internal SSH endpoint, accessible within the cluster
+                          or from environments connected to the cluster network (e.g. via VPN, oc port-forward).
+                          SSH is only exposed within the cluster for security reasons.
+                          Use 'oc port-forward' or 'kubectl port-forward' for external access.
+                          Example: "ssh://vmfr-ssh.restore-tmp.svc.cluster.local:22"
+                        type: string
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef references a Secret containing SSH connection details:
+                          - "username"
+                          - "authorized_keys"
+                          - optionally "privateKey"
+                          The Secret is created or referenced by the controller.
+                        properties:
+                          name:
+                            description: Name of the Secret
+                            minLength: 1
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace where the Secret is located.
+                              Defaults to the OADP namespace when not specified.
+                              Note: Secrets outside TemporaryRestoreNamespace are automatically
+                              copied to that namespace for mounting in the serving pod.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    type: object
                 type: object
               observedGeneration:
                 description: |-

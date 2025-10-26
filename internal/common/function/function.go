@@ -24,11 +24,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// CheckVeleroRestoreMetadata return true if Velero Restore object has required VMFR origin labels
-func CheckVeleroRestoreMetadata(obj client.Object) bool {
-	objLabels := obj.GetLabels()
-	_, exists := objLabels[constant.VMFROriginUUIDLabel]
-	return exists
+// HasVMFRLabel checks if an object has the VMFR origin UUID label.
+// This is used by predicates to filter resources owned by VirtualMachineFileRestore.
+func HasVMFRLabel(obj client.Object) bool {
+	labels := obj.GetLabels()
+	if labels == nil {
+		return false
+	}
+	_, hasLabel := labels[constant.VMFROriginUUIDLabel]
+	return hasLabel
 }
 
 // GetLogger return a logger from input ctx, with additional key/value pairs being
@@ -236,7 +240,7 @@ func min(a, b int) int {
 // The Secret will contain:
 // - username: SSH username
 // - privateKey: SSH private key in PEM format
-// - publicKey: SSH public key in authorized_keys format
+// - authorized_keys: SSH public key in authorized_keys format
 // The Secret can be found later using VMFROriginUUIDLabel and CredentialTypeLabel.
 func CreateSSHCredentialsSecret(
 	generateNamePrefix string,
@@ -275,9 +279,9 @@ func CreateSSHCredentialsSecret(
 		},
 		Type: corev1.SecretTypeOpaque,
 		StringData: map[string]string{
-			"username":   username,
-			"privateKey": keyPair.PrivateKey,
-			"publicKey":  keyPair.PublicKey,
+			"username":        username,
+			"privateKey":      keyPair.PrivateKey,
+			"authorized_keys": keyPair.PublicKey,
 		},
 	}
 
@@ -390,7 +394,7 @@ func ValidateSSHPublicKey(publicKey []byte) error {
 
 // ValidateSSHSecret validates that a Secret contains the required SSH credential fields.
 // Required fields:
-// - publicKey: SSH public key in authorized_keys format
+// - authorized_keys: SSH public key in authorized_keys format
 // Optional fields:
 // - username: SSH username (defaults to "oadp" if not provided)
 // - privateKey: SSH private key (only for user reference, not used by server)
@@ -399,15 +403,15 @@ func ValidateSSHSecret(secret *corev1.Secret, logger logr.Logger) error {
 		return fmt.Errorf("secret data is nil")
 	}
 
-	// Check for required publicKey field
-	publicKey, exists := secret.Data["publicKey"]
+	// Check for required authorized_keys field
+	publicKey, exists := secret.Data["authorized_keys"]
 	if !exists || len(publicKey) == 0 {
-		return fmt.Errorf("secret missing required field 'publicKey'")
+		return fmt.Errorf("secret missing required field 'authorized_keys'")
 	}
 
-	// Validate publicKey format using robust SSH parser
+	// Validate authorized_keys format using robust SSH parser
 	if err := ValidateSSHPublicKey(publicKey); err != nil {
-		return fmt.Errorf("publicKey validation failed: %w", err)
+		return fmt.Errorf("authorized_keys validation failed: %w", err)
 	}
 
 	logger.V(1).Info("SSH secret validation passed",

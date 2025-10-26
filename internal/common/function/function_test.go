@@ -188,7 +188,7 @@ func TestCreateSSHCredentialsSecret(t *testing.T) {
 		if secret.StringData["privateKey"] != "test-private-key" {
 			t.Error("Private key not stored correctly")
 		}
-		if secret.StringData["publicKey"] != "test-public-key" {
+		if secret.StringData["authorized_keys"] != "test-public-key" {
 			t.Error("Public key not stored correctly")
 		}
 	})
@@ -435,7 +435,7 @@ func TestValidateSSHSecret(t *testing.T) {
 				Namespace: "test-ns",
 			},
 			Data: map[string][]byte{
-				"publicKey": []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
+				"authorized_keys": []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
 			},
 		}
 
@@ -452,8 +452,8 @@ func TestValidateSSHSecret(t *testing.T) {
 				Namespace: "test-ns",
 			},
 			Data: map[string][]byte{
-				"publicKey": []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
-				"username":  []byte("testuser"),
+				"authorized_keys": []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
+				"username":        []byte("testuser"),
 			},
 		}
 
@@ -470,9 +470,9 @@ func TestValidateSSHSecret(t *testing.T) {
 				Namespace: "test-ns",
 			},
 			Data: map[string][]byte{
-				"publicKey":  []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
-				"privateKey": []byte("-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----"),
-				"username":   []byte("testuser"),
+				"authorized_keys": []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"),
+				"privateKey":      []byte("-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----"),
+				"username":        []byte("testuser"),
 			},
 		}
 
@@ -510,7 +510,7 @@ func TestValidateSSHSecret(t *testing.T) {
 
 		err := ValidateSSHSecret(secret, logger)
 		if err == nil {
-			t.Error("Expected secret without publicKey to fail validation")
+			t.Error("Expected secret without authorized_keys to fail validation")
 		}
 	})
 
@@ -521,13 +521,13 @@ func TestValidateSSHSecret(t *testing.T) {
 				Namespace: "test-ns",
 			},
 			Data: map[string][]byte{
-				"publicKey": []byte(""),
+				"authorized_keys": []byte(""),
 			},
 		}
 
 		err := ValidateSSHSecret(secret, logger)
 		if err == nil {
-			t.Error("Expected secret with empty publicKey to fail validation")
+			t.Error("Expected secret with empty authorized_keys to fail validation")
 		}
 	})
 
@@ -538,13 +538,13 @@ func TestValidateSSHSecret(t *testing.T) {
 				Namespace: "test-ns",
 			},
 			Data: map[string][]byte{
-				"publicKey": []byte("not-a-valid-ssh-key"),
+				"authorized_keys": []byte("not-a-valid-ssh-key"),
 			},
 		}
 
 		err := ValidateSSHSecret(secret, logger)
 		if err == nil {
-			t.Error("Expected secret with invalid publicKey to fail validation")
+			t.Error("Expected secret with invalid authorized_keys to fail validation")
 		}
 	})
 
@@ -555,13 +555,13 @@ func TestValidateSSHSecret(t *testing.T) {
 				Namespace: "test-ns",
 			},
 			Data: map[string][]byte{
-				"publicKey": []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCgdRkm8/liQKXLAUVsC9ohk+TJk0/lJIy/7jDK0VoZtK9mnEDCxtsk1swu9n4q5yzg6kDevOSvdy+RmBddMc9P4QMbvmXLkXwq7JXIDAGuS80xwXDl1TtvwT760uuhmSD9jBNYiD26+p+YAvutFcr3XDgv4JFuLs7oSgSnRxOd2JOdx8n/XMzWBsADVNErfZ1+AqF37JI6wxn2eVCgbSJRQguA2uk2V1DWvhaptGXGYyUjjuwcVh525gGwqEYaaokzkTha8WsjJRE1Edlj2j34C3j+5p/vIASbYy0ah20j1Qi1aYplOkOIZcT3t+NFR9cqvwN//bhBQJrYXGS9c781 test@example.com"),
+				"authorized_keys": []byte("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCgdRkm8/liQKXLAUVsC9ohk+TJk0/lJIy/7jDK0VoZtK9mnEDCxtsk1swu9n4q5yzg6kDevOSvdy+RmBddMc9P4QMbvmXLkXwq7JXIDAGuS80xwXDl1TtvwT760uuhmSD9jBNYiD26+p+YAvutFcr3XDgv4JFuLs7oSgSnRxOd2JOdx8n/XMzWBsADVNErfZ1+AqF37JI6wxn2eVCgbSJRQguA2uk2V1DWvhaptGXGYyUjjuwcVh525gGwqEYaaokzkTha8WsjJRE1Edlj2j34C3j+5p/vIASbYy0ah20j1Qi1aYplOkOIZcT3t+NFR9cqvwN//bhBQJrYXGS9c781 test@example.com"),
 			},
 		}
 
 		err := ValidateSSHSecret(secret, logger)
 		if err != nil {
-			t.Errorf("Expected secret with valid ssh-rsa publicKey to pass validation, got error: %v", err)
+			t.Errorf("Expected secret with valid ssh-rsa authorized_keys to pass validation, got error: %v", err)
 		}
 	})
 }

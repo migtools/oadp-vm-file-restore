@@ -126,7 +126,7 @@ type SSHAccessSpec struct {
 	PublicKey string `json:"publicKey,omitempty"`
 
 	// CredentialsSecretRef references a Secret containing SSH authentication credentials.
-	// The Secret must have a "publicKey" key for SSH key-based authentication.
+	// The Secret must have an "authorized_keys" key for SSH key-based authentication.
 	// The "username" key is optional and defaults to "oadp" if not provided.
 	// Note: Only SSH key-based authentication is supported; password authentication is not available.
 	// Takes precedence over inline Username and PublicKey fields.
@@ -144,6 +144,12 @@ type FileBrowserAccessSpec struct {
 	// in the temporary restore namespace.
 	// +optional
 	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
+
+	// ExposeExternally enables creation of an OpenShift Route for the FileBrowser service.
+	// When enabled, creates a Route with reencrypt TLS termination for external HTTPS access.
+	// Only effective on OpenShift clusters.
+	// +optional
+	ExposeExternally bool `json:"exposeExternally,omitempty"`
 }
 
 // SecretReference identifies a Secret by name and optional namespace
@@ -263,16 +269,54 @@ type RestoreInfo struct {
 	FailureReason string `json:"failureReason,omitempty"`
 }
 
-// FileServingInfo contains information about file serving resources
-// TODO: Define file serving information structure based on chosen implementation
-// Structure will be determined when file serving mechanism is implemented
+// FileServingInfo summarizes how restored files can be accessed
 type FileServingInfo struct {
-	// TODO: Add fields based on file serving implementation
-	// Potential fields may include:
-	// - Resource names (pods, services, jobs, etc.)
-	// - Access endpoints and credentials
-	// - Service ports and network configuration
-	// - User instructions for file access
+	// SSH contains SSH/SFTP/SCP/rsync access information, if enabled.
+	// +optional
+	SSH *SSHServingInfo `json:"ssh,omitempty"`
+
+	// FileBrowser contains HTTPS file browser access information, if enabled.
+	// +optional
+	FileBrowser *FileBrowserServingInfo `json:"fileBrowser,omitempty"`
+}
+
+// SSHServingInfo provides details for accessing restored files over SSH/SFTP/SCP/rsync
+type SSHServingInfo struct {
+	// ClusterAccess provides the internal SSH endpoint, accessible within the cluster
+	// or from environments connected to the cluster network (e.g. via VPN, oc port-forward).
+	// SSH is only exposed within the cluster for security reasons.
+	// Use 'oc port-forward' or 'kubectl port-forward' for external access.
+	// Example: "ssh://vmfr-ssh.restore-tmp.svc.cluster.local:22"
+	// +optional
+	ClusterAccess string `json:"clusterAccess,omitempty"`
+
+	// CredentialsSecretRef references a Secret containing SSH connection details:
+	// - "username"
+	// - "authorized_keys"
+	// - optionally "privateKey"
+	// The Secret is created or referenced by the controller.
+	// +optional
+	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
+}
+
+// FileBrowserServingInfo provides details for accessing restored files via HTTPS web interface
+type FileBrowserServingInfo struct {
+	// ClusterAccess provides the internal HTTPS URL, usable from within the cluster network.
+	// Example: "https://vmfr-browser.restore-tmp.svc.cluster.local"
+	// +optional
+	ClusterAccess string `json:"clusterAccess,omitempty"`
+
+	// PublicAccess provides the external HTTPS URL, if exposed via Route or Ingress.
+	// Example: "https://restore-files.apps.example.com"
+	// +optional
+	PublicAccess string `json:"publicAccess,omitempty"`
+
+	// CredentialsSecretRef references a Secret containing login credentials for the file browser:
+	// - "username"
+	// - "password"
+	// If not specified, the controller creates and manages this Secret automatically.
+	// +optional
+	CredentialsSecretRef *SecretReference `json:"credentialsSecretRef,omitempty"`
 }
 
 // +kubebuilder:storageversion
