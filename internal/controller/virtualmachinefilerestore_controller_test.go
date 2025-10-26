@@ -46,6 +46,11 @@ import (
 	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 )
 
+const (
+	testRestoreName   = "restore-1"
+	testOADPNamespace = "openshift-adp"
+)
+
 var _ = Describe("VirtualMachineFileRestore Controller", func() {
 	Context("Basic Reconciliation", func() {
 		const resourceName = "test-resource"
@@ -708,14 +713,6 @@ func TestErrUnsupportedBackup(t *testing.T) {
 			if result != tt.expectedString {
 				t.Errorf("Error() = %q, want %q", result, tt.expectedString)
 			}
-
-			// Verify fields are preserved
-			if tt.err.BackupName != "" && tt.err.BackupName != tt.err.BackupName {
-				t.Errorf("BackupName not preserved")
-			}
-			if tt.err.PVCName != "" && tt.err.PVCName != tt.err.PVCName {
-				t.Errorf("PVCName not preserved")
-			}
 		})
 	}
 }
@@ -729,7 +726,7 @@ func TestSortRestoresByTimestamp(t *testing.T) {
 		time3 := metav1.NewTime(time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
 
 		restores := []oadpv1alpha1.RestoreInfo{
-			{VeleroRestoreName: "restore-1", Timestamp: &time1},
+			{VeleroRestoreName: testRestoreName, Timestamp: &time1},
 			{VeleroRestoreName: "restore-3", Timestamp: &time3},
 			{VeleroRestoreName: "restore-2", Timestamp: &time2},
 		}
@@ -743,8 +740,8 @@ func TestSortRestoresByTimestamp(t *testing.T) {
 		if restores[1].VeleroRestoreName != "restore-2" {
 			t.Errorf("Expected restore-2 second, got %s", restores[1].VeleroRestoreName)
 		}
-		if restores[2].VeleroRestoreName != "restore-1" {
-			t.Errorf("Expected restore-1 third, got %s", restores[2].VeleroRestoreName)
+		if restores[2].VeleroRestoreName != testRestoreName {
+			t.Errorf("Expected %s third, got %s", testRestoreName, restores[2].VeleroRestoreName)
 		}
 	})
 
@@ -837,7 +834,7 @@ func TestBuildFailedProgress(t *testing.T) {
 		createdAt := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
 		backupInfo := oadptypes.VeleroBackupInfo{
 			Name:      "test-backup",
-			Namespace: "openshift-adp",
+			Namespace: testOADPNamespace,
 			CreatedAt: &createdAt,
 		}
 
@@ -847,8 +844,8 @@ func TestBuildFailedProgress(t *testing.T) {
 		if result.VeleroBackupInfo.Name != "test-backup" {
 			t.Errorf("Expected name 'test-backup', got '%s'", result.VeleroBackupInfo.Name)
 		}
-		if result.VeleroBackupInfo.Namespace != "openshift-adp" {
-			t.Errorf("Expected namespace 'openshift-adp', got '%s'", result.VeleroBackupInfo.Namespace)
+		if result.VeleroBackupInfo.Namespace != testOADPNamespace {
+			t.Errorf("Expected namespace '%s', got '%s'", testOADPNamespace, result.VeleroBackupInfo.Namespace)
 		}
 		if result.VeleroBackupInfo.CreatedAt != &createdAt {
 			t.Error("CreatedAt timestamp not preserved")
@@ -1855,12 +1852,12 @@ func TestHandleVeleroRestoreCleanup(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name                  string
-		vmfr                  *oadpv1alpha1.VirtualMachineFileRestore
-		existingRestores      []*velerov1api.Restore
-		expectRequeue         bool
-		expectError           bool
-		errorContains         string
+		name                   string
+		vmfr                   *oadpv1alpha1.VirtualMachineFileRestore
+		existingRestores       []*velerov1api.Restore
+		expectRequeue          bool
+		expectError            bool
+		errorContains          string
 		expectFinalizerRemoved bool
 		expectDeletedCount     int
 	}{
@@ -2125,7 +2122,7 @@ func TestHandleVeleroRestoreCleanup(t *testing.T) {
 			// Count how many restores should have been deleted (in OADP namespace with matching label)
 			expectedToDelete := 0
 			for _, r := range tt.existingRestores {
-				if r.Namespace == "openshift-adp" && r.Labels[constant.VMFROriginUUIDLabel] == string(tt.vmfr.UID) {
+				if r.Namespace == testOADPNamespace && r.Labels[constant.VMFROriginUUIDLabel] == string(tt.vmfr.UID) {
 					expectedToDelete++
 				}
 			}
@@ -2153,14 +2150,14 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name               string
-		vmfr               *oadpv1alpha1.VirtualMachineFileRestore
-		existingRestores   []*velerov1api.Restore
+		name                  string
+		vmfr                  *oadpv1alpha1.VirtualMachineFileRestore
+		existingRestores      []*velerov1api.Restore
 		existingDataDownloads []*veleroapiv2alpha1.DataDownload
-		existingPVCs       []*corev1.PersistentVolumeClaim
-		expectFixedCount   int
-		expectError        bool
-		errorContains      string
+		existingPVCs          []*corev1.PersistentVolumeClaim
+		expectFixedCount      int
+		expectError           bool
+		errorContains         string
 	}{
 		{
 			name: "no restore namespace returns zero",
@@ -2684,8 +2681,8 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 
 // mockBackupContentsReader is a simple mock implementation for testing
 type mockBackupContentsReader struct {
-	ExtractVMFunc   func(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (*kubevirtv1.VirtualMachine, error)
-	FetchPVCFunc    func(ctx context.Context, backup *velerov1api.Backup, pvcName, pvcNamespace string) (*corev1.PersistentVolumeClaim, error)
+	ExtractVMFunc func(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (*kubevirtv1.VirtualMachine, error)
+	FetchPVCFunc  func(ctx context.Context, backup *velerov1api.Backup, pvcName, pvcNamespace string) (*corev1.PersistentVolumeClaim, error)
 }
 
 func (m *mockBackupContentsReader) ExtractVMFromBackupMetadata(ctx context.Context, backup *velerov1api.Backup, vmName, vmNamespace string) (*kubevirtv1.VirtualMachine, error) {
@@ -2851,13 +2848,13 @@ func TestRunConcurrentPVCDiscovery(t *testing.T) {
 	time3 := metav1.NewTime(time.Date(2025, 1, 3, 10, 0, 0, 0, time.UTC))
 
 	tests := []struct {
-		name              string
-		backupsToServe    []oadptypes.VeleroBackupInfo
-		existingBackups   []*velerov1api.Backup
-		vmbd              *oadpv1alpha1.VirtualMachineBackupsDiscovery
-		mockReader        *mockBackupContentsReader
-		expectedResults   int
-		validateResults   func(t *testing.T, results []oadptypes.BackupDiscoveryProgress)
+		name            string
+		backupsToServe  []oadptypes.VeleroBackupInfo
+		existingBackups []*velerov1api.Backup
+		vmbd            *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		mockReader      *mockBackupContentsReader
+		expectedResults int
+		validateResults func(t *testing.T, results []oadptypes.BackupDiscoveryProgress)
 	}{
 		{
 			name:            "empty backups list returns empty results",
@@ -3123,16 +3120,16 @@ func TestMonitorVeleroRestores(t *testing.T) {
 	time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
 
 	tests := []struct {
-		name                string
-		vmfr                *oadpv1alpha1.VirtualMachineFileRestore
-		existingRestores    []*velerov1api.Restore
-		expectedCompleted   int
-		expectedFailed      int
-		expectedInProgress  int
-		expectedUpdated     bool
-		expectError         bool
-		errorContains       string
-		validateResults     func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore)
+		name               string
+		vmfr               *oadpv1alpha1.VirtualMachineFileRestore
+		existingRestores   []*velerov1api.Restore
+		expectedCompleted  int
+		expectedFailed     int
+		expectedInProgress int
+		expectedUpdated    bool
+		expectError        bool
+		errorContains      string
+		validateResults    func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore)
 	}{
 		{
 			name: "no Velero Restores found returns error",
@@ -3169,11 +3166,11 @@ func TestMonitorVeleroRestores(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
+									VeleroBackupName:       "backup-1",
+									VeleroRestoreName:      "restore-1",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 							},
 						},
@@ -3226,11 +3223,11 @@ func TestMonitorVeleroRestores(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
+									VeleroBackupName:       "backup-1",
+									VeleroRestoreName:      "restore-1",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 							},
 						},
@@ -3284,11 +3281,11 @@ func TestMonitorVeleroRestores(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
+									VeleroBackupName:       "backup-1",
+									VeleroRestoreName:      "restore-1",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 							},
 						},
@@ -3341,11 +3338,11 @@ func TestMonitorVeleroRestores(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
+									VeleroBackupName:       "backup-1",
+									VeleroRestoreName:      "restore-1",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 							},
 						},
@@ -3398,25 +3395,25 @@ func TestMonitorVeleroRestores(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
+									VeleroBackupName:       "backup-1",
+									VeleroRestoreName:      "restore-1",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 								{
-									VeleroBackupName:      "backup-2",
-									VeleroRestoreName:     "restore-2",
+									VeleroBackupName:       "backup-2",
+									VeleroRestoreName:      "restore-2",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 								{
-									VeleroBackupName:      "backup-3",
-									VeleroRestoreName:     "restore-3",
+									VeleroBackupName:       "backup-3",
+									VeleroRestoreName:      "restore-3",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 							},
 						},
@@ -3519,11 +3516,11 @@ func TestMonitorVeleroRestores(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-2",
-									VeleroRestoreName:     "restore-2",
+									VeleroBackupName:       "backup-2",
+									VeleroRestoreName:      "restore-2",
 									VeleroRestoreNamespace: "openshift-adp",
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
 								},
 							},
 						},
@@ -3690,12 +3687,12 @@ func TestValidateRestoredPVCs(t *testing.T) {
 	time1 := metav1.NewTime(time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC))
 
 	tests := []struct {
-		name          string
-		vmfr          *oadpv1alpha1.VirtualMachineFileRestore
-		existingPVCs  []*corev1.PersistentVolumeClaim
+		name           string
+		vmfr           *oadpv1alpha1.VirtualMachineFileRestore
+		existingPVCs   []*corev1.PersistentVolumeClaim
 		expectAllValid bool
-		expectError   bool
-		errorContains string
+		expectError    bool
+		errorContains  string
 	}{
 		{
 			name: "error when restore namespace is empty",
@@ -3761,11 +3758,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -3810,11 +3807,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -3862,11 +3859,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -3912,11 +3909,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -3945,11 +3942,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -3961,11 +3958,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -4039,11 +4036,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -4088,11 +4085,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},
@@ -4104,11 +4101,11 @@ func TestValidateRestoredPVCs(t *testing.T) {
 							},
 							Restores: []oadpv1alpha1.RestoreInfo{
 								{
-									VeleroBackupName:      "backup-1",
-									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseCompleted,
-									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
-									Timestamp:             &time1,
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:         &time1,
 								},
 							},
 						},

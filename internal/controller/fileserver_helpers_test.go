@@ -633,7 +633,7 @@ func TestBuildBackupPVCMapJSON(t *testing.T) {
 
 	t.Run("PVCs across multiple backups", func(t *testing.T) {
 		timestamp1 := metav1.Now()
-		timestamp2 := metav1.NewTime(timestamp1.Add(-24 * 3600 * 1e9)) // 1 day earlier
+		timestamp2 := metav1.NewTime(timestamp1.Add(-24 * time.Hour)) // 1 day earlier
 
 		pvcMounts := []PVCMountInfo{
 			{
@@ -730,7 +730,9 @@ func TestBuildBackupPVCMapJSON(t *testing.T) {
 		result := buildBackupPVCMapJSON(pvcMounts)
 
 		var jsonMap map[string][]map[string]string
-		json.Unmarshal([]byte(result), &jsonMap)
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Failed to unmarshal JSON: %v", err)
+		}
 
 		expectedPath := "/dev/pvc-abc-123-xyz"
 		actualPath := jsonMap["backup-1"][0]["path"]
