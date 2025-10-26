@@ -17,7 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -540,4 +542,415 @@ func TestExtractPVCMountsFromVMFR(t *testing.T) {
 	// This test would require importing the API types
 	// Skipping for now as it's tested indirectly via integration tests
 	t.Skip("Requires full API types setup")
+}
+
+func TestBuildBackupPVCMapJSON(t *testing.T) {
+	t.Run("single PVC in single backup", func(t *testing.T) {
+		timestamp := metav1.Now()
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "test-pvc-1",
+				PVCNamespace:    "test-ns",
+				PVCUID:          "uid-123",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		// Verify it's valid JSON
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		// Verify structure
+		if len(jsonMap) != 1 {
+			t.Errorf("Expected 1 backup in map, got %d", len(jsonMap))
+		}
+
+		backupPVCs, exists := jsonMap["backup-1"]
+		if !exists {
+			t.Fatal("Expected backup-1 in map")
+		}
+
+		if len(backupPVCs) != 1 {
+			t.Errorf("Expected 1 PVC in backup-1, got %d", len(backupPVCs))
+		}
+
+		pvc := backupPVCs[0]
+		if pvc["name"] != "test-pvc-1" {
+			t.Errorf("Expected PVC name 'test-pvc-1', got '%s'", pvc["name"])
+		}
+		if pvc["path"] != "/dev/pvc-uid-123" {
+			t.Errorf("Expected path '/dev/pvc-uid-123', got '%s'", pvc["path"])
+		}
+		if pvc["timestamp"] == "" {
+			t.Error("Expected non-empty timestamp")
+		}
+	})
+
+	t.Run("multiple PVCs in same backup", func(t *testing.T) {
+		timestamp := metav1.Now()
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+			{
+				PVCName:         "pvc-2",
+				PVCUID:          "uid-2",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		backupPVCs := jsonMap["backup-1"]
+		if len(backupPVCs) != 2 {
+			t.Errorf("Expected 2 PVCs in backup-1, got %d", len(backupPVCs))
+		}
+
+		// Verify both PVCs are present
+		pvcNames := make(map[string]bool)
+		for _, pvc := range backupPVCs {
+			pvcNames[pvc["name"]] = true
+		}
+
+		if !pvcNames["pvc-1"] || !pvcNames["pvc-2"] {
+			t.Error("Expected both pvc-1 and pvc-2 in result")
+		}
+	})
+
+	t.Run("PVCs across multiple backups", func(t *testing.T) {
+		timestamp1 := metav1.Now()
+		timestamp2 := metav1.NewTime(timestamp1.Add(-24 * time.Hour)) // 1 day earlier
+
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp1,
+			},
+			{
+				PVCName:         "pvc-2",
+				PVCUID:          "uid-2",
+				BackupName:      "backup-2",
+				BackupTimestamp: &timestamp2,
+			},
+			{
+				PVCName:         "pvc-3",
+				PVCUID:          "uid-3",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp1,
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		// Should have 2 backups
+		if len(jsonMap) != 2 {
+			t.Errorf("Expected 2 backups in map, got %d", len(jsonMap))
+		}
+
+		// backup-1 should have 2 PVCs
+		if len(jsonMap["backup-1"]) != 2 {
+			t.Errorf("Expected 2 PVCs in backup-1, got %d", len(jsonMap["backup-1"]))
+		}
+
+		// backup-2 should have 1 PVC
+		if len(jsonMap["backup-2"]) != 1 {
+			t.Errorf("Expected 1 PVC in backup-2, got %d", len(jsonMap["backup-2"]))
+		}
+	})
+
+	t.Run("PVC with nil timestamp", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: nil, // nil timestamp
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		pvc := jsonMap["backup-1"][0]
+		if pvc["timestamp"] != "" {
+			t.Errorf("Expected empty timestamp for nil BackupTimestamp, got '%s'", pvc["timestamp"])
+		}
+	})
+
+	t.Run("empty PVC mounts list", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		// Should return valid empty JSON object
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Result is not valid JSON: %v", err)
+		}
+
+		if len(jsonMap) != 0 {
+			t.Errorf("Expected empty map, got %d entries", len(jsonMap))
+		}
+	})
+
+	t.Run("device path format", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "abc-123-xyz",
+				BackupName: "backup-1",
+			},
+		}
+
+		result := buildBackupPVCMapJSON(pvcMounts)
+
+		var jsonMap map[string][]map[string]string
+		if err := json.Unmarshal([]byte(result), &jsonMap); err != nil {
+			t.Fatalf("Failed to unmarshal JSON: %v", err)
+		}
+
+		expectedPath := "/dev/pvc-abc-123-xyz"
+		actualPath := jsonMap["backup-1"][0]["path"]
+
+		if actualPath != expectedPath {
+			t.Errorf("Expected device path '%s', got '%s'", expectedPath, actualPath)
+		}
+	})
+}
+
+func TestBuildVMFileServerMainContainer(t *testing.T) {
+	t.Run("basic container configuration", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "uid-123",
+				BackupName: "backup-1",
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Verify container name
+		if container.Name != "vm-file-server" {
+			t.Errorf("Expected container name 'vm-file-server', got '%s'", container.Name)
+		}
+
+		// Verify image
+		if container.Image != constant.VMFileServerImage {
+			t.Errorf("Expected image '%s', got '%s'", constant.VMFileServerImage, container.Image)
+		}
+
+		// Verify command
+		if len(container.Command) != 1 {
+			t.Errorf("Expected 1 command, got %d", len(container.Command))
+		} else if container.Command[0] != "/usr/local/bin/detect-and-mount.sh" {
+			t.Errorf("Expected command '/usr/local/bin/detect-and-mount.sh', got '%s'", container.Command[0])
+		}
+	})
+
+	t.Run("environment variables", func(t *testing.T) {
+		timestamp := metav1.Now()
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:         "pvc-1",
+				PVCUID:          "uid-1",
+				BackupName:      "backup-1",
+				BackupTimestamp: &timestamp,
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Should have HOME and BACKUP_PVC_MAP env vars
+		if len(container.Env) != 2 {
+			t.Errorf("Expected 2 environment variables, got %d", len(container.Env))
+		}
+
+		// Check HOME env var
+		var homeEnv *corev1.EnvVar
+		var backupMapEnv *corev1.EnvVar
+		for i := range container.Env {
+			if container.Env[i].Name == "HOME" {
+				homeEnv = &container.Env[i]
+			}
+			if container.Env[i].Name == "BACKUP_PVC_MAP" {
+				backupMapEnv = &container.Env[i]
+			}
+		}
+
+		if homeEnv == nil {
+			t.Error("Missing HOME environment variable")
+		} else if homeEnv.Value != "/tmp" {
+			t.Errorf("Expected HOME='/tmp', got '%s'", homeEnv.Value)
+		}
+
+		if backupMapEnv == nil {
+			t.Error("Missing BACKUP_PVC_MAP environment variable")
+		} else {
+			// Verify it's valid JSON
+			var jsonMap map[string][]map[string]string
+			if err := json.Unmarshal([]byte(backupMapEnv.Value), &jsonMap); err != nil {
+				t.Errorf("BACKUP_PVC_MAP is not valid JSON: %v", err)
+			}
+		}
+	})
+
+	t.Run("security context", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "uid-123",
+				BackupName: "backup-1",
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		if container.SecurityContext == nil {
+			t.Fatal("SecurityContext is nil")
+		}
+
+		// Should be privileged
+		if container.SecurityContext.Privileged == nil || !*container.SecurityContext.Privileged {
+			t.Error("Container should be privileged")
+		}
+
+		// Should run as qemu user (107)
+		if container.SecurityContext.RunAsUser == nil || *container.SecurityContext.RunAsUser != 107 {
+			t.Errorf("Expected RunAsUser=107, got %v", container.SecurityContext.RunAsUser)
+		}
+
+		// Should run as qemu group (107)
+		if container.SecurityContext.RunAsGroup == nil || *container.SecurityContext.RunAsGroup != 107 {
+			t.Errorf("Expected RunAsGroup=107, got %v", container.SecurityContext.RunAsGroup)
+		}
+	})
+
+	t.Run("resource requirements", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{
+			{
+				PVCName:    "test-pvc",
+				PVCUID:     "uid-123",
+				BackupName: "backup-1",
+			},
+		}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Verify requests
+		memRequest := container.Resources.Requests[corev1.ResourceMemory]
+		cpuRequest := container.Resources.Requests[corev1.ResourceCPU]
+
+		if memRequest.String() != "512Mi" {
+			t.Errorf("Expected memory request '512Mi', got '%s'", memRequest.String())
+		}
+		if cpuRequest.String() != "250m" {
+			t.Errorf("Expected CPU request '250m', got '%s'", cpuRequest.String())
+		}
+
+		// Verify limits
+		memLimit := container.Resources.Limits[corev1.ResourceMemory]
+		cpuLimit := container.Resources.Limits[corev1.ResourceCPU]
+
+		if memLimit.String() != "2Gi" {
+			t.Errorf("Expected memory limit '2Gi', got '%s'", memLimit.String())
+		}
+		if cpuLimit.String() != "1" {
+			t.Errorf("Expected CPU limit '1', got '%s'", cpuLimit.String())
+		}
+	})
+
+	t.Run("empty PVC mounts", func(t *testing.T) {
+		pvcMounts := []PVCMountInfo{}
+
+		container := buildVMFileServerMainContainer(pvcMounts)
+
+		// Should still create valid container
+		if container.Name != "vm-file-server" {
+			t.Errorf("Expected container name 'vm-file-server', got '%s'", container.Name)
+		}
+
+		// BACKUP_PVC_MAP should be empty JSON object
+		var backupMapEnv *corev1.EnvVar
+		for i := range container.Env {
+			if container.Env[i].Name == "BACKUP_PVC_MAP" {
+				backupMapEnv = &container.Env[i]
+				break
+			}
+		}
+
+		if backupMapEnv != nil {
+			var jsonMap map[string][]map[string]string
+			if err := json.Unmarshal([]byte(backupMapEnv.Value), &jsonMap); err != nil {
+				t.Errorf("BACKUP_PVC_MAP is not valid JSON: %v", err)
+			}
+			if len(jsonMap) != 0 {
+				t.Error("Expected empty BACKUP_PVC_MAP for empty PVC mounts")
+			}
+		}
+	})
+}
+
+func TestFormatBackupDateForPath(t *testing.T) {
+	t.Run("nil timestamp", func(t *testing.T) {
+		result := formatBackupDateForPath(nil)
+		if result != "unknown-date" {
+			t.Errorf("Expected 'unknown-date', got '%s'", result)
+		}
+	})
+
+	t.Run("valid timestamp", func(t *testing.T) {
+		// Create a specific timestamp: 2025-01-15 14:30:00 UTC
+		timestamp := metav1.NewTime(metav1.Now().Time.Truncate(0))
+
+		result := formatBackupDateForPath(&timestamp)
+
+		// Verify it's in YYYY-MM-DD format
+		if len(result) != 10 {
+			t.Errorf("Expected date format YYYY-MM-DD (length 10), got '%s' (length %d)", result, len(result))
+		}
+
+		// Verify it matches the expected format
+		expectedDate := timestamp.Time.Format("2006-01-02")
+		if result != expectedDate {
+			t.Errorf("Expected '%s', got '%s'", expectedDate, result)
+		}
+	})
+
+	t.Run("date formatting consistency", func(t *testing.T) {
+		// Test a known date
+		knownTime := metav1.NewTime(time.Date(2025, 1, 15, 14, 30, 0, 0, time.UTC))
+
+		result := formatBackupDateForPath(&knownTime)
+
+		expected := "2025-01-15"
+		if result != expected {
+			t.Errorf("Expected '%s', got '%s'", expected, result)
+		}
+	})
 }

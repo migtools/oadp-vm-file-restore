@@ -256,6 +256,33 @@ func TestVeleroRestorePredicate_Update(t *testing.T) {
 	}
 }
 
+func TestVeleroRestorePredicate_Update_TypeAssertionFailure(t *testing.T) {
+	predicate := VeleroRestorePredicate{
+		OADPNamespace: testOADPNamespace,
+	}
+
+	// Use a non-Restore object to trigger type assertion failure
+	wrongType := &metav1.PartialObjectMetadata{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "not-a-restore",
+			Namespace: testOADPNamespace,
+			Labels: map[string]string{
+				constant.VMFROriginUUIDLabel: "test-uid",
+			},
+		},
+	}
+
+	evt := event.TypedUpdateEvent[client.Object]{
+		ObjectOld: wrongType,
+		ObjectNew: wrongType,
+	}
+
+	result := predicate.Update(evt)
+	if result {
+		t.Error("Update() should return false when type assertion fails")
+	}
+}
+
 func TestVeleroRestorePredicate_Delete(t *testing.T) {
 	tests := []struct {
 		name           string

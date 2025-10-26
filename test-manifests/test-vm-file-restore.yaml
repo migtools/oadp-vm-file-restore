@@ -1,0 +1,7 @@
+apiVersion: oadp.openshift.io/v1alpha1
+kind: VirtualMachineFileRestore
+metadata:
+  name: test-vm-file-restore
+  namespace: openshift-adp
+spec:
+  backupsDiscoveryRef: test-vm-discovery
