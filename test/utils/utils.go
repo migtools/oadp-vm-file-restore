@@ -21,14 +21,36 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const (
 	certmanagerVersion = "v1.18.2"
 	certmanagerURLTmpl = "https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml"
+
+	kubevirtVersion         = "v1.1.1"
+	kubevirtOperatorURLTmpl = "https://github.com/kubevirt/kubevirt/releases/download/%s/kubevirt-operator.yaml"
+	kubevirtCRURLTmpl       = "https://github.com/kubevirt/kubevirt/releases/download/%s/kubevirt-cr.yaml"
+	cdiVersion              = "v1.58.1"
+	cdiOperatorURLTmpl      = "https://github.com/kubevirt/containerized-data-importer/" +
+		"releases/download/%s/cdi-operator.yaml"
+	cdiCRURLTmpl = "https://github.com/kubevirt/containerized-data-importer/releases/download/%s/cdi-cr.yaml"
+
+	veleroVersion = "v1.14.1"
+
+	// Velero plugins - using custom builds with required patches
+	kubevirtPluginImage  = "quay.io/migi/kubevirt-velero-plugin:latest"
+	openshiftPluginImage = "quay.io/migi/openshift-velero-plugin:modified"
+	veleroImage          = "velero/velero:v1.14.1"
+	awsPluginImage       = "velero/velero-plugin-for-aws:v1.10.1"
+	resticHelperImage    = "velero/velero-restic-restore-helper:v1.14.1"
+
+	// MinIO for backup storage in tests
+	minioImage = "quay.io/minio/minio:latest"
 
 	defaultKindBinary  = "kind"
 	defaultKindCluster = "kind"
@@ -261,4 +283,557 @@ func UncommentCode(filename, target, prefix string) error {
 	}
 
 	return nil
+}
+
+// StringReader returns an io.Reader from a string, useful for piping YAML to kubectl
+func StringReader(s string) io.Reader {
+	return strings.NewReader(s)
+}
+
+// InstallKubeVirt installs KubeVirt operator and CR
+func InstallKubeVirt() error {
+	operatorURL := fmt.Sprintf(kubevirtOperatorURLTmpl, kubevirtVersion)
+	crURL := fmt.Sprintf(kubevirtCRURLTmpl, kubevirtVersion)
+
+	_, _ = fmt.Fprintf(os.Stderr, "Installing KubeVirt operator...\n")
+	cmd := exec.Command("kubectl", "apply", "-f", operatorURL)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to install KubeVirt operator: %w", err)
+	}
+
+	// Wait for operator to be ready
+	cmd = exec.Command("kubectl", "wait", "deployment/virt-operator",
+		"--for", "condition=Available",
+		"--namespace", "kubevirt",
+		"--timeout", "5m")
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed waiting for virt-operator: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "Installing KubeVirt CR...\n")
+	cmd = exec.Command("kubectl", "apply", "-f", crURL)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to install KubeVirt CR: %w", err)
+	}
+
+	// Enable software emulation for Kind cluster compatibility
+	_, _ = fmt.Fprintf(os.Stderr, "Enabling software emulation in KubeVirt...\n")
+	cmd = exec.Command("kubectl", "patch", "kv/kubevirt",
+		"-n", "kubevirt",
+		"--type=merge",
+		"-p", `{"spec":{"configuration":{"developerConfiguration":{"useEmulation":true}}}}`)
+	if _, err := Run(cmd); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Warning: Failed to enable software emulation: %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "VMs may not run without KVM support\n")
+	}
+
+	// Wait for KubeVirt to be ready (with shorter timeout for Kind compatibility)
+	// Note: In Kind, virt-handler may fail due to USB device passthrough issues,
+	// but the CRDs are still usable for backup/restore testing
+	cmd = exec.Command("kubectl", "wait", "kv/kubevirt",
+		"--for", "condition=Available",
+		"--namespace", "kubevirt",
+		"--timeout", "2m")
+	if _, err := Run(cmd); err != nil {
+		// For testing purposes, we can continue even if KubeVirt isn't fully ready
+		// as long as the CRDs are installed
+		_, _ = fmt.Fprintf(os.Stderr,
+			"Warning: KubeVirt did not become fully Available (this is expected in Kind): %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "Continuing anyway as CRDs should be installed...\n")
+	}
+
+	return nil
+}
+
+// UninstallKubeVirt uninstalls KubeVirt
+func UninstallKubeVirt() {
+	crURL := fmt.Sprintf(kubevirtCRURLTmpl, kubevirtVersion)
+	operatorURL := fmt.Sprintf(kubevirtOperatorURLTmpl, kubevirtVersion)
+
+	cmd := exec.Command("kubectl", "delete", "-f", crURL, "--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+
+	cmd = exec.Command("kubectl", "delete", "-f", operatorURL, "--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+}
+
+// IsKubeVirtInstalled checks if KubeVirt is installed
+func IsKubeVirtInstalled() bool {
+	cmd := exec.Command("kubectl", "get", "kv", "kubevirt", "-n", "kubevirt")
+	_, err := Run(cmd)
+	return err == nil
+}
+
+// InstallCDI installs Containerized Data Importer operator and CR
+func InstallCDI() error {
+	operatorURL := fmt.Sprintf(cdiOperatorURLTmpl, cdiVersion)
+	crURL := fmt.Sprintf(cdiCRURLTmpl, cdiVersion)
+
+	_, _ = fmt.Fprintf(os.Stderr, "Installing CDI operator...\n")
+	cmd := exec.Command("kubectl", "apply", "-f", operatorURL)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to install CDI operator: %w", err)
+	}
+
+	// Wait for operator to be ready
+	cmd = exec.Command("kubectl", "wait", "deployment/cdi-operator",
+		"--for", "condition=Available",
+		"--namespace", "cdi",
+		"--timeout", "5m")
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed waiting for cdi-operator: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "Installing CDI CR...\n")
+	cmd = exec.Command("kubectl", "apply", "-f", crURL)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to install CDI CR: %w", err)
+	}
+
+	// Wait for CDI to be ready (with shorter timeout for Kind compatibility)
+	// Note: In Kind, CDI components may have issues but CRDs are still usable
+	cmd = exec.Command("kubectl", "wait", "cdi/cdi",
+		"--for", "condition=Available",
+		"--namespace", "cdi",
+		"--timeout", "2m")
+	if _, err := Run(cmd); err != nil {
+		// For testing purposes, we can continue even if CDI isn't fully ready
+		// as long as the CRDs are installed
+		_, _ = fmt.Fprintf(os.Stderr, "Warning: CDI did not become fully Available (this may be expected in Kind): %v\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "Continuing anyway as CRDs should be installed...\n")
+	}
+
+	return nil
+}
+
+// UninstallCDI uninstalls CDI
+func UninstallCDI() {
+	crURL := fmt.Sprintf(cdiCRURLTmpl, cdiVersion)
+	operatorURL := fmt.Sprintf(cdiOperatorURLTmpl, cdiVersion)
+
+	cmd := exec.Command("kubectl", "delete", "-f", crURL, "--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+
+	cmd = exec.Command("kubectl", "delete", "-f", operatorURL, "--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+}
+
+// IsCDIInstalled checks if CDI is installed
+func IsCDIInstalled() bool {
+	cmd := exec.Command("kubectl", "get", "cdi", "cdi", "-n", "cdi")
+	_, err := Run(cmd)
+	return err == nil
+}
+
+// InstallMinIO installs MinIO for backup storage in tests
+func InstallMinIO() error {
+	_, _ = fmt.Fprintf(os.Stderr, "Installing MinIO for backup storage...\n")
+
+	minioYAML := `
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: minio
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-pvc
+  namespace: minio
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: minio
+spec:
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: ` + minioImage + `
+        args:
+        - server
+        - /storage
+        env:
+        - name: MINIO_ACCESS_KEY
+          value: "minio"
+        - name: MINIO_SECRET_KEY
+          value: "minio123"
+        ports:
+        - containerPort: 9000
+        volumeMounts:
+        - name: storage
+          mountPath: /storage
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: minio-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: minio
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9000
+    targetPort: 9000
+  selector:
+    app: minio
+`
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = StringReader(minioYAML)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to install MinIO: %w", err)
+	}
+
+	// Wait for MinIO to be ready
+	cmd = exec.Command("kubectl", "wait", "deployment/minio",
+		"--for", "condition=Available",
+		"--namespace", "minio",
+		"--timeout", "5m")
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed waiting for MinIO: %w", err)
+	}
+
+	// Create bucket using a job
+	createBucketYAML := `
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-bucket
+  namespace: minio
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: mc
+        image: minio/mc:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          mc alias set myminio http://minio.minio.svc:9000 minio minio123
+          mc mb myminio/velero || true
+          mc version enable myminio/velero || true
+`
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = StringReader(createBucketYAML)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to create bucket job: %w", err)
+	}
+
+	// Wait for job to complete
+	cmd = exec.Command("kubectl", "wait", "job/create-bucket",
+		"--for", "condition=Complete",
+		"--namespace", "minio",
+		"--timeout", "2m")
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed waiting for bucket creation: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "MinIO installed successfully\n")
+	return nil
+}
+
+// UninstallMinIO uninstalls MinIO
+func UninstallMinIO() {
+	cmd := exec.Command("kubectl", "delete", "namespace", "minio", "--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+}
+
+// InstallVelero installs Velero with kubevirt and openshift plugins
+func InstallVelero() error {
+	_, _ = fmt.Fprintf(os.Stderr, "Installing Velero with plugins...\n")
+
+	// Create openshift-adp namespace
+	cmd := exec.Command("kubectl", "create", "namespace", "openshift-adp")
+	if _, err := Run(cmd); err != nil {
+		if !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("failed to create openshift-adp namespace: %w", err)
+		}
+	}
+
+	// Create credentials secret for MinIO
+	credentialsYAML := `
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloud-credentials
+  namespace: openshift-adp
+type: Opaque
+stringData:
+  cloud: |
+    [default]
+    aws_access_key_id=minio
+    aws_secret_access_key=minio123
+`
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = StringReader(credentialsYAML)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to create credentials: %w", err)
+	}
+
+	// Install Velero CRDs
+	cmd = exec.Command("kubectl", "apply", "-f", "hack/extra-crds/")
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to install Velero CRDs: %w", err)
+	}
+
+	// Install additional Velero CRDs from upstream that are not in hack/extra-crds/
+	// These are required for Velero to start successfully
+	baseURL := "https://raw.githubusercontent.com/vmware-tanzu/velero/" + veleroVersion
+	additionalCRDs := []string{
+		baseURL + "/config/crd/v1/bases/velero.io_serverstatusrequests.yaml",
+		baseURL + "/config/crd/v1/bases/velero.io_schedules.yaml",
+		baseURL + "/config/crd/v1/bases/velero.io_podvolumerestores.yaml",
+		baseURL + "/config/crd/v1/bases/velero.io_deletebackuprequests.yaml",
+		baseURL + "/config/crd/v1/bases/velero.io_podvolumebackups.yaml",
+		baseURL + "/config/crd/v1/bases/velero.io_backuprepositories.yaml",
+		baseURL + "/config/crd/v1/bases/velero.io_downloadrequests.yaml",
+		baseURL + "/config/crd/v1/bases/velero.io_volumesnapshotlocations.yaml",
+		baseURL + "/config/crd/v2alpha1/bases/velero.io_datauploads.yaml",
+		baseURL + "/config/crd/v2alpha1/bases/velero.io_datadownloads.yaml",
+	}
+
+	for _, crdURL := range additionalCRDs {
+		cmd = exec.Command("kubectl", "apply", "-f", crdURL)
+		if _, err := Run(cmd); err != nil {
+			return fmt.Errorf("failed to install CRD from %s: %w", crdURL, err)
+		}
+	}
+
+	// Install Velero with plugins
+	veleroYAML := `
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: velero
+  namespace: openshift-adp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: velero
+subjects:
+- kind: ServiceAccount
+  name: velero
+  namespace: openshift-adp
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: velero
+  namespace: openshift-adp
+spec:
+  selector:
+    matchLabels:
+      app: velero
+  template:
+    metadata:
+      labels:
+        app: velero
+    spec:
+      serviceAccountName: velero
+      containers:
+      - name: velero
+        image: ` + veleroImage + `
+        command:
+        - /velero
+        args:
+        - server
+        - --default-backup-storage-location=default
+        - --default-volume-snapshot-locations=aws:default
+        volumeMounts:
+        - name: plugins
+          mountPath: /plugins
+        - name: scratch
+          mountPath: /scratch
+        - name: cloud-credentials
+          mountPath: /credentials
+        env:
+        - name: VELERO_SCRATCH_DIR
+          value: /scratch
+        - name: AWS_SHARED_CREDENTIALS_FILE
+          value: /credentials/cloud
+        - name: VELERO_NAMESPACE
+          value: openshift-adp
+      initContainers:
+      - name: velero-plugin-for-aws
+        image: ` + awsPluginImage + `
+        volumeMounts:
+        - name: plugins
+          mountPath: /target
+      - name: kubevirt-velero-plugin
+        image: ` + kubevirtPluginImage + `
+        volumeMounts:
+        - name: plugins
+          mountPath: /target
+      volumes:
+      - name: plugins
+        emptyDir: {}
+      - name: scratch
+        emptyDir: {}
+      - name: cloud-credentials
+        secret:
+          secretName: cloud-credentials
+`
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = StringReader(veleroYAML)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to deploy Velero: %w", err)
+	}
+
+	// Wait for Velero to be ready
+	cmd = exec.Command("kubectl", "wait", "deployment/velero",
+		"--for", "condition=Available",
+		"--namespace", "openshift-adp",
+		"--timeout", "5m")
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed waiting for Velero: %w", err)
+	}
+
+	// Create BackupStorageLocation
+	bslYAML := `
+apiVersion: velero.io/v1
+kind: BackupStorageLocation
+metadata:
+  name: default
+  namespace: openshift-adp
+spec:
+  provider: aws
+  objectStorage:
+    bucket: velero
+  config:
+    region: minio
+    s3ForcePathStyle: "true"
+    s3Url: http://minio.minio.svc:9000
+  credential:
+    name: cloud-credentials
+    key: cloud
+`
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = StringReader(bslYAML)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to create BackupStorageLocation: %w", err)
+	}
+
+	// Create VolumeSnapshotLocation (for CSI snapshots - won't work in Kind but needed for CR)
+	vslYAML := `
+apiVersion: velero.io/v1
+kind: VolumeSnapshotLocation
+metadata:
+  name: default
+  namespace: openshift-adp
+spec:
+  provider: aws
+  config:
+    region: minio
+`
+	cmd = exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = StringReader(vslYAML)
+	if _, err := Run(cmd); err != nil {
+		return fmt.Errorf("failed to create VolumeSnapshotLocation: %w", err)
+	}
+
+	// Wait for BackupStorageLocation to be Available
+	// This ensures Velero can successfully connect to MinIO before tests run
+	_, _ = fmt.Fprintf(os.Stderr, "Waiting for BackupStorageLocation to be ready...\n")
+	maxRetries := 60 // 60 * 5s = 5 minutes
+	bslReady := false
+	var lastOutput string
+	for i := 0; i < maxRetries; i++ {
+		cmd = exec.Command("kubectl", "get", "backupstoragelocation", "default",
+			"-n", "openshift-adp",
+			"-o", "jsonpath={.status.phase}")
+		output, err := Run(cmd)
+		lastOutput = strings.TrimSpace(output)
+		if err == nil && lastOutput == "Available" {
+			_, _ = fmt.Fprintf(os.Stderr, "BackupStorageLocation is Available\n")
+			bslReady = true
+			break
+		}
+		if i < maxRetries-1 {
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	if !bslReady {
+		// Print diagnostic information before failing
+		_, _ = fmt.Fprintf(os.Stderr, "\n========== BSL DIAGNOSTIC INFO ==========\n")
+		_, _ = fmt.Fprintf(os.Stderr, "BackupStorageLocation not Available after 5 minutes (phase: %s)\n", lastOutput)
+
+		// Get BSL full status
+		cmd = exec.Command("kubectl", "get", "backupstoragelocation", "default",
+			"-n", "openshift-adp", "-o", "yaml")
+		if bslYaml, err := Run(cmd); err == nil {
+			_, _ = fmt.Fprintf(os.Stderr, "\nBSL Status:\n%s\n", bslYaml)
+		}
+
+		// Get Velero pod logs
+		cmd = exec.Command("kubectl", "logs", "-n", "openshift-adp",
+			"-l", "app=velero", "--tail=50")
+		if logs, err := Run(cmd); err == nil {
+			_, _ = fmt.Fprintf(os.Stderr, "\nVelero Controller Logs (last 50 lines):\n%s\n", logs)
+		}
+
+		// Check MinIO connectivity
+		cmd = exec.Command("kubectl", "get", "pods", "-n", "minio")
+		if minioPods, err := Run(cmd); err == nil {
+			_, _ = fmt.Fprintf(os.Stderr, "\nMinIO Pods:\n%s\n", minioPods)
+		}
+
+		_, _ = fmt.Fprintf(os.Stderr, "========================================\n\n")
+
+		return fmt.Errorf("BackupStorageLocation did not become Available (phase: %s). "+
+			"Velero cannot process backups without a valid storage location. "+
+			"Check the diagnostic output above", lastOutput)
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "Velero with plugins installed successfully\n")
+	return nil
+}
+
+// UninstallVelero uninstalls Velero
+func UninstallVelero() {
+	cmd := exec.Command("kubectl", "delete", "namespace", "openshift-adp", "--ignore-not-found")
+	if _, err := Run(cmd); err != nil {
+		warnError(err)
+	}
+}
+
+// IsVeleroInstalled checks if Velero namespace exists
+func IsVeleroInstalled() bool {
+	cmd := exec.Command("kubectl", "get", "namespace", "openshift-adp")
+	_, err := Run(cmd)
+	return err == nil
 }

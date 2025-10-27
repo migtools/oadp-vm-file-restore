@@ -90,6 +90,10 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
 		_, _ = utils.Run(cmd)
 
+		By("cleaning up the metrics ClusterRoleBinding")
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName)
+		_, _ = utils.Run(cmd)
+
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
@@ -184,7 +188,12 @@ var _ = Describe("Manager", Ordered, func() {
 
 		It("should ensure the metrics endpoint is serving metrics", func() {
 			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
-			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
+			// First, try to delete any existing ClusterRoleBinding from a previous run
+			cmd := exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
+
+			// Now create the ClusterRoleBinding
+			cmd = exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
 				"--clusterrole=oadp-vm-file-restore-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
@@ -271,14 +280,25 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput := getMetricsOutput()
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+		It("should discover VM backups and restore files", func() {
+			Skip("Skipping functional test - requires KubeVirt, Velero/OADP, and storage setup")
+			// This is a placeholder for the minimal functional test
+			// To enable, ensure your Kind cluster has:
+			// - KubeVirt installed
+			// - Velero/OADP installed in openshift-adp namespace
+			// - Appropriate storage class configured
+			// Then remove the Skip() call above
+
+			// Test flow:
+			// 1. Create a test namespace
+			// 2. Create a simple VM with a DataVolume
+			// 3. Create a Velero backup of the namespace
+			// 4. Create VirtualMachineBackupsDiscovery CR to find the backup
+			// 5. Wait for discovery to complete and verify ValidBackups
+			// 6. Create VirtualMachineFileRestore CR referencing the discovery
+			// 7. Wait for file restore to complete
+			// 8. Verify file server pod and service are created
+		})
 	})
 })
 
