@@ -58,9 +58,9 @@ import (
 )
 
 const (
-	testRestoreName               = "restore-1"
-	testOADPNamespace             = "openshift-adp"
-	testValidationFailureMessage  = "testValidationFailureMessage"
+	testRestoreName              = "restore-1"
+	testOADPNamespace            = "openshift-adp"
+	testValidationFailureMessage = "some backups failed validation"
 )
 
 var _ = Describe("VirtualMachineFileRestore Controller", func() {
@@ -5053,69 +5053,11 @@ func TestFailPartialValidation(t *testing.T) {
 					t.Errorf("Expected 4 conditions, got %d", len(vmfr.Status.Conditions))
 				}
 
-				// Verify Progressing condition
-				progressingCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
-				if progressingCond == nil {
-					t.Error("Progressing condition not found")
-				} else {
-					if progressingCond.Status != metav1.ConditionFalse {
-						t.Errorf("Expected Progressing status False, got %s", progressingCond.Status)
-					}
-					if progressingCond.Reason != oadptypes.ReasonPartialValidationFailed {
-						t.Errorf("Expected Progressing reason %s, got %s", oadptypes.ReasonPartialValidationFailed, progressingCond.Reason)
-					}
-					if progressingCond.Message != testValidationFailureMessage {
-						t.Errorf("Expected Progressing message '%s', got %s", testValidationFailureMessage, progressingCond.Message)
-					}
-				}
-
-				// Verify Available condition
-				availableCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeAvailable)
-				if availableCond == nil {
-					t.Error("Available condition not found")
-				} else {
-					if availableCond.Status != metav1.ConditionTrue {
-						t.Errorf("Expected Available status True, got %s", availableCond.Status)
-					}
-					if availableCond.Reason != "PartialAvailability" {
-						t.Errorf("Expected Available reason 'PartialAvailability', got %s", availableCond.Reason)
-					}
-					if availableCond.Message != "Some PVCs are available but not all backups succeeded" {
-						t.Errorf("Expected Available message 'Some PVCs are available but not all backups succeeded', got %s", availableCond.Message)
-					}
-				}
-
-				// Verify Degraded condition
-				degradedCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeDegraded)
-				if degradedCond == nil {
-					t.Error("Degraded condition not found")
-				} else {
-					if degradedCond.Status != metav1.ConditionTrue {
-						t.Errorf("Expected Degraded status True, got %s", degradedCond.Status)
-					}
-					if degradedCond.Reason != oadptypes.ReasonPartialFailure {
-						t.Errorf("Expected Degraded reason %s, got %s", oadptypes.ReasonPartialFailure, degradedCond.Reason)
-					}
-					if degradedCond.Message != testValidationFailureMessage {
-						t.Errorf("Expected Degraded message '%s', got %s", testValidationFailureMessage, degradedCond.Message)
-					}
-				}
-
-				// Verify Ready condition
-				readyCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeReady)
-				if readyCond == nil {
-					t.Error("Ready condition not found")
-				} else {
-					if readyCond.Status != metav1.ConditionFalse {
-						t.Errorf("Expected Ready status False, got %s", readyCond.Status)
-					}
-					if readyCond.Reason != oadptypes.ReasonPartiallyFailed {
-						t.Errorf("Expected Ready reason %s, got %s", oadptypes.ReasonPartiallyFailed, readyCond.Reason)
-					}
-					if readyCond.Message != testValidationFailureMessage {
-						t.Errorf("Expected Ready message '%s', got %s", testValidationFailureMessage, readyCond.Message)
-					}
-				}
+				// Verify all conditions using helper
+				verifyCondition(t, vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing, metav1.ConditionFalse, oadptypes.ReasonPartialValidationFailed, testValidationFailureMessage)
+				verifyCondition(t, vmfr.Status.Conditions, oadptypes.ConditionTypeAvailable, metav1.ConditionTrue, "PartialAvailability", "Some PVCs are available but not all backups succeeded")
+				verifyCondition(t, vmfr.Status.Conditions, oadptypes.ConditionTypeDegraded, metav1.ConditionTrue, oadptypes.ReasonPartialFailure, testValidationFailureMessage)
+				verifyCondition(t, vmfr.Status.Conditions, oadptypes.ConditionTypeReady, metav1.ConditionFalse, oadptypes.ReasonPartiallyFailed, testValidationFailureMessage)
 			},
 		},
 		{
