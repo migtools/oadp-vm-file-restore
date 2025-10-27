@@ -18,11 +18,15 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	routev1 "github.com/openshift/api/route/v1"
 	velerov1api "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	veleroapiv2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,12 +37,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	kubevirtv1 "kubevirt.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
 	oadptypes "github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
@@ -4975,6 +4986,3042 @@ func TestEnsureCredentials(t *testing.T) {
 				}
 				if tt.validateResults != nil {
 					tt.validateResults(t, c, tt.vmfr)
+				}
+			}
+		})
+	}
+}
+
+func TestFailPartialValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		vmfr           *oadpv1alpha1.VirtualMachineFileRestore
+		reason         string
+		message        string
+		validateStatus func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore)
+		expectError    bool
+		errorContains  string
+	}{
+		{
+			name: "sets all conditions and phase correctly",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+				},
+			},
+			reason:      "PartialAvailability",
+			message:     "some backups failed validation",
+			expectError: true,
+			errorContains: "partial validation failed: some backups failed validation",
+			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// Verify phase is set to PartiallyFailed
+				if vmfr.Status.Phase != oadpv1alpha1.VirtualMachineFileRestorePhasePartiallyFailed {
+					t.Errorf("Expected phase PartiallyFailed, got %s", vmfr.Status.Phase)
+				}
+
+				// Verify all 4 conditions are set
+				if len(vmfr.Status.Conditions) != 4 {
+					t.Errorf("Expected 4 conditions, got %d", len(vmfr.Status.Conditions))
+				}
+
+				// Verify Progressing condition
+				progressingCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
+				if progressingCond == nil {
+					t.Error("Progressing condition not found")
+				} else {
+					if progressingCond.Status != metav1.ConditionFalse {
+						t.Errorf("Expected Progressing status False, got %s", progressingCond.Status)
+					}
+					if progressingCond.Reason != oadptypes.ReasonPartialValidationFailed {
+						t.Errorf("Expected Progressing reason %s, got %s", oadptypes.ReasonPartialValidationFailed, progressingCond.Reason)
+					}
+					if progressingCond.Message != "some backups failed validation" {
+						t.Errorf("Expected Progressing message 'some backups failed validation', got %s", progressingCond.Message)
+					}
+				}
+
+				// Verify Available condition
+				availableCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeAvailable)
+				if availableCond == nil {
+					t.Error("Available condition not found")
+				} else {
+					if availableCond.Status != metav1.ConditionTrue {
+						t.Errorf("Expected Available status True, got %s", availableCond.Status)
+					}
+					if availableCond.Reason != "PartialAvailability" {
+						t.Errorf("Expected Available reason 'PartialAvailability', got %s", availableCond.Reason)
+					}
+					if availableCond.Message != "Some PVCs are available but not all backups succeeded" {
+						t.Errorf("Expected Available message 'Some PVCs are available but not all backups succeeded', got %s", availableCond.Message)
+					}
+				}
+
+				// Verify Degraded condition
+				degradedCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeDegraded)
+				if degradedCond == nil {
+					t.Error("Degraded condition not found")
+				} else {
+					if degradedCond.Status != metav1.ConditionTrue {
+						t.Errorf("Expected Degraded status True, got %s", degradedCond.Status)
+					}
+					if degradedCond.Reason != oadptypes.ReasonPartialFailure {
+						t.Errorf("Expected Degraded reason %s, got %s", oadptypes.ReasonPartialFailure, degradedCond.Reason)
+					}
+					if degradedCond.Message != "some backups failed validation" {
+						t.Errorf("Expected Degraded message 'some backups failed validation', got %s", degradedCond.Message)
+					}
+				}
+
+				// Verify Ready condition
+				readyCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeReady)
+				if readyCond == nil {
+					t.Error("Ready condition not found")
+				} else {
+					if readyCond.Status != metav1.ConditionFalse {
+						t.Errorf("Expected Ready status False, got %s", readyCond.Status)
+					}
+					if readyCond.Reason != oadptypes.ReasonPartiallyFailed {
+						t.Errorf("Expected Ready reason %s, got %s", oadptypes.ReasonPartiallyFailed, readyCond.Reason)
+					}
+					if readyCond.Message != "some backups failed validation" {
+						t.Errorf("Expected Ready message 'some backups failed validation', got %s", readyCond.Message)
+					}
+				}
+			},
+		},
+		{
+			name: "handles empty reason and message",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr-2",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+				},
+			},
+			reason:      "",
+			message:     "",
+			expectError: true,
+			errorContains: "partial validation failed",
+			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// Verify phase is set
+				if vmfr.Status.Phase != oadpv1alpha1.VirtualMachineFileRestorePhasePartiallyFailed {
+					t.Errorf("Expected phase PartiallyFailed, got %s", vmfr.Status.Phase)
+				}
+
+				// Verify Available condition uses empty reason
+				availableCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeAvailable)
+				if availableCond == nil {
+					t.Error("Available condition not found")
+				} else {
+					if availableCond.Reason != "" {
+						t.Errorf("Expected empty Available reason, got %s", availableCond.Reason)
+					}
+				}
+
+				// Verify other conditions use empty message
+				progressingCond := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
+				if progressingCond != nil && progressingCond.Message != "" {
+					t.Errorf("Expected empty Progressing message, got %s", progressingCond.Message)
+				}
+			},
+		},
+		{
+			name: "merges with existing conditions",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr-3",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					Conditions: []metav1.Condition{
+						{
+							Type:   "CustomCondition",
+							Status: metav1.ConditionTrue,
+							Reason: "Test",
+						},
+					},
+				},
+			},
+			reason:      "TestReason",
+			message:     "test message",
+			expectError: true,
+			errorContains: "partial validation failed: test message",
+			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// After patch, the 4 standard conditions should be present
+				// plus the existing CustomCondition (merged, not replaced)
+				if len(vmfr.Status.Conditions) < 4 {
+					t.Errorf("Expected at least 4 conditions after patch, got %d", len(vmfr.Status.Conditions))
+				}
+
+				// Verify all 4 required conditions are present
+				requiredTypes := []string{
+					oadptypes.ConditionTypeProgressing,
+					oadptypes.ConditionTypeAvailable,
+					oadptypes.ConditionTypeDegraded,
+					oadptypes.ConditionTypeReady,
+				}
+				for _, condType := range requiredTypes {
+					if meta.FindStatusCondition(vmfr.Status.Conditions, condType) == nil {
+						t.Errorf("Required condition %s not found", condType)
+					}
+				}
+			},
+		},
+		{
+			name: "error message format is correct",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr-4",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+				},
+			},
+			reason:      "ValidationError",
+			message:     "backup discovery validation failed",
+			expectError: true,
+			errorContains: "partial validation failed: backup discovery validation failed",
+			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// Just verify phase was set
+				if vmfr.Status.Phase != oadpv1alpha1.VirtualMachineFileRestorePhasePartiallyFailed {
+					t.Errorf("Expected phase PartiallyFailed, got %s", vmfr.Status.Phase)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create fake client with status subresource enabled
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.vmfr).
+				WithStatusSubresource(tt.vmfr).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client: c,
+				Scheme: scheme,
+			}
+
+			logger := zap.New(zap.UseDevMode(true))
+
+			// Call failPartialValidation
+			err := r.failPartialValidation(ctx, tt.vmfr, tt.reason, tt.message, logger)
+
+			// Verify error expectation
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error but got none")
+					return
+				}
+				if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain %q, got %q", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+					return
+				}
+			}
+
+			// Retrieve updated VMFR from client
+			updatedVMFR := &oadpv1alpha1.VirtualMachineFileRestore{}
+			if err := c.Get(ctx, types.NamespacedName{
+				Name:      tt.vmfr.Name,
+				Namespace: tt.vmfr.Namespace,
+			}, updatedVMFR); err != nil {
+				t.Fatalf("Failed to get updated VMFR: %v", err)
+			}
+
+			// Validate status changes
+			if tt.validateStatus != nil {
+				tt.validateStatus(t, updatedVMFR)
+			}
+		})
+	}
+}
+
+func TestValidateDiscoveryBackups(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name             string
+		vmfr             *oadpv1alpha1.VirtualMachineFileRestore
+		vmbd             *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		expectedBackups  int
+		expectError      bool
+		errorContains    string
+		expectedPhase    oadpv1alpha1.VirtualMachineFileRestorePhase
+	}{
+		{
+			name: "no valid backups in discovery",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-discovery",
+					Namespace: "default",
+				},
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					ValidBackups: []oadptypes.VeleroBackupInfo{}, // Empty
+				},
+			},
+			expectError:   true,
+			errorContains: "validation failed",
+			expectedPhase: oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+		},
+		{
+			name: "returns all valid backups when no selection specified",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+					SelectedBackups:     []string{}, // Empty selection
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{Name: "backup-1", Namespace: testOADPNamespace},
+						{Name: "backup-2", Namespace: testOADPNamespace},
+						{Name: "backup-3", Namespace: testOADPNamespace},
+					},
+				},
+			},
+			expectedBackups: 3,
+			expectError:     false,
+		},
+		{
+			name: "returns only selected backups",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+					SelectedBackups:     []string{"backup-1", "backup-3"},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{Name: "backup-1", Namespace: testOADPNamespace},
+						{Name: "backup-2", Namespace: testOADPNamespace},
+						{Name: "backup-3", Namespace: testOADPNamespace},
+					},
+				},
+			},
+			expectedBackups: 2,
+			expectError:     false,
+		},
+		{
+			name: "error when selected backups not found in discovery",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+					SelectedBackups:     []string{"nonexistent-backup"},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{Name: "backup-1", Namespace: testOADPNamespace},
+						{Name: "backup-2", Namespace: testOADPNamespace},
+					},
+				},
+			},
+			expectError:   true,
+			errorContains: "validation failed",
+			expectedPhase: oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+		},
+		{
+			name: "error when selected backups result in no matches",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+					SelectedBackups:     []string{"backup-x", "backup-y"},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{Name: "backup-1", Namespace: testOADPNamespace},
+						{Name: "backup-2", Namespace: testOADPNamespace},
+					},
+				},
+			},
+			expectError:   true,
+			errorContains: "validation failed",
+			expectedPhase: oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+		},
+		{
+			name: "handles single valid backup",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{Name: "backup-single", Namespace: testOADPNamespace},
+					},
+				},
+			},
+			expectedBackups: 1,
+			expectError:     false,
+		},
+		{
+			name: "partial selection with some invalid backups",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-discovery",
+					SelectedBackups:     []string{"backup-1", "invalid-backup"},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{Name: "backup-1", Namespace: testOADPNamespace},
+						{Name: "backup-2", Namespace: testOADPNamespace},
+					},
+				},
+			},
+			expectError:   true,
+			errorContains: "validation failed",
+			expectedPhase: oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create fake client with status subresource enabled
+			c := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.vmfr).
+				WithStatusSubresource(tt.vmfr).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client: c,
+				Scheme: scheme,
+			}
+
+			logger := zap.New(zap.UseDevMode(true))
+
+			// Call validateDiscoveryBackups
+			backups, err := r.validateDiscoveryBackups(ctx, logger, tt.vmfr, tt.vmbd)
+
+			// Verify error expectation
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error but got none")
+					return
+				}
+				if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain %q, got %q", tt.errorContains, err.Error())
+				}
+
+				// Verify status was updated with failure phase
+				updatedVMFR := &oadpv1alpha1.VirtualMachineFileRestore{}
+				if err := c.Get(ctx, types.NamespacedName{
+					Name:      tt.vmfr.Name,
+					Namespace: tt.vmfr.Namespace,
+				}, updatedVMFR); err != nil {
+					t.Fatalf("Failed to get updated VMFR: %v", err)
+				}
+
+				if updatedVMFR.Status.Phase != tt.expectedPhase {
+					t.Errorf("Expected phase %s, got %s", tt.expectedPhase, updatedVMFR.Status.Phase)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+					return
+				}
+
+				// Verify returned backups
+				if len(backups) != tt.expectedBackups {
+					t.Errorf("Expected %d backups, got %d", tt.expectedBackups, len(backups))
+				}
+
+				// Verify backups match what we expect
+				if tt.expectedBackups > 0 && len(backups) > 0 {
+					// For cases with selection, verify the right backups were returned
+					if len(tt.vmfr.Spec.SelectedBackups) > 0 {
+						selectedMap := make(map[string]bool)
+						for _, name := range tt.vmfr.Spec.SelectedBackups {
+							selectedMap[name] = true
+						}
+						for _, backup := range backups {
+							if !selectedMap[backup.Name] {
+								t.Errorf("Unexpected backup %s in results", backup.Name)
+							}
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCheckVeleroRestoresAlreadyCreated(t *testing.T) {
+	tests := []struct {
+		name     string
+		vmfr     *oadpv1alpha1.VirtualMachineFileRestore
+		expected bool
+	}{
+		{
+			name: "no PVC restores - returns true",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "all available restores have VeleroRestoreName - returns true",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+								},
+							},
+						},
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-2",
+								PVCName: "pvc-2",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-2",
+									VeleroRestoreName: "restore-2",
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "one available restore missing VeleroRestoreName - returns false",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+								},
+							},
+						},
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-2",
+								PVCName: "pvc-2",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-2",
+									VeleroRestoreName: "", // Missing restore name
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "skips synthetic backup-level failure entries",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "synthetic",
+								PVCName: constant.BackupLevelFailurePVCName, // Synthetic entry
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "", // Missing but should be skipped
+								},
+							},
+						},
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-2",
+									VeleroRestoreName: "restore-2",
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true, // Should skip synthetic entry and only check real PVCs
+		},
+		{
+			name: "skips non-available states",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateExtractionFailed),
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "", // Missing but state is Failed, should be skipped
+								},
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-2",
+									VeleroRestoreName: "restore-2",
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true, // Should skip failed state and only check available
+		},
+		{
+			name: "multiple restores per PVC, one missing - returns false",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+								},
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-2",
+									VeleroRestoreName: "", // Missing
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "empty VeleroRestoreName for first available restore - returns false",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "", // Missing
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "mixed states, all available have restore names - returns true",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									State:             string(oadptypes.BackupDiscoveryStateAvailable),
+									VeleroBackupName:  "backup-1",
+									VeleroRestoreName: "restore-1",
+								},
+								{
+									State:             string(oadptypes.BackupDiscoveryStateExtractionFailed),
+									VeleroBackupName:  "backup-2",
+									VeleroRestoreName: "", // Missing but failed state
+								},
+								{
+									State:             "InProgress",
+									VeleroBackupName:  "backup-3",
+									VeleroRestoreName: "", // Missing but in progress
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true, // Only available state matters
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &VirtualMachineFileRestoreReconciler{}
+			result := r.checkVeleroRestoresAlreadyCreated(tt.vmfr)
+
+			if result != tt.expected {
+				t.Errorf("Expected %v, got %v", tt.expected, result)
+			}
+		})
+	}
+}
+
+func TestFindExistingVeleroRestore(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = veleroapiv2alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+
+	tests := []struct {
+		name            string
+		vmfr            *oadpv1alpha1.VirtualMachineFileRestore
+		backupName      string
+		existingObjects []client.Object
+		expectedFound   bool
+		expectError     bool
+		errorContains   string
+	}{
+		{
+			name: "successfully finds existing restore",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+					UID:       "vmfr-uuid-123",
+				},
+			},
+			backupName: "backup-1",
+			existingObjects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+				},
+			},
+			expectedFound: true,
+			expectError:   false,
+		},
+		{
+			name: "no restores exist",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+					UID:       "vmfr-uuid-123",
+				},
+			},
+			backupName:      "backup-1",
+			existingObjects: []client.Object{},
+			expectedFound:   false,
+			expectError:     true,
+			errorContains:   "no existing Velero Restore found",
+		},
+		{
+			name: "restores exist but none match backup name",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+					UID:       "vmfr-uuid-123",
+				},
+			},
+			backupName: "backup-1",
+			existingObjects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-2", // Different backup
+						},
+					},
+				},
+			},
+			expectedFound: false,
+			expectError:   true,
+			errorContains: "no existing Velero Restore found",
+		},
+		{
+			name: "multiple restores, one matches",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+					UID:       "vmfr-uuid-123",
+				},
+			},
+			backupName: "backup-2",
+			existingObjects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+				},
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-2",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-2", // This one matches
+						},
+					},
+				},
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-3",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-3",
+						},
+					},
+				},
+			},
+			expectedFound: true,
+			expectError:   false,
+		},
+		{
+			name: "restores with different VMFR UID are not returned",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+					UID:       "vmfr-uuid-123",
+				},
+			},
+			backupName: "backup-1",
+			existingObjects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "different-vmfr-uuid", // Different VMFR
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+				},
+			},
+			expectedFound: false,
+			expectError:   true,
+			errorContains: "no existing Velero Restore found",
+		},
+		{
+			name: "restore with no backup name annotation is skipped",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "default",
+					UID:       "vmfr-uuid-123",
+				},
+			},
+			backupName: "backup-1",
+			existingObjects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+						},
+						// No backup name annotation
+					},
+				},
+			},
+			expectedFound: false,
+			expectError:   true,
+			errorContains: "no existing Velero Restore found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(tt.existingObjects...).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: testOADPNamespace,
+			}
+
+			restore, err := r.findExistingVeleroRestore(context.TODO(), tt.backupName, tt.vmfr)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got none")
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain %q, got %q", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+			}
+
+			if tt.expectedFound {
+				if restore == nil {
+					t.Errorf("Expected to find restore but got nil")
+				} else {
+					// Verify it's the correct restore
+					if restore.Annotations[constant.BackupNameAnnotation] != tt.backupName {
+						t.Errorf("Found restore has wrong backup name annotation: %q, expected %q",
+							restore.Annotations[constant.BackupNameAnnotation], tt.backupName)
+					}
+					if restore.Labels[constant.VMFROriginUUIDLabel] != string(tt.vmfr.UID) {
+						t.Errorf("Found restore has wrong VMFR UID label: %q, expected %q",
+							restore.Labels[constant.VMFROriginUUIDLabel], string(tt.vmfr.UID))
+					}
+				}
+			} else {
+				if restore != nil {
+					t.Errorf("Expected not to find restore but got: %+v", restore)
+				}
+			}
+		})
+	}
+}
+
+func TestMapVMBDToVMFR(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name            string
+		vmbd            *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		existingVMFRs   []oadpv1alpha1.VirtualMachineFileRestore
+		expectedResults int
+	}{
+		{
+			name: "single VMFR references VMBD",
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "default",
+				},
+			},
+			existingVMFRs: []oadpv1alpha1.VirtualMachineFileRestore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vmfr-1",
+						Namespace: "default",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-vmbd",
+					},
+				},
+			},
+			expectedResults: 1,
+		},
+		{
+			name: "multiple VMFRs reference same VMBD",
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "default",
+				},
+			},
+			existingVMFRs: []oadpv1alpha1.VirtualMachineFileRestore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vmfr-1",
+						Namespace: "default",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-vmbd",
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vmfr-2",
+						Namespace: "default",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-vmbd",
+					},
+				},
+			},
+			expectedResults: 2,
+		},
+		{
+			name: "no VMFRs reference VMBD",
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "default",
+				},
+			},
+			existingVMFRs:   []oadpv1alpha1.VirtualMachineFileRestore{},
+			expectedResults: 0,
+		},
+		{
+			name: "VMFRs reference different VMBD",
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "default",
+				},
+			},
+			existingVMFRs: []oadpv1alpha1.VirtualMachineFileRestore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vmfr-1",
+						Namespace: "default",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "other-vmbd",
+					},
+				},
+			},
+			expectedResults: 0,
+		},
+		{
+			name: "VMFR in different namespace",
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "default",
+				},
+			},
+			existingVMFRs: []oadpv1alpha1.VirtualMachineFileRestore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vmfr-1",
+						Namespace: "other-namespace",
+					},
+					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+						BackupsDiscoveryRef: "test-vmbd",
+					},
+				},
+			},
+			expectedResults: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clientObjs := []client.Object{}
+			for i := range tt.existingVMFRs {
+				clientObjs = append(clientObjs, &tt.existingVMFRs[i])
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(clientObjs...).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			requests := r.mapVMBDToVMFR(context.TODO(), tt.vmbd)
+
+			if len(requests) != tt.expectedResults {
+				t.Errorf("Expected %d requests, got %d", tt.expectedResults, len(requests))
+			}
+
+			// Verify requests point to correct VMFRs
+			if tt.expectedResults > 0 {
+				for _, req := range requests {
+					found := false
+					for _, vmfr := range tt.existingVMFRs {
+						if req.Name == vmfr.Name && req.Namespace == vmfr.Namespace {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("Request for unexpected VMFR: %v", req)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMapVeleroRestoreToVMFR(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = velerov1api.AddToScheme(scheme)
+
+	tests := []struct {
+		name            string
+		restore         client.Object
+		expectedRequest bool
+		expectedName    string
+		expectedNS      string
+	}{
+		{
+			name: "restore with proper labels and annotations",
+			restore: &velerov1api.Restore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-restore",
+					Namespace: testOADPNamespace,
+					Labels: map[string]string{
+						constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation:      "my-vmfr",
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: true,
+			expectedName:    "my-vmfr",
+			expectedNS:      "default",
+		},
+		{
+			name: "restore without VMFR label",
+			restore: &velerov1api.Restore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-restore",
+					Namespace: testOADPNamespace,
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation:      "my-vmfr",
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: false,
+		},
+		{
+			name: "restore without name annotation",
+			restore: &velerov1api.Restore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-restore",
+					Namespace: testOADPNamespace,
+					Labels: map[string]string{
+						constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: false,
+		},
+		{
+			name: "restore without namespace annotation",
+			restore: &velerov1api.Restore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-restore",
+					Namespace: testOADPNamespace,
+					Labels: map[string]string{
+						constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation: "my-vmfr",
+					},
+				},
+			},
+			expectedRequest: false,
+		},
+		{
+			name: "non-restore object",
+			restore: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+				},
+			},
+			expectedRequest: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &VirtualMachineFileRestoreReconciler{}
+
+			requests := r.mapVeleroRestoreToVMFR(context.TODO(), tt.restore)
+
+			if tt.expectedRequest {
+				if len(requests) != 1 {
+					t.Errorf("Expected 1 request, got %d", len(requests))
+				} else {
+					if requests[0].Name != tt.expectedName {
+						t.Errorf("Expected name %s, got %s", tt.expectedName, requests[0].Name)
+					}
+					if requests[0].Namespace != tt.expectedNS {
+						t.Errorf("Expected namespace %s, got %s", tt.expectedNS, requests[0].Namespace)
+					}
+				}
+			} else {
+				if len(requests) != 0 {
+					t.Errorf("Expected no requests, got %d", len(requests))
+				}
+			}
+		})
+	}
+}
+
+func TestMapServiceToVMFR(t *testing.T) {
+	tests := []struct {
+		name            string
+		service         client.Object
+		expectedRequest bool
+		expectedName    string
+		expectedNS      string
+	}{
+		{
+			name: "service with proper labels and annotations",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-service",
+					Namespace: "restore-ns",
+					Labels: map[string]string{
+						constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation:      "my-vmfr",
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: true,
+			expectedName:    "my-vmfr",
+			expectedNS:      "default",
+		},
+		{
+			name: "service without VMFR label",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-service",
+					Namespace: "restore-ns",
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation:      "my-vmfr",
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: false,
+		},
+		{
+			name: "service without name annotation",
+			service: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-service",
+					Namespace: "restore-ns",
+					Labels: map[string]string{
+						constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: false,
+		},
+		{
+			name: "non-service object",
+			service: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+				},
+			},
+			expectedRequest: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &VirtualMachineFileRestoreReconciler{}
+
+			requests := r.mapServiceToVMFR(context.TODO(), tt.service)
+
+			if tt.expectedRequest {
+				if len(requests) != 1 {
+					t.Errorf("Expected 1 request, got %d", len(requests))
+				} else {
+					if requests[0].Name != tt.expectedName {
+						t.Errorf("Expected name %s, got %s", tt.expectedName, requests[0].Name)
+					}
+					if requests[0].Namespace != tt.expectedNS {
+						t.Errorf("Expected namespace %s, got %s", tt.expectedNS, requests[0].Namespace)
+					}
+				}
+			} else {
+				if len(requests) != 0 {
+					t.Errorf("Expected no requests, got %d", len(requests))
+				}
+			}
+		})
+	}
+}
+
+func TestMapRouteToVMFR(t *testing.T) {
+	tests := []struct {
+		name            string
+		route           client.Object
+		expectedRequest bool
+		expectedName    string
+		expectedNS      string
+	}{
+		{
+			name: "route with proper labels and annotations",
+			route: &corev1.ConfigMap{ // Using ConfigMap as mock since we don't have Route type imported
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "restore-ns",
+					Labels: map[string]string{
+						constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation:      "my-vmfr",
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: true,
+			expectedName:    "my-vmfr",
+			expectedNS:      "default",
+		},
+		{
+			name: "route without VMFR label",
+			route: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "restore-ns",
+					Annotations: map[string]string{
+						constant.VMFROriginNameAnnotation:      "my-vmfr",
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: false,
+		},
+		{
+			name: "route without name annotation",
+			route: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "restore-ns",
+					Labels: map[string]string{
+						constant.VMFROriginUUIDLabel: "vmfr-uuid-123",
+					},
+					Annotations: map[string]string{
+						constant.VMFROriginNamespaceAnnotation: "default",
+					},
+				},
+			},
+			expectedRequest: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &VirtualMachineFileRestoreReconciler{}
+
+			requests := r.mapRouteToVMFR(context.TODO(), tt.route)
+
+			if tt.expectedRequest {
+				if len(requests) != 1 {
+					t.Errorf("Expected 1 request, got %d", len(requests))
+				} else {
+					if requests[0].Name != tt.expectedName {
+						t.Errorf("Expected name %s, got %s", tt.expectedName, requests[0].Name)
+					}
+					if requests[0].Namespace != tt.expectedNS {
+						t.Errorf("Expected namespace %s, got %s", tt.expectedNS, requests[0].Namespace)
+					}
+				}
+			} else {
+				if len(requests) != 0 {
+					t.Errorf("Expected no requests, got %d", len(requests))
+				}
+			}
+		})
+	}
+}
+
+func TestIsOpenShiftCluster(t *testing.T) {
+	tests := []struct {
+		name           string
+		includeRoutes  bool
+		expectedResult bool
+	}{
+		{
+			name:           "OpenShift cluster with Routes CRD",
+			includeRoutes:  true,
+			expectedResult: true,
+		},
+		{
+			name:           "Non-OpenShift cluster without Routes CRD",
+			includeRoutes:  false,
+			expectedResult: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			_ = corev1.AddToScheme(scheme)
+
+			var objects []client.Object
+
+			// Only register Route scheme and add a Route if we're testing OpenShift
+			if tt.includeRoutes {
+				_ = routev1.AddToScheme(scheme)
+				objects = append(objects, &routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-route",
+						Namespace: "test-namespace",
+					},
+				})
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			mgr := &fakeManager{
+				scheme:    scheme,
+				apiReader: fakeClient,
+			}
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			result := r.isOpenShiftCluster(mgr)
+			if result != tt.expectedResult {
+				t.Errorf("Expected isOpenShiftCluster() = %v, got %v", tt.expectedResult, result)
+			}
+		})
+	}
+}
+
+// fakeManager implements ctrl.Manager interface minimally for testing
+type fakeManager struct {
+	scheme    *runtime.Scheme
+	apiReader client.Reader
+}
+
+func (f *fakeManager) GetScheme() *runtime.Scheme {
+	return f.scheme
+}
+
+func (f *fakeManager) GetAPIReader() client.Reader {
+	return f.apiReader
+}
+
+func (f *fakeManager) GetClient() client.Client                     { return nil }
+func (f *fakeManager) GetFieldIndexer() client.FieldIndexer         { return nil }
+func (f *fakeManager) GetCache() cache.Cache                        { return nil }
+func (f *fakeManager) GetEventRecorderFor(name string) record.EventRecorder { return nil }
+func (f *fakeManager) GetRESTMapper() meta.RESTMapper                { return nil }
+func (f *fakeManager) GetLogger() logr.Logger                       { return logr.Discard() }
+func (f *fakeManager) GetControllerOptions() config.Controller      { return config.Controller{} }
+func (f *fakeManager) Start(ctx context.Context) error              { return nil }
+func (f *fakeManager) Add(runnable manager.Runnable) error          { return nil }
+func (f *fakeManager) Elected() <-chan struct{}                     { return nil }
+func (f *fakeManager) AddHealthzCheck(name string, check healthz.Checker) error { return nil }
+func (f *fakeManager) AddReadyzCheck(name string, check healthz.Checker) error  { return nil }
+func (f *fakeManager) AddMetricsExtraHandler(path string, handler http.Handler) error { return nil }
+func (f *fakeManager) AddMetricsServerExtraHandler(path string, handler http.Handler) error { return nil }
+func (f *fakeManager) GetHTTPClient() *http.Client                  { return nil }
+func (f *fakeManager) GetWebhookServer() webhook.Server             { return nil }
+func (f *fakeManager) GetConfig() *rest.Config                      { return nil }
+
+func TestFindRouteHost(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = routev1.AddToScheme(scheme)
+
+	tests := []struct {
+		name          string
+		existingRoute *routev1.Route
+		routeName     string
+		routeNS       string
+		expectedHost  string
+		expectError   bool
+	}{
+		{
+			name: "route exists with host",
+			existingRoute: &routev1.Route{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "test-ns",
+				},
+				Spec: routev1.RouteSpec{
+					Host: "example.apps.cluster.com",
+				},
+			},
+			routeName:    "test-route",
+			routeNS:      "test-ns",
+			expectedHost: "example.apps.cluster.com",
+			expectError:  false,
+		},
+		{
+			name: "route exists without host",
+			existingRoute: &routev1.Route{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-route",
+					Namespace: "test-ns",
+				},
+				Spec: routev1.RouteSpec{
+					Host: "",
+				},
+			},
+			routeName:    "test-route",
+			routeNS:      "test-ns",
+			expectedHost: "",
+			expectError:  false,
+		},
+		{
+			name:          "route not found",
+			existingRoute: nil,
+			routeName:     "nonexistent-route",
+			routeNS:       "test-ns",
+			expectedHost:  "",
+			expectError:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			if tt.existingRoute != nil {
+				objects = append(objects, tt.existingRoute)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			host, err := r.findRouteHost(context.Background(), tt.routeNS, tt.routeName)
+
+			if tt.expectError && err == nil {
+				t.Errorf("Expected error but got none")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if host != tt.expectedHost {
+				t.Errorf("Expected host %q, got %q", tt.expectedHost, host)
+			}
+		})
+	}
+}
+
+func TestFindSecretByLabels(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	tests := []struct {
+		name            string
+		existingSecrets []*corev1.Secret
+		namespace       string
+		vmfrUID         string
+		credentialType  string
+		expectedSecret  string
+		expectError     bool
+		errorContains   string
+	}{
+		{
+			name: "single secret found",
+			existingSecrets: []*corev1.Secret{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "secret-1",
+						Namespace: "test-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uid-123",
+							constant.CredentialTypeLabel: "ssh",
+						},
+					},
+				},
+			},
+			namespace:      "test-ns",
+			vmfrUID:        "vmfr-uid-123",
+			credentialType: "ssh",
+			expectedSecret: "secret-1",
+			expectError:    false,
+		},
+		{
+			name: "multiple secrets found - returns first",
+			existingSecrets: []*corev1.Secret{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "secret-1",
+						Namespace: "test-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uid-123",
+							constant.CredentialTypeLabel: "ssh",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "secret-2",
+						Namespace: "test-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "vmfr-uid-123",
+							constant.CredentialTypeLabel: "ssh",
+						},
+					},
+				},
+			},
+			namespace:      "test-ns",
+			vmfrUID:        "vmfr-uid-123",
+			credentialType: "ssh",
+			expectedSecret: "secret-1",
+			expectError:    false,
+		},
+		{
+			name:            "no secrets found",
+			existingSecrets: []*corev1.Secret{},
+			namespace:       "test-ns",
+			vmfrUID:         "vmfr-uid-123",
+			credentialType:  "ssh",
+			expectError:     true,
+			errorContains:   "no secret found",
+		},
+		{
+			name: "no matching labels",
+			existingSecrets: []*corev1.Secret{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "secret-1",
+						Namespace: "test-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "different-uid",
+							constant.CredentialTypeLabel: "ssh",
+						},
+					},
+				},
+			},
+			namespace:      "test-ns",
+			vmfrUID:        "vmfr-uid-123",
+			credentialType: "ssh",
+			expectError:    true,
+			errorContains:  "no secret found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			for _, secret := range tt.existingSecrets {
+				objects = append(objects, secret)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			secretName, err := r.findSecretByLabels(
+				context.Background(),
+				tt.namespace,
+				tt.vmfrUID,
+				tt.credentialType,
+			)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got none")
+				} else if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error containing %q, got %q", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+				if secretName != tt.expectedSecret {
+					t.Errorf("Expected secret %q, got %q", tt.expectedSecret, secretName)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateAndDiscoverPVCs(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+
+	// Helper to create a VMBD with valid backups
+	createVMBD := func(name, namespace string) *oadpv1alpha1.VirtualMachineBackupsDiscovery {
+		return &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: namespace,
+			},
+			Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+				Phase: oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseCompleted,
+				ValidBackups: []oadptypes.VeleroBackupInfo{
+					{
+						Name:      "backup-1",
+						Namespace: testOADPNamespace,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name               string
+		vmfr               *oadpv1alpha1.VirtualMachineFileRestore
+		vmbd               *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		objects            []client.Object
+		expectedPhase      oadpv1alpha1.VirtualMachineFileRestorePhase
+		expectedRequeue    bool
+		expectError        bool
+		expectedConditions int
+	}{
+		{
+			name: "phase transition from New to Failed (no valid backups)",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseNew,
+				},
+			},
+			vmbd:               createVMBD("test-vmbd", "test-ns"),
+			expectedPhase:      oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+			expectedRequeue:    false,
+			expectError:        true,
+			expectedConditions: 4,
+		},
+		{
+			name: "discovery not found - should fail",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "nonexistent-vmbd",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseNew,
+				},
+			},
+			vmbd:            nil, // No VMBD created
+			expectedPhase:   oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+			expectedRequeue: false,
+			expectError:     true,
+		},
+		{
+			name: "discovery in progress - should wait",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseNew,
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					Phase: oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseInProgress,
+				},
+			},
+			expectedPhase:      oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+			expectedRequeue:    true,
+			expectError:        false,
+			expectedConditions: 4,
+		},
+		{
+			name: "selected backup not in valid backups - should fail",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					SelectedBackups:     []string{"nonexistent-backup"},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseNew,
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					Phase: oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseCompleted,
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{
+							Name:      "backup-1",
+							Namespace: testOADPNamespace,
+							PVCs: []oadptypes.PVCInfo{
+								{
+									PVCUID:  "pvc-uid-1",
+									PVCName: "pvc-1",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedPhase:      oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+			expectedRequeue:    false,
+			expectError:        true,
+			expectedConditions: 4,
+		},
+		{
+			name: "empty selected backups with valid backups available",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					SelectedBackups:     []string{},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseNew,
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					Phase: oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseCompleted,
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{
+							Name:      "backup-1",
+							Namespace: testOADPNamespace,
+							PVCs: []oadptypes.PVCInfo{
+								{
+									PVCUID:  "pvc-uid-1",
+									PVCName: "pvc-1",
+								},
+							},
+						},
+						{
+							Name:      "backup-2",
+							Namespace: testOADPNamespace,
+							PVCs: []oadptypes.PVCInfo{
+								{
+									PVCUID:  "pvc-uid-1",
+									PVCName: "pvc-1",
+								},
+								{
+									PVCUID:  "pvc-uid-2",
+									PVCName: "pvc-2",
+								},
+							},
+						},
+					},
+				},
+			},
+			objects: []client.Object{
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "backup-1",
+						Namespace: testOADPNamespace,
+					},
+					Status: velerov1api.BackupStatus{
+						Phase: velerov1api.BackupPhaseCompleted,
+					},
+				},
+				&velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "backup-2",
+						Namespace: testOADPNamespace,
+					},
+					Status: velerov1api.BackupStatus{
+						Phase: velerov1api.BackupPhaseCompleted,
+					},
+				},
+			},
+			expectedPhase:      oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+			expectedRequeue:    false,
+			expectError:        true,
+			expectedConditions: 4,
+		},
+		{
+			name: "discovery failed phase - should fail validation",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseNew,
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineBackupsDiscoveryStatus{
+					Phase: oadpv1alpha1.VirtualMachineBackupsDiscoveryPhaseFailed,
+					ValidBackups: []oadptypes.VeleroBackupInfo{
+						{
+							Name:      "backup-1",
+							Namespace: testOADPNamespace,
+							PVCs: []oadptypes.PVCInfo{
+								{
+									PVCUID:  "pvc-uid-1",
+									PVCName: "pvc-1",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedPhase:      oadpv1alpha1.VirtualMachineFileRestorePhaseFailed,
+			expectedRequeue:    false,
+			expectError:        true,
+			expectedConditions: 4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			objects = append(objects, tt.vmfr)
+			if tt.vmbd != nil {
+				objects = append(objects, tt.vmbd)
+			}
+			if len(tt.objects) > 0 {
+				objects = append(objects, tt.objects...)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: testOADPNamespace,
+			}
+
+			logger := zap.New(zap.UseDevMode(true))
+			requeue, err := r.validateAndDiscoverPVCs(context.Background(), logger, tt.vmfr)
+
+			if tt.expectError && err == nil {
+				t.Errorf("Expected error but got none")
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error: %v", err)
+			}
+			if requeue != tt.expectedRequeue {
+				t.Errorf("Expected requeue %v, got %v", tt.expectedRequeue, requeue)
+			}
+
+			// Fetch updated VMFR to check status
+			updatedVMFR := &oadpv1alpha1.VirtualMachineFileRestore{}
+			_ = fakeClient.Get(context.Background(), types.NamespacedName{
+				Name:      tt.vmfr.Name,
+				Namespace: tt.vmfr.Namespace,
+			}, updatedVMFR)
+
+			if updatedVMFR.Status.Phase != tt.expectedPhase {
+				t.Errorf("Expected phase %s, got %s", tt.expectedPhase, updatedVMFR.Status.Phase)
+			}
+
+			if tt.expectedConditions > 0 && len(updatedVMFR.Status.Conditions) < tt.expectedConditions {
+				t.Errorf("Expected at least %d conditions, got %d", tt.expectedConditions, len(updatedVMFR.Status.Conditions))
+			}
+		})
+	}
+}
+
+func TestExecuteFileRestoreWorkflow(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = velerov1api.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
+
+	tests := []struct {
+		name               string
+		vmfr               *oadpv1alpha1.VirtualMachineFileRestore
+		vmbd               *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		existingNamespace  *corev1.Namespace
+		objects            []client.Object
+		expectedRequeue    bool
+		expectError        bool
+		expectedNewReason  string
+	}{
+		{
+			name: "validation completed - auto-generates namespace",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonValidationCompleted,
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+				Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+					VirtualMachineName:      "test-vm",
+					VirtualMachineNamespace: "vm-namespace",
+				},
+			},
+			existingNamespace: nil,
+			expectedRequeue:   true,
+			expectError:       false,
+			expectedNewReason: oadptypes.ReasonNamespaceReady,
+		},
+		{
+			name: "validation completed - namespace already exists",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					RestoreNamespace: "restore-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase: oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonValidationCompleted,
+						},
+					},
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue:   true,
+			expectError:       false,
+			expectedNewReason: oadptypes.ReasonNamespaceReady,
+		},
+		{
+			name: "namespace ready - transitions to waiting for restores",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					RestoreNamespace:    "restore-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:            oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					CreatedNamespace: "restore-ns", // Namespace must be set in status
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonNamespaceReady,
+						},
+					},
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroBackupNamespace: testOADPNamespace,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
+								},
+							},
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+				Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+					VirtualMachineName:      "test-vm",
+					VirtualMachineNamespace: "vm-namespace",
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue:   true,
+			expectError:       false,
+			expectedNewReason: oadptypes.ReasonWaitingForRestores,
+		},
+		{
+			name: "missing progressing condition - error",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:      oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					Conditions: []metav1.Condition{},
+				},
+			},
+			expectedRequeue: false,
+			expectError:     true,
+		},
+		{
+			name: "waiting for restores - restores in progress",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					RestoreNamespace:    "restore-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:            oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					CreatedNamespace: "restore-ns",
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonWaitingForRestores,
+						},
+					},
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroBackupNamespace: testOADPNamespace,
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseInProgress,
+								},
+							},
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+			},
+			objects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseInProgress,
+					},
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue: true,  // Should requeue while waiting
+			expectError:     false,
+		},
+		{
+			name: "waiting for restores - all restores completed",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					RestoreNamespace:    "restore-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:            oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					CreatedNamespace: "restore-ns",
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonWaitingForRestores,
+						},
+					},
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroBackupNamespace: testOADPNamespace,
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseInProgress,
+								},
+							},
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+			},
+			objects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseCompleted,
+					},
+				},
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pvc-1",
+						Namespace: "restore-ns",
+						UID:       "pvc-uid-1",
+					},
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue:   true,
+			expectError:       false,
+			expectedNewReason: oadptypes.ReasonRestoresCompleted,
+		},
+		{
+			name: "waiting for restores - all restores failed",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					RestoreNamespace:    "restore-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:            oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					CreatedNamespace: "restore-ns",
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonWaitingForRestores,
+						},
+					},
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroBackupNamespace: testOADPNamespace,
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseInProgress,
+								},
+							},
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+			},
+			objects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseFailed,
+					},
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue: false,
+			expectError:     true,
+		},
+		{
+			name: "waiting for restores - partial completion",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					RestoreNamespace:    "restore-ns",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:            oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					CreatedNamespace: "restore-ns",
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonWaitingForRestores,
+						},
+					},
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:      "backup-1",
+									VeleroBackupNamespace: testOADPNamespace,
+									VeleroRestoreName:     "restore-1",
+									Phase:                 velerov1api.RestorePhaseCompleted,
+								},
+								{
+									VeleroBackupName:      "backup-2",
+									VeleroBackupNamespace: testOADPNamespace,
+									VeleroRestoreName:     "restore-2",
+									Phase:                 velerov1api.RestorePhaseInProgress,
+								},
+							},
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+			},
+			objects: []client.Object{
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseCompleted,
+					},
+				},
+				&velerov1api.Restore{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-2",
+						Namespace: testOADPNamespace,
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseFailed,
+					},
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue: false,
+			expectError:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			objects = append(objects, tt.vmfr)
+			if tt.vmbd != nil {
+				objects = append(objects, tt.vmbd)
+			}
+			if tt.existingNamespace != nil {
+				objects = append(objects, tt.existingNamespace)
+			}
+			if tt.objects != nil {
+				objects = append(objects, tt.objects...)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}, &velerov1api.Restore{}).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: testOADPNamespace,
+			}
+
+			logger := zap.New(zap.UseDevMode(true))
+			requeue, err := r.executeFileRestoreWorkflow(context.Background(), logger, tt.vmfr)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error but got none")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+				}
+			}
+
+			if requeue != tt.expectedRequeue {
+				t.Errorf("Expected requeue %v, got %v", tt.expectedRequeue, requeue)
+			}
+
+			// Check if progressing reason was updated as expected
+			if tt.expectedNewReason != "" {
+				updatedVMFR := &oadpv1alpha1.VirtualMachineFileRestore{}
+				_ = fakeClient.Get(context.Background(), types.NamespacedName{
+					Name:      tt.vmfr.Name,
+					Namespace: tt.vmfr.Namespace,
+				}, updatedVMFR)
+
+				progressingCond := meta.FindStatusCondition(updatedVMFR.Status.Conditions, oadptypes.ConditionTypeProgressing)
+				if progressingCond != nil && progressingCond.Reason != tt.expectedNewReason {
+					t.Errorf("Expected progressing reason %s, got %s", tt.expectedNewReason, progressingCond.Reason)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateFileServerResources(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
+
+	tests := []struct {
+		name          string
+		vmfr          *oadpv1alpha1.VirtualMachineFileRestore
+		objects       []client.Object
+		expectedError string
+	}{
+		{
+			name: "missing restore namespace in status",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					// CreatedNamespace is missing
+					CreatedNamespace: "",
+				},
+			},
+			expectedError: "restore namespace not found in status",
+		},
+		{
+			name: "no PVC mounts found",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					// PVCRestores is empty
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{},
+				},
+			},
+			expectedError: "no PVC mounts found in status",
+		},
+		{
+			name: "PVC restores with no restores",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							// Restores is empty
+							Restores: []oadpv1alpha1.RestoreInfo{},
+						},
+					},
+				},
+			},
+			expectedError: "no PVC mounts found in status",
+		},
+		{
+			name: "failed to find restored PVC name",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							Username: "testuser",
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             "available",
+								},
+							},
+						},
+					},
+				},
+			},
+			// No restored PVC object exists, so findRestoredPVCName will fail
+			expectedError: "failed to find restored PVC name",
+		},
+		{
+			name: "failed to find SSH credentials secret",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							Username: "testuser",
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             "available",
+								},
+							},
+						},
+					},
+				},
+			},
+			objects: []client.Object{
+				// Restored PVC exists with proper labels and annotations
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						UID:       "restored-pvc-uid-1",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						VolumeMode: func() *corev1.PersistentVolumeMode {
+							mode := corev1.PersistentVolumeFilesystem
+							return &mode
+						}(),
+					},
+				},
+				// SSH credentials secret is missing - will cause error
+			},
+			expectedError: "failed to find SSH credentials secret",
+		},
+		{
+			name: "failed to find FileBrowser credentials secret",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						FileBrowser: &oadpv1alpha1.FileBrowserAccessSpec{},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             "available",
+								},
+							},
+						},
+					},
+				},
+			},
+			objects: []client.Object{
+				// Restored PVC exists
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						UID:       "restored-pvc-uid-1",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						VolumeMode: func() *corev1.PersistentVolumeMode {
+							mode := corev1.PersistentVolumeFilesystem
+							return &mode
+						}(),
+					},
+				},
+				// FileBrowser credentials secret is missing - will cause error
+			},
+			expectedError: "failed to find FileBrowser credentials secret",
+		},
+		{
+			name: "successful creation with SSH and FileBrowser",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							Username: "testuser",
+						},
+						FileBrowser: &oadpv1alpha1.FileBrowserAccessSpec{},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             "available",
+								},
+							},
+						},
+					},
+				},
+			},
+			objects: []client.Object{
+				// Restored PVC
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						UID:       "restored-pvc-uid-1",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						VolumeMode: func() *corev1.PersistentVolumeMode {
+							mode := corev1.PersistentVolumeFilesystem
+							return &mode
+						}(),
+					},
+				},
+				// SSH credentials secret
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ssh-creds",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+							constant.CredentialTypeLabel: constant.CredentialTypeSSH,
+						},
+					},
+					Data: map[string][]byte{
+						"authorized_keys": []byte("ssh-rsa AAAA..."),
+						"username":        []byte("testuser"),
+					},
+				},
+				// FileBrowser credentials secret
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "fb-creds",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+							constant.CredentialTypeLabel: constant.CredentialTypeFileBrowser,
+						},
+					},
+					Data: map[string][]byte{
+						"username": []byte("oadp"),
+						"password": []byte("test-password"),
+					},
+				},
+			},
+			expectedError: "", // Success case
+		},
+		{
+			name: "pod already exists - idempotency",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCUID:  "pvc-uid-1",
+								PVCName: "pvc-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroRestoreName: "restore-1",
+									Phase:             velerov1api.RestorePhaseCompleted,
+									State:             "available",
+								},
+							},
+						},
+					},
+				},
+			},
+			objects: []client.Object{
+				// Restored PVC
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restored-pvc-1",
+						Namespace: "restore-ns",
+						UID:       "restored-pvc-uid-1",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						VolumeMode: func() *corev1.PersistentVolumeMode {
+							mode := corev1.PersistentVolumeFilesystem
+							return &mode
+						}(),
+					},
+				},
+				// SSH credentials secret
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ssh-creds",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+							constant.CredentialTypeLabel: constant.CredentialTypeSSH,
+						},
+					},
+				},
+				// File server pod already exists
+				&corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr-fileserver",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			expectedError: "", // Should succeed (idempotent)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{tt.vmfr}
+			objects = append(objects, tt.objects...)
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			r := &VirtualMachineFileRestoreReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			logger := zap.New(zap.UseDevMode(true))
+			err := r.createFileServerResources(context.Background(), logger, tt.vmfr)
+
+			if tt.expectedError != "" {
+				if err == nil {
+					t.Errorf("Expected error containing %q but got none", tt.expectedError)
+				} else if !strings.Contains(err.Error(), tt.expectedError) {
+					t.Errorf("Expected error containing %q, got %q", tt.expectedError, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
 				}
 			}
 		})
