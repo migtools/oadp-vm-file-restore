@@ -58,8 +58,9 @@ import (
 )
 
 const (
-	testRestoreName   = "restore-1"
-	testOADPNamespace = "openshift-adp"
+	testRestoreName               = "restore-1"
+	testOADPNamespace             = "openshift-adp"
+	testValidationFailureMessage  = "testValidationFailureMessage"
 )
 
 var _ = Describe("VirtualMachineFileRestore Controller", func() {
@@ -4992,6 +4993,25 @@ func TestEnsureCredentials(t *testing.T) {
 	}
 }
 
+// Helper function to verify a specific condition exists and matches expected values
+func verifyCondition(t *testing.T, conditions []metav1.Condition, condType string, expectedStatus metav1.ConditionStatus, expectedReason string, expectedMessage string) {
+	t.Helper()
+	cond := meta.FindStatusCondition(conditions, condType)
+	if cond == nil {
+		t.Errorf("%s condition not found", condType)
+		return
+	}
+	if cond.Status != expectedStatus {
+		t.Errorf("Expected %s status %s, got %s", condType, expectedStatus, cond.Status)
+	}
+	if cond.Reason != expectedReason {
+		t.Errorf("Expected %s reason %s, got %s", condType, expectedReason, cond.Reason)
+	}
+	if expectedMessage != "" && cond.Message != expectedMessage {
+		t.Errorf("Expected %s message '%s', got '%s'", condType, expectedMessage, cond.Message)
+	}
+}
+
 func TestFailPartialValidation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = oadpv1alpha1.AddToScheme(scheme)
@@ -5019,9 +5039,9 @@ func TestFailPartialValidation(t *testing.T) {
 				},
 			},
 			reason:        "PartialAvailability",
-			message:       "some backups failed validation",
+			message:       testValidationFailureMessage,
 			expectError:   true,
-			errorContains: "partial validation failed: some backups failed validation",
+			errorContains: "partial validation failed: " + testValidationFailureMessage,
 			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
 				// Verify phase is set to PartiallyFailed
 				if vmfr.Status.Phase != oadpv1alpha1.VirtualMachineFileRestorePhasePartiallyFailed {
@@ -5044,8 +5064,8 @@ func TestFailPartialValidation(t *testing.T) {
 					if progressingCond.Reason != oadptypes.ReasonPartialValidationFailed {
 						t.Errorf("Expected Progressing reason %s, got %s", oadptypes.ReasonPartialValidationFailed, progressingCond.Reason)
 					}
-					if progressingCond.Message != "some backups failed validation" {
-						t.Errorf("Expected Progressing message 'some backups failed validation', got %s", progressingCond.Message)
+					if progressingCond.Message != testValidationFailureMessage {
+						t.Errorf("Expected Progressing message '%s', got %s", testValidationFailureMessage, progressingCond.Message)
 					}
 				}
 
@@ -5076,8 +5096,8 @@ func TestFailPartialValidation(t *testing.T) {
 					if degradedCond.Reason != oadptypes.ReasonPartialFailure {
 						t.Errorf("Expected Degraded reason %s, got %s", oadptypes.ReasonPartialFailure, degradedCond.Reason)
 					}
-					if degradedCond.Message != "some backups failed validation" {
-						t.Errorf("Expected Degraded message 'some backups failed validation', got %s", degradedCond.Message)
+					if degradedCond.Message != testValidationFailureMessage {
+						t.Errorf("Expected Degraded message '%s', got %s", testValidationFailureMessage, degradedCond.Message)
 					}
 				}
 
@@ -5092,8 +5112,8 @@ func TestFailPartialValidation(t *testing.T) {
 					if readyCond.Reason != oadptypes.ReasonPartiallyFailed {
 						t.Errorf("Expected Ready reason %s, got %s", oadptypes.ReasonPartiallyFailed, readyCond.Reason)
 					}
-					if readyCond.Message != "some backups failed validation" {
-						t.Errorf("Expected Ready message 'some backups failed validation', got %s", readyCond.Message)
+					if readyCond.Message != testValidationFailureMessage {
+						t.Errorf("Expected Ready message '%s', got %s", testValidationFailureMessage, readyCond.Message)
 					}
 				}
 			},
