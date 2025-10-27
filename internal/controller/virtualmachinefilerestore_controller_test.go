@@ -5018,9 +5018,9 @@ func TestFailPartialValidation(t *testing.T) {
 					BackupsDiscoveryRef: "test-discovery",
 				},
 			},
-			reason:      "PartialAvailability",
-			message:     "some backups failed validation",
-			expectError: true,
+			reason:        "PartialAvailability",
+			message:       "some backups failed validation",
+			expectError:   true,
 			errorContains: "partial validation failed: some backups failed validation",
 			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
 				// Verify phase is set to PartiallyFailed
@@ -5109,9 +5109,9 @@ func TestFailPartialValidation(t *testing.T) {
 					BackupsDiscoveryRef: "test-discovery",
 				},
 			},
-			reason:      "",
-			message:     "",
-			expectError: true,
+			reason:        "",
+			message:       "",
+			expectError:   true,
 			errorContains: "partial validation failed",
 			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
 				// Verify phase is set
@@ -5157,9 +5157,9 @@ func TestFailPartialValidation(t *testing.T) {
 					},
 				},
 			},
-			reason:      "TestReason",
-			message:     "test message",
-			expectError: true,
+			reason:        "TestReason",
+			message:       "test message",
+			expectError:   true,
 			errorContains: "partial validation failed: test message",
 			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
 				// After patch, the 4 standard conditions should be present
@@ -5193,9 +5193,9 @@ func TestFailPartialValidation(t *testing.T) {
 					BackupsDiscoveryRef: "test-discovery",
 				},
 			},
-			reason:      "ValidationError",
-			message:     "backup discovery validation failed",
-			expectError: true,
+			reason:        "ValidationError",
+			message:       "backup discovery validation failed",
+			expectError:   true,
 			errorContains: "partial validation failed: backup discovery validation failed",
 			validateStatus: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
 				// Just verify phase was set
@@ -5265,13 +5265,13 @@ func TestValidateDiscoveryBackups(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name             string
-		vmfr             *oadpv1alpha1.VirtualMachineFileRestore
-		vmbd             *oadpv1alpha1.VirtualMachineBackupsDiscovery
-		expectedBackups  int
-		expectError      bool
-		errorContains    string
-		expectedPhase    oadpv1alpha1.VirtualMachineFileRestorePhase
+		name            string
+		vmfr            *oadpv1alpha1.VirtualMachineFileRestore
+		vmbd            *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		expectedBackups int
+		expectError     bool
+		errorContains   string
+		expectedPhase   oadpv1alpha1.VirtualMachineFileRestorePhase
 	}{
 		{
 			name: "no valid backups in discovery",
@@ -6528,23 +6528,25 @@ func (f *fakeManager) GetAPIReader() client.Reader {
 	return f.apiReader
 }
 
-func (f *fakeManager) GetClient() client.Client                     { return nil }
-func (f *fakeManager) GetFieldIndexer() client.FieldIndexer         { return nil }
-func (f *fakeManager) GetCache() cache.Cache                        { return nil }
-func (f *fakeManager) GetEventRecorderFor(name string) record.EventRecorder { return nil }
-func (f *fakeManager) GetRESTMapper() meta.RESTMapper                { return nil }
-func (f *fakeManager) GetLogger() logr.Logger                       { return logr.Discard() }
-func (f *fakeManager) GetControllerOptions() config.Controller      { return config.Controller{} }
-func (f *fakeManager) Start(ctx context.Context) error              { return nil }
-func (f *fakeManager) Add(runnable manager.Runnable) error          { return nil }
-func (f *fakeManager) Elected() <-chan struct{}                     { return nil }
-func (f *fakeManager) AddHealthzCheck(name string, check healthz.Checker) error { return nil }
-func (f *fakeManager) AddReadyzCheck(name string, check healthz.Checker) error  { return nil }
+func (f *fakeManager) GetClient() client.Client                                       { return nil }
+func (f *fakeManager) GetFieldIndexer() client.FieldIndexer                           { return nil }
+func (f *fakeManager) GetCache() cache.Cache                                          { return nil }
+func (f *fakeManager) GetEventRecorderFor(name string) record.EventRecorder           { return nil }
+func (f *fakeManager) GetRESTMapper() meta.RESTMapper                                 { return nil }
+func (f *fakeManager) GetLogger() logr.Logger                                         { return logr.Discard() }
+func (f *fakeManager) GetControllerOptions() config.Controller                        { return config.Controller{} }
+func (f *fakeManager) Start(ctx context.Context) error                                { return nil }
+func (f *fakeManager) Add(runnable manager.Runnable) error                            { return nil }
+func (f *fakeManager) Elected() <-chan struct{}                                       { return nil }
+func (f *fakeManager) AddHealthzCheck(name string, check healthz.Checker) error       { return nil }
+func (f *fakeManager) AddReadyzCheck(name string, check healthz.Checker) error        { return nil }
 func (f *fakeManager) AddMetricsExtraHandler(path string, handler http.Handler) error { return nil }
-func (f *fakeManager) AddMetricsServerExtraHandler(path string, handler http.Handler) error { return nil }
-func (f *fakeManager) GetHTTPClient() *http.Client                  { return nil }
-func (f *fakeManager) GetWebhookServer() webhook.Server             { return nil }
-func (f *fakeManager) GetConfig() *rest.Config                      { return nil }
+func (f *fakeManager) AddMetricsServerExtraHandler(path string, handler http.Handler) error {
+	return nil
+}
+func (f *fakeManager) GetHTTPClient() *http.Client      { return nil }
+func (f *fakeManager) GetWebhookServer() webhook.Server { return nil }
+func (f *fakeManager) GetConfig() *rest.Config          { return nil }
 
 func TestFindRouteHost(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -7096,14 +7098,14 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 	_ = rbacv1.AddToScheme(scheme)
 
 	tests := []struct {
-		name               string
-		vmfr               *oadpv1alpha1.VirtualMachineFileRestore
-		vmbd               *oadpv1alpha1.VirtualMachineBackupsDiscovery
-		existingNamespace  *corev1.Namespace
-		objects            []client.Object
-		expectedRequeue    bool
-		expectError        bool
-		expectedNewReason  string
+		name              string
+		vmfr              *oadpv1alpha1.VirtualMachineFileRestore
+		vmbd              *oadpv1alpha1.VirtualMachineBackupsDiscovery
+		existingNamespace *corev1.Namespace
+		objects           []client.Object
+		expectedRequeue   bool
+		expectError       bool
+		expectedNewReason string
 	}{
 		{
 			name: "validation completed - auto-generates namespace",
@@ -7312,7 +7314,7 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 					Name: "restore-ns",
 				},
 			},
-			expectedRequeue: true,  // Should requeue while waiting
+			expectedRequeue: true, // Should requeue while waiting
 			expectError:     false,
 		},
 		{
