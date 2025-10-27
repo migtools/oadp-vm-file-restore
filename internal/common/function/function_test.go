@@ -689,7 +689,7 @@ func TestValidateFileBrowserSecret(t *testing.T) {
 	})
 }
 
-func TestCheckVeleroRestoreMetadata(t *testing.T) {
+func TestHasVMFRLabel(t *testing.T) {
 	t.Run("returns true when label exists", func(t *testing.T) {
 		obj := &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -701,7 +701,7 @@ func TestCheckVeleroRestoreMetadata(t *testing.T) {
 			},
 		}
 
-		result := CheckVeleroRestoreMetadata(obj)
+		result := HasVMFRLabel(obj)
 		if !result {
 			t.Error("Expected true when VMFROriginUUIDLabel exists")
 		}
@@ -718,7 +718,7 @@ func TestCheckVeleroRestoreMetadata(t *testing.T) {
 			},
 		}
 
-		result := CheckVeleroRestoreMetadata(obj)
+		result := HasVMFRLabel(obj)
 		if result {
 			t.Error("Expected false when VMFROriginUUIDLabel does not exist")
 		}
@@ -732,7 +732,7 @@ func TestCheckVeleroRestoreMetadata(t *testing.T) {
 			},
 		}
 
-		result := CheckVeleroRestoreMetadata(obj)
+		result := HasVMFRLabel(obj)
 		if result {
 			t.Error("Expected false when labels are nil")
 		}
@@ -749,7 +749,7 @@ func TestCheckVeleroRestoreMetadata(t *testing.T) {
 			},
 		}
 
-		result := CheckVeleroRestoreMetadata(obj)
+		result := HasVMFRLabel(obj)
 		if !result {
 			t.Error("Expected true when VMFROriginUUIDLabel exists even with empty value")
 		}
