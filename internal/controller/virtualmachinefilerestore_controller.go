@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	routev1 "github.com/openshift/api/route/v1"
 	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	veleroapiv2alpha1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v2alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -88,6 +89,7 @@ func (e ErrUnsupportedBackup) Error() string {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
@@ -1717,13 +1719,34 @@ func (r *VirtualMachineFileRestoreReconciler) getDiscoveryResource(ctx context.C
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *VirtualMachineFileRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&oadpv1alpha1.VirtualMachineFileRestore{}).
 		Watches(&oadpv1alpha1.VirtualMachineBackupsDiscovery{}, handler.EnqueueRequestsFromMapFunc(r.mapVMBDToVMFR)).
 		Watches(&veleroapi.Restore{}, handler.EnqueueRequestsFromMapFunc(r.mapVeleroRestoreToVMFR),
 			builder.WithPredicates(predicate.VeleroRestorePredicate{OADPNamespace: r.OADPNamespace})).
+		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.mapServiceToVMFR),
+			builder.WithPredicates(predicate.ServicePredicate{}))
+
+	// Watch Routes if the Route CRD is available (OpenShift clusters)
+	// On non-OpenShift clusters, this watch will be skipped
+	if r.isOpenShiftCluster(mgr) {
+		controllerBuilder = controllerBuilder.Watches(
+			&routev1.Route{},
+			handler.EnqueueRequestsFromMapFunc(r.mapRouteToVMFR),
+			builder.WithPredicates(predicate.RoutePredicate{}))
+	}
+
+	return controllerBuilder.
 		Named("virtualmachinefilerestore").
 		Complete(r)
+}
+
+// isOpenShiftCluster checks if the cluster has OpenShift Route CRD available
+func (r *VirtualMachineFileRestoreReconciler) isOpenShiftCluster(mgr ctrl.Manager) bool {
+	// Check if Route CRD exists by attempting to list it
+	routeList := &routev1.RouteList{}
+	err := mgr.GetAPIReader().List(context.Background(), routeList, client.Limit(1))
+	return err == nil
 }
 
 // mapVMBDToVMFR maps VirtualMachineBackupsDiscovery changes to VirtualMachineFileRestore reconcile requests
@@ -1779,6 +1802,212 @@ func (r *VirtualMachineFileRestoreReconciler) mapVeleroRestoreToVMFR(ctx context
 			},
 		},
 	}
+}
+
+// mapServiceToVMFR maps Service changes to VirtualMachineFileRestore reconcile requests
+func (r *VirtualMachineFileRestoreReconciler) mapServiceToVMFR(ctx context.Context, obj client.Object) []ctrl.Request {
+	service, ok := obj.(*corev1.Service)
+	if !ok {
+		return nil
+	}
+
+	// Check if this Service is managed by a VMFR
+	_, exists := service.Labels[constant.VMFROriginUUIDLabel]
+	if !exists {
+		return nil
+	}
+
+	// Get VMFR name and namespace from annotations
+	vmfrName, nameExists := service.Annotations[constant.VMFROriginNameAnnotation]
+	vmfrNamespace, nsExists := service.Annotations[constant.VMFROriginNamespaceAnnotation]
+	if !nameExists || !nsExists {
+		return nil
+	}
+
+	// Return a reconcile request for the VMFR that owns this Service
+	return []ctrl.Request{
+		{
+			NamespacedName: client.ObjectKey{
+				Name:      vmfrName,
+				Namespace: vmfrNamespace,
+			},
+		},
+	}
+}
+
+// mapRouteToVMFR maps Route changes to VirtualMachineFileRestore reconcile requests
+func (r *VirtualMachineFileRestoreReconciler) mapRouteToVMFR(ctx context.Context, obj client.Object) []ctrl.Request {
+	// Check if this Route is managed by a VMFR
+	_, exists := obj.GetLabels()[constant.VMFROriginUUIDLabel]
+	if !exists {
+		return nil
+	}
+
+	// Get VMFR name and namespace from annotations
+	vmfrName, nameExists := obj.GetAnnotations()[constant.VMFROriginNameAnnotation]
+	vmfrNamespace, nsExists := obj.GetAnnotations()[constant.VMFROriginNamespaceAnnotation]
+	if !nameExists || !nsExists {
+		return nil
+	}
+
+	// Return a reconcile request for the VMFR that owns this Route
+	return []ctrl.Request{
+		{
+			NamespacedName: client.ObjectKey{
+				Name:      vmfrName,
+				Namespace: vmfrNamespace,
+			},
+		},
+	}
+}
+
+// updateFileServingInfo updates the FileServingInfo in the VMFR status with access URLs and credentials.
+// This function uses the created Service and discovers Routes to populate both cluster-internal and public access URLs.
+func (r *VirtualMachineFileRestoreReconciler) updateFileServingInfo(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	service *corev1.Service,
+) error {
+	restoreNamespace := vmfr.Status.CreatedNamespace
+	if restoreNamespace == "" {
+		return fmt.Errorf("restore namespace not set in status")
+	}
+
+	serviceName := service.Name
+	fileServingInfo := &oadpv1alpha1.FileServingInfo{}
+
+	// Build SSH serving info if SSH is enabled
+	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil {
+		sshInfo := &oadpv1alpha1.SSHServingInfo{}
+
+		// Find SSH port from service
+		var sshPort int32
+		for _, port := range service.Spec.Ports {
+			if port.Name == "ssh" {
+				sshPort = port.Port
+				break
+			}
+		}
+
+		// Build cluster access URL
+		if sshPort > 0 {
+			sshInfo.ClusterAccess = fmt.Sprintf("ssh://%s.%s.svc.cluster.local:%d",
+				serviceName, restoreNamespace, sshPort)
+		}
+
+		// Find SSH credentials secret
+		sshSecretName, err := r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeSSH)
+		if err == nil {
+			sshInfo.CredentialsSecretRef = &oadpv1alpha1.SecretReference{
+				Name:      sshSecretName,
+				Namespace: restoreNamespace,
+			}
+		}
+
+		// Note: SSH is not exposed externally via Routes for security reasons.
+		// Users can access SSH via port-forward: kubectl port-forward svc/<service-name> 2222:22
+
+		fileServingInfo.SSH = sshInfo
+	}
+
+	// Build FileBrowser serving info if FileBrowser is enabled
+	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.FileBrowser != nil {
+		fbInfo := &oadpv1alpha1.FileBrowserServingInfo{}
+
+		// Find HTTPS port from service
+		var httpsPort int32
+		for _, port := range service.Spec.Ports {
+			if port.Name == "https" {
+				httpsPort = port.Port
+				break
+			}
+		}
+
+		// Build cluster access URL
+		if httpsPort > 0 {
+			fbInfo.ClusterAccess = fmt.Sprintf("https://%s.%s.svc.cluster.local:%d",
+				serviceName, restoreNamespace, httpsPort)
+		}
+
+		// Find FileBrowser credentials secret
+		fbSecretName, err := r.findSecretByLabels(ctx, restoreNamespace, string(vmfr.UID), constant.CredentialTypeFileBrowser)
+		if err == nil {
+			fbInfo.CredentialsSecretRef = &oadpv1alpha1.SecretReference{
+				Name:      fbSecretName,
+				Namespace: restoreNamespace,
+			}
+		}
+
+		// Check for external Route if enabled
+		if vmfr.Spec.FileAccess.FileBrowser.ExposeExternally {
+			routeHost, err := r.findRouteHost(ctx, restoreNamespace, serviceName+"-https")
+			if err == nil && routeHost != "" {
+				fbInfo.PublicAccess = fmt.Sprintf("https://%s", routeHost)
+			}
+		}
+
+		fileServingInfo.FileBrowser = fbInfo
+	}
+
+	// Update status with FileServingInfo
+	vmfr.Status.FileServingInfo = fileServingInfo
+
+	if err := r.Status().Update(ctx, vmfr); err != nil {
+		return fmt.Errorf("failed to update status with file serving info: %w", err)
+	}
+
+	logger.V(0).Info("Updated file serving info in status",
+		"sshClusterAccess", func() string {
+			if fileServingInfo.SSH != nil {
+				return fileServingInfo.SSH.ClusterAccess
+			}
+			return ""
+		}(),
+		"fileBrowserClusterAccess", func() string {
+			if fileServingInfo.FileBrowser != nil {
+				return fileServingInfo.FileBrowser.ClusterAccess
+			}
+			return ""
+		}(),
+		"fileBrowserPublicAccess", func() string {
+			if fileServingInfo.FileBrowser != nil {
+				return fileServingInfo.FileBrowser.PublicAccess
+			}
+			return ""
+		}())
+
+	return nil
+}
+
+// findRouteHost finds the host for a Route by name in the given namespace.
+// Returns empty string if Route doesn't exist or host is not yet assigned.
+func (r *VirtualMachineFileRestoreReconciler) findRouteHost(ctx context.Context, namespace, routeName string) (string, error) {
+	route := &routev1.Route{}
+	err := r.Get(ctx, types.NamespacedName{
+		Name:      routeName,
+		Namespace: namespace,
+	}, route)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil // Route not found, not an error
+		}
+		return "", err
+	}
+
+	// Return the route host if available
+	if route.Spec.Host != "" {
+		return route.Spec.Host, nil
+	}
+
+	// Check status for assigned host
+	for _, ingress := range route.Status.Ingress {
+		if ingress.Host != "" {
+			return ingress.Host, nil
+		}
+	}
+
+	return "", nil
 }
 
 // ensureRestoreNamespace ensures that the restore namespace exists, either by using the specified one
@@ -2578,7 +2807,6 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 			restoreNamespace,
 			string(vmfr.UID),
 			constant.CredentialTypeSSH,
-			false, // Not filtering for copied secrets only
 		)
 		if err != nil {
 			return fmt.Errorf("failed to find SSH credentials secret prepared by ensureCredentials: %w", err)
@@ -2610,7 +2838,6 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 			restoreNamespace,
 			string(vmfr.UID),
 			constant.CredentialTypeFileBrowser,
-			false, // Not filtering for copied secrets only
 		)
 		if err != nil {
 			return fmt.Errorf("failed to find FileBrowser credentials secret prepared by ensureCredentials: %w", err)
@@ -2713,10 +2940,73 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 			"port", servicePorts[0].Port)
 	}
 
+	// Create OpenShift Routes if ExposeExternally is enabled
+	if err := r.createRoutesIfRequested(ctx, logger, vmfr, service.Name, restoreNamespace); err != nil {
+		// Log the error but don't fail the overall operation - Routes are optional
+		// and may not be supported on non-OpenShift clusters
+		logger.V(0).Info("Failed to create Routes (this is expected on non-OpenShift clusters)",
+			"error", err.Error())
+	}
+
 	logger.V(0).Info("File server resources created successfully",
 		"podName", pod.Name,
 		"serviceName", service.Name,
 		"namespace", restoreNamespace)
+
+	// Update FileServingInfo in status with access URLs and credentials
+	if err := r.updateFileServingInfo(ctx, logger, vmfr, service); err != nil {
+		logger.Error(err, "Failed to update file serving info in status")
+		// Don't fail the entire operation, just log the error
+	}
+
+	return nil
+}
+
+// createRoutesIfRequested creates OpenShift Routes for FileBrowser service if ExposeExternally is enabled.
+// Routes are optional and only created when explicitly requested via the ExposeExternally flag.
+// This function gracefully handles non-OpenShift clusters by returning an error without failing the overall operation.
+// Note: SSH routes are not created - SSH access is only available within the cluster (use port-forward for external access).
+func (r *VirtualMachineFileRestoreReconciler) createRoutesIfRequested(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	serviceName string,
+	namespace string,
+) error {
+	// Check if FileBrowser Route is requested
+	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.FileBrowser != nil && vmfr.Spec.FileAccess.FileBrowser.ExposeExternally {
+		logger.V(0).Info("Creating OpenShift Route for FileBrowser access")
+
+		routeConfig := RouteConfig{
+			RouteName:      serviceName + "-https",
+			RouteNamespace: namespace,
+			VMFRName:       vmfr.Name,
+			VMFRNamespace:  vmfr.Namespace,
+			VMFRUID:        string(vmfr.UID),
+			ServiceName:    serviceName,
+			TargetPort:     "https",
+			// FileBrowser uses reencrypt TLS termination (Route terminates external TLS, re-encrypts to backend)
+			TLSTermination:                routev1.TLSTerminationReencrypt,
+			InsecureEdgeTerminationPolicy: routev1.InsecureEdgeTerminationPolicyRedirect,
+		}
+
+		fileBrowserRoute, err := buildFileServerRoute(routeConfig)
+		if err != nil {
+			return fmt.Errorf("failed to build FileBrowser route: %w", err)
+		}
+
+		if err := r.Create(ctx, fileBrowserRoute); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				logger.V(1).Info("FileBrowser route already exists", "routeName", fileBrowserRoute.Name)
+			} else {
+				return fmt.Errorf("failed to create FileBrowser route: %w", err)
+			}
+		} else {
+			logger.V(0).Info("Created FileBrowser route",
+				"routeName", fileBrowserRoute.Name,
+				"namespace", fileBrowserRoute.Namespace)
+		}
+	}
 
 	return nil
 }
@@ -2867,22 +3157,17 @@ func (r *VirtualMachineFileRestoreReconciler) ensureSecretInRestoreNamespace(
 }
 
 // findSecretByLabels finds a secret in the specified namespace by VMFR UID and credential type labels.
-// If isCopied is true, also filters for VMFRManagedCopyLabel.
 // Returns the name of the first matching secret, or an error if none found.
 func (r *VirtualMachineFileRestoreReconciler) findSecretByLabels(
 	ctx context.Context,
 	namespace string,
 	vmfrUID string,
 	credentialType string,
-	isCopied bool,
 ) (string, error) {
 	// Build label selector
 	labels := map[string]string{
 		constant.VMFROriginUUIDLabel: vmfrUID,
 		constant.CredentialTypeLabel: credentialType,
-	}
-	if isCopied {
-		labels[constant.VMFRManagedCopyLabel] = constant.TrueString
 	}
 
 	// List secrets with matching labels
@@ -3095,16 +3380,16 @@ func (r *VirtualMachineFileRestoreReconciler) ensureCredentials(
 				},
 				Type: corev1.SecretTypeOpaque,
 				StringData: map[string]string{
-					"username":  username,
-					"publicKey": sshSpec.PublicKey,
+					"username":        username,
+					"authorized_keys": sshSpec.PublicKey,
 				},
 			}
 
 			if err := r.Create(ctx, secret); err != nil {
-				return fmt.Errorf("failed to create SSH secret from inline publicKey: %w", err)
+				return fmt.Errorf("failed to create SSH secret from inline public key: %w", err)
 			}
 
-			logger.V(0).Info("Created SSH secret from inline publicKey",
+			logger.V(0).Info("Created SSH secret from inline public key",
 				"secretName", secret.Name,
 				"namespace", restoreNamespace)
 

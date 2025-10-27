@@ -38,12 +38,12 @@ func (p VeleroRestorePredicate) Create(evt event.CreateEvent) bool {
 }
 
 // Update event filter only accepts Velero Restore update events from OADP namespace
-// and from Velero Restores that have required metadata
+// and from Velero Restores that have required metadata and VMFR label
 func (p VeleroRestorePredicate) Update(evt event.TypedUpdateEvent[client.Object]) bool {
 	logger := function.GetLogger(context.Background(), evt.ObjectNew, "VeleroRestorePredicate")
 
 	namespace := evt.ObjectNew.GetNamespace()
-	if namespace == p.OADPNamespace {
+	if namespace == p.OADPNamespace && function.HasVMFRLabel(evt.ObjectNew) {
 		// Only accept update events where the Restore Phase actually changed
 		oldRestore, okOld := evt.ObjectOld.(*veleroapi.Restore)
 		newRestore, okNew := evt.ObjectNew.(*veleroapi.Restore)
@@ -54,7 +54,7 @@ func (p VeleroRestorePredicate) Update(evt event.TypedUpdateEvent[client.Object]
 
 		// Only trigger reconciliation when phase changes to avoid unnecessary reconciliations
 		// during active restore (progress updates, item counts, etc.)
-		if function.CheckVeleroRestoreMetadata(evt.ObjectNew) && oldRestore.Status.Phase != newRestore.Status.Phase {
+		if oldRestore.Status.Phase != newRestore.Status.Phase {
 			logger.V(1).Info("Accepted Restore Update event due to Phase change",
 				"oldPhase", oldRestore.Status.Phase,
 				"newPhase", newRestore.Status.Phase)
@@ -71,11 +71,9 @@ func (p VeleroRestorePredicate) Delete(evt event.DeleteEvent) bool {
 	logger := function.GetLogger(context.Background(), evt.Object, "VeleroRestorePredicate")
 
 	namespace := evt.Object.GetNamespace()
-	if namespace == p.OADPNamespace {
-		if function.CheckVeleroRestoreMetadata(evt.Object) {
-			logger.V(1).Info("Accepted Restore Delete event")
-			return true
-		}
+	if namespace == p.OADPNamespace && function.HasVMFRLabel(evt.Object) {
+		logger.V(1).Info("Accepted Restore Delete event")
+		return true
 	}
 
 	logger.V(1).Info("Rejected Restore Delete event")

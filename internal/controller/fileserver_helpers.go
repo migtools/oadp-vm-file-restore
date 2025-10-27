@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	routev1 "github.com/openshift/api/route/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -183,6 +184,42 @@ type ServiceConfig struct {
 	ServiceAnnotations map[string]string
 }
 
+// RouteConfig contains configuration for building an OpenShift Route
+type RouteConfig struct {
+	// RouteName is the name of the route
+	RouteName string
+
+	// RouteNamespace is the namespace where the route will be created
+	RouteNamespace string
+
+	// VMFRName is the name of the VirtualMachineFileRestore (for labels)
+	VMFRName string
+
+	// VMFRNamespace is the namespace of the VirtualMachineFileRestore
+	VMFRNamespace string
+
+	// VMFRUID is the UID of the VirtualMachineFileRestore (for labels)
+	VMFRUID string
+
+	// ServiceName is the name of the target service
+	ServiceName string
+
+	// TargetPort is the service port to route to (e.g., "ssh", "https")
+	TargetPort string
+
+	// TLSTermination specifies the TLS termination type (passthrough, reencrypt, edge)
+	TLSTermination routev1.TLSTerminationType
+
+	// InsecureEdgeTerminationPolicy specifies how to handle HTTP traffic
+	InsecureEdgeTerminationPolicy routev1.InsecureEdgeTerminationPolicyType
+
+	// RouteLabels are additional labels to add to the route
+	RouteLabels map[string]string
+
+	// RouteAnnotations are additional annotations to add to the route
+	RouteAnnotations map[string]string
+}
+
 // buildFileServerPodSpec builds a Pod spec for serving files from restored PVCs.
 //
 // The pod structure:
@@ -283,32 +320,24 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 
 	// Add SSH sidecar if enabled
 	if config.SSHAccess != nil {
-		sshContainer, sshVolumes, sshInitContainers := buildSSHSidecar(
+		sshContainer, sshVolumes := buildSSHSidecar(
 			config.SSHAccess,
 			config.UseInternalMounts,
-			sharedMountVolumeName,
-			config.SharedMountPath,
 			pvcVolumeMounts,
-			config.EnableDualPathAccess,
 		)
 		sidecarContainers = append(sidecarContainers, sshContainer)
 		allVolumes = append(allVolumes, sshVolumes...)
-		allInitContainers = append(allInitContainers, sshInitContainers...)
 	}
 
 	// Add FileBrowser sidecar if enabled
 	if config.FileBrowserAccess != nil {
-		fileBrowserContainer, fileBrowserVolumes, fileBrowserInitContainers := buildFileBrowserSidecar(
+		fileBrowserContainer, fileBrowserVolumes := buildFileBrowserSidecar(
 			config.FileBrowserAccess,
 			config.UseInternalMounts,
-			sharedMountVolumeName,
-			config.SharedMountPath,
 			pvcVolumeMounts,
-			config.EnableDualPathAccess,
 		)
 		sidecarContainers = append(sidecarContainers, fileBrowserContainer)
 		allVolumes = append(allVolumes, fileBrowserVolumes...)
-		allInitContainers = append(allInitContainers, fileBrowserInitContainers...)
 	}
 
 	// Build or use default main container
@@ -779,6 +808,82 @@ func buildFileServerService(config ServiceConfig) (*corev1.Service, error) {
 	return service, nil
 }
 
+// buildFileServerRoute builds an OpenShift Route for exposing file server services externally
+// Routes enable external access to SSH or FileBrowser services running in the cluster
+func buildFileServerRoute(config RouteConfig) (*routev1.Route, error) {
+	// Validate required parameters
+	if config.RouteName == "" {
+		return nil, fmt.Errorf("route name is required")
+	}
+	if config.RouteNamespace == "" {
+		return nil, fmt.Errorf("route namespace is required")
+	}
+	if config.VMFRName == "" {
+		return nil, fmt.Errorf("VMFR name is required for labels")
+	}
+	if config.ServiceName == "" {
+		return nil, fmt.Errorf("service name is required")
+	}
+	if config.TargetPort == "" {
+		return nil, fmt.Errorf("target port is required")
+	}
+
+	// Build default labels
+	defaultLabels := map[string]string{
+		constant.VMFROriginUUIDLabel: config.VMFRUID,
+		constant.ManagedByLabel:      constant.ManagedByLabelValue,
+		"app":                        "vmfr-file-server",
+	}
+
+	// Merge with additional labels
+	for k, v := range config.RouteLabels {
+		defaultLabels[k] = v
+	}
+
+	// Build annotations
+	annotations := map[string]string{
+		constant.VMFROriginNameAnnotation:      config.VMFRName,
+		constant.VMFROriginNamespaceAnnotation: config.VMFRNamespace,
+	}
+	// Merge with additional annotations
+	for k, v := range config.RouteAnnotations {
+		annotations[k] = v
+	}
+
+	route := &routev1.Route{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        config.RouteName,
+			Namespace:   config.RouteNamespace,
+			Labels:      defaultLabels,
+			Annotations: annotations,
+		},
+		Spec: routev1.RouteSpec{
+			To: routev1.RouteTargetReference{
+				Kind: "Service",
+				Name: config.ServiceName,
+			},
+			Port: &routev1.RoutePort{
+				TargetPort: intstr.FromString(config.TargetPort),
+			},
+			TLS: &routev1.TLSConfig{
+				Termination:                   config.TLSTermination,
+				InsecureEdgeTerminationPolicy: config.InsecureEdgeTerminationPolicy,
+			},
+			WildcardPolicy: routev1.WildcardPolicyNone,
+		},
+	}
+
+	// IMPORTANT: Do NOT add cross-namespace owner references!
+	// Routes are created in the same namespace as the Service (the restore namespace),
+	// which may be different from the VMFR namespace. Cross-namespace owner references
+	// are rejected by the Kubernetes garbage collector.
+	//
+	// Instead, we use labels (already added above) to track ownership,
+	// and the controller's finalizer logic will clean up the Route on VMFR deletion.
+
+	return route, nil
+}
+
 // extractPVCMountsFromVMFR extracts PVC mount information from VMFR status
 // Returns only successfully completed restores (one per PVC, choosing most recent)
 func extractPVCMountsFromVMFR(vmfr *oadpv1alpha1.VirtualMachineFileRestore) []PVCMountInfo {
@@ -863,16 +968,11 @@ func buildDefaultHTTPServicePort() corev1.ServicePort {
 // - Read-only root filesystem with emptyDir volumes for runtime directories
 // - Supports public key authentication only
 // - Chroot environment restricts access to /oadp directory
-//
-//nolint:unparam // Some parameters used in future mount modes
 func buildSSHSidecar(
 	config *SSHAccessConfig,
 	useInternalMounts bool,
-	sharedMountVolumeName string,
-	sharedMountPath string,
 	pvcVolumeMounts []corev1.VolumeMount,
-	enableDualPath bool,
-) (corev1.Container, []corev1.Volume, []corev1.Container) {
+) (corev1.Container, []corev1.Volume) {
 
 	// SSH server container using custom OADP SSH image
 	// This image provides a secure, chroot-based SSH server with read-only access
@@ -990,7 +1090,7 @@ func buildSSHSidecar(
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  config.CredentialsSecretName,
-				DefaultMode: ptr.To(int32(0400)),
+				DefaultMode: ptr.To(int32(0444)), // Readable by all (needed for oadp user to read authorized_keys)
 			},
 		},
 	}
@@ -1048,9 +1148,7 @@ func buildSSHSidecar(
 	}
 
 	// No init containers needed - the custom image handles all setup
-	var initContainers []corev1.Container
-
-	return container, volumes, initContainers
+	return container, volumes
 }
 
 // buildFileBrowserSidecar creates a FileBrowser sidecar container with associated volumes and init containers.
@@ -1065,16 +1163,11 @@ func buildSSHSidecar(
 // - Configured with authentication from Secret credentials
 // - Read-only file browser with download capabilities
 // - Custom branding for OADP VM File Restore
-//
-//nolint:unparam // Some parameters used in future mount modes
 func buildFileBrowserSidecar(
 	config *FileBrowserAccessConfig,
 	useInternalMounts bool,
-	sharedMountVolumeName string,
-	sharedMountPath string,
 	pvcVolumeMounts []corev1.VolumeMount,
-	enableDualPath bool,
-) (corev1.Container, []corev1.Volume, []corev1.Container) {
+) (corev1.Container, []corev1.Volume) {
 
 	// FileBrowser always serves from /restores/
 	// For Filesystem mode PVCs: /restores/<date>/<backup>/<pvc>/ (Kubernetes mounts)
@@ -1181,7 +1274,7 @@ func buildFileBrowserSidecar(
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  config.CredentialsSecretName,
-				DefaultMode: ptr.To(int32(0400)),
+				DefaultMode: ptr.To(int32(0444)), // Readable by all (needed for file browser container user)
 			},
 		},
 	}
@@ -1239,7 +1332,5 @@ func buildFileBrowserSidecar(
 	}
 
 	// No init containers needed - the custom image handles all setup
-	var initContainers []corev1.Container
-
-	return container, volumes, initContainers
+	return container, volumes
 }
