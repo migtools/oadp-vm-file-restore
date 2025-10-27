@@ -4554,3 +4554,429 @@ func TestCreateVeleroRestores(t *testing.T) {
 		})
 	}
 }
+func TestEnsureCredentials(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	// Valid SSH public key for testing
+	validSSHPublicKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com"
+
+	tests := []struct {
+		name            string
+		vmfr            *oadpv1alpha1.VirtualMachineFileRestore
+		existingObjs    []client.Object
+		expectError     bool
+		errorContains   string
+		validateResults func(t *testing.T, c client.Client, vmfr *oadpv1alpha1.VirtualMachineFileRestore)
+	}{
+		{
+			name: "error when restore namespace is empty",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-123"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "", // Empty restore namespace
+				},
+			},
+			expectError:   true,
+			errorContains: "restore namespace not found in status",
+		},
+		{
+			name: "error when no file access methods configured",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-123"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: nil, // No file access configured
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			expectError:   true,
+			errorContains: "at least one of SSH or FileBrowser must be specified",
+		},
+		{
+			name: "SSH with generated credentials when no CredentialsSecretRef",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-123"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							// No CredentialsSecretRef, no PublicKey - should generate
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingObjs: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "restore-ns"},
+				},
+			},
+			expectError: false,
+			validateResults: func(t *testing.T, c client.Client, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// List SSH secrets in restore namespace
+				secretList := &corev1.SecretList{}
+				listOpts := []client.ListOption{
+					client.InNamespace("restore-ns"),
+					client.MatchingLabels{
+						constant.VMFROriginUUIDLabel: string(vmfr.UID),
+						constant.CredentialTypeLabel: constant.CredentialTypeSSH,
+					},
+				}
+				if err := c.List(ctx, secretList, listOpts...); err != nil {
+					t.Errorf("Failed to list secrets: %v", err)
+					return
+				}
+				if len(secretList.Items) != 1 {
+					t.Errorf("Expected 1 generated SSH secret, found %d", len(secretList.Items))
+					return
+				}
+				generatedSecret := &secretList.Items[0]
+
+				// Verify it has all required fields
+				// Note: fake client stores StringData as-is, doesn't convert to Data like real API
+				hasAuthorizedKeys := len(generatedSecret.Data["authorized_keys"]) > 0 || generatedSecret.StringData["authorized_keys"] != ""
+				hasPrivateKey := len(generatedSecret.Data["privateKey"]) > 0 || generatedSecret.StringData["privateKey"] != ""
+				hasUsername := len(generatedSecret.Data["username"]) > 0 || generatedSecret.StringData["username"] != ""
+
+				if !hasAuthorizedKeys {
+					t.Error("Generated secret missing authorized_keys")
+				}
+				if !hasPrivateKey {
+					t.Error("Generated secret missing privateKey")
+				}
+				if !hasUsername {
+					t.Error("Generated secret missing username")
+				}
+			},
+		},
+		{
+			name: "FileBrowser with generated credentials",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-456"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						FileBrowser: &oadpv1alpha1.FileBrowserAccessSpec{
+							// No CredentialsSecretRef - should generate
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingObjs: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "restore-ns"},
+				},
+			},
+			expectError: false,
+			validateResults: func(t *testing.T, c client.Client, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				secretList := &corev1.SecretList{}
+				listOpts := []client.ListOption{
+					client.InNamespace("restore-ns"),
+					client.MatchingLabels{
+						constant.VMFROriginUUIDLabel: string(vmfr.UID),
+						constant.CredentialTypeLabel: constant.CredentialTypeFileBrowser,
+					},
+				}
+				if err := c.List(ctx, secretList, listOpts...); err != nil {
+					t.Errorf("Failed to list secrets: %v", err)
+					return
+				}
+				if len(secretList.Items) != 1 {
+					t.Errorf("Expected 1 generated FileBrowser secret, found %d", len(secretList.Items))
+					return
+				}
+				generatedSecret := &secretList.Items[0]
+
+				// Verify it has required fields
+				hasPassword := len(generatedSecret.Data["password"]) > 0 || generatedSecret.StringData["password"] != ""
+				hasUsername := len(generatedSecret.Data["username"]) > 0 || generatedSecret.StringData["username"] != ""
+
+				if !hasPassword {
+					t.Error("Generated secret missing password")
+				}
+				if !hasUsername {
+					t.Error("Generated secret missing username")
+				}
+			},
+		},
+		{
+			name: "SSH with inline publicKey",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-789"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							Username:  "testuser",
+							PublicKey: validSSHPublicKey,
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingObjs: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "restore-ns"},
+				},
+			},
+			expectError: false,
+			validateResults: func(t *testing.T, c client.Client, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				secretList := &corev1.SecretList{}
+				listOpts := []client.ListOption{
+					client.InNamespace("restore-ns"),
+					client.MatchingLabels{
+						constant.VMFROriginUUIDLabel: string(vmfr.UID),
+						constant.CredentialTypeLabel: constant.CredentialTypeSSH,
+					},
+				}
+				if err := c.List(ctx, secretList, listOpts...); err != nil {
+					t.Errorf("Failed to list secrets: %v", err)
+					return
+				}
+				if len(secretList.Items) != 1 {
+					t.Errorf("Expected 1 SSH secret, found %d", len(secretList.Items))
+					return
+				}
+				inlineSecret := &secretList.Items[0]
+
+				// Check both Data and StringData for authorized_keys
+				authorizedKeys := string(inlineSecret.Data["authorized_keys"])
+				if authorizedKeys == "" {
+					authorizedKeys = inlineSecret.StringData["authorized_keys"]
+				}
+				if authorizedKeys != validSSHPublicKey {
+					t.Errorf("Inline secret has incorrect authorized_keys: got %q, want %q", authorizedKeys, validSSHPublicKey)
+				}
+			},
+		},
+		{
+			name: "SSH with invalid inline publicKey",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-bad"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							PublicKey: "invalid-ssh-key-format",
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingObjs: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "restore-ns"},
+				},
+			},
+			expectError:   true,
+			errorContains: "inline SSH publicKey validation failed",
+		},
+		{
+			name: "SSH with CredentialsSecretRef in same namespace",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-ref1"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							CredentialsSecretRef: &oadpv1alpha1.SecretReference{
+								Name:      "ssh-secret",
+								Namespace: "restore-ns",
+							},
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingObjs: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "restore-ns"},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ssh-secret",
+						Namespace: "restore-ns",
+					},
+					Data: map[string][]byte{
+						"authorized_keys": []byte(validSSHPublicKey),
+						"username":        []byte("testuser"),
+					},
+				},
+			},
+			expectError: false,
+			validateResults: func(t *testing.T, c client.Client, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// Secret should exist and be used directly (not copied)
+				secret := &corev1.Secret{}
+				err := c.Get(ctx, types.NamespacedName{Name: "ssh-secret", Namespace: "restore-ns"}, secret)
+				if err != nil {
+					t.Errorf("Expected secret ssh-secret to exist in restore-ns: %v", err)
+				}
+			},
+		},
+		{
+			name: "SSH with CredentialsSecretRef in different namespace",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-ref2"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							CredentialsSecretRef: &oadpv1alpha1.SecretReference{
+								Name:      "ssh-secret",
+								Namespace: "source-ns",
+							},
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingObjs: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "restore-ns"},
+				},
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "source-ns"},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ssh-secret",
+						Namespace: "source-ns",
+					},
+					Data: map[string][]byte{
+						"authorized_keys": []byte(validSSHPublicKey),
+						"username":        []byte("testuser"),
+					},
+				},
+			},
+			expectError: false,
+			validateResults: func(t *testing.T, c client.Client, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// Secret should be copied to restore-ns
+				secretList := &corev1.SecretList{}
+				listOpts := []client.ListOption{
+					client.InNamespace("restore-ns"),
+					client.MatchingLabels{
+						constant.VMFROriginUUIDLabel: string(vmfr.UID),
+						constant.CredentialTypeLabel: constant.CredentialTypeSSH,
+					},
+				}
+				if err := c.List(ctx, secretList, listOpts...); err != nil {
+					t.Errorf("Failed to list secrets: %v", err)
+					return
+				}
+				if len(secretList.Items) != 1 {
+					t.Errorf("Expected 1 copied SSH secret in restore-ns, found %d", len(secretList.Items))
+				}
+			},
+		},
+		{
+			name: "SSH with missing CredentialsSecretRef",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       types.UID("test-uid-missing"),
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						SSH: &oadpv1alpha1.SSHAccessSpec{
+							CredentialsSecretRef: &oadpv1alpha1.SecretReference{
+								Name:      "missing-secret",
+								Namespace: "restore-ns",
+							},
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "restore-ns",
+				},
+			},
+			existingObjs: []client.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: "restore-ns"},
+				},
+			},
+			expectError:   true,
+			errorContains: "not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.existingObjs...).Build()
+			r := &VirtualMachineFileRestoreReconciler{
+				Client:        c,
+				Scheme:        scheme,
+				OADPNamespace: "openshift-adp",
+			}
+			logger := zap.New(zap.UseDevMode(true))
+
+			err := r.ensureCredentials(ctx, logger, tt.vmfr)
+
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error but got none")
+					return
+				}
+				if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("Expected error to contain %q, got %q", tt.errorContains, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+					return
+				}
+				if tt.validateResults != nil {
+					tt.validateResults(t, c, tt.vmfr)
+				}
+			}
+		})
+	}
+}
