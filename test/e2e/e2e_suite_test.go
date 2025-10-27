@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,11 +36,24 @@ import (
 var (
 	// Optional Environment Variables:
 	// - CERT_MANAGER_INSTALL_SKIP=true: Skips CertManager installation during test setup.
-	// These variables are useful if CertManager is already installed, avoiding
+	// - KUBEVIRT_INSTALL_SKIP=true: Skips KubeVirt installation during test setup.
+	// - CDI_INSTALL_SKIP=true: Skips CDI installation during test setup.
+	// - MINIO_INSTALL_SKIP=true: Skips MinIO installation during test setup.
+	// - VELERO_INSTALL_SKIP=true: Skips Velero installation during test setup.
+	// These variables are useful if components are already installed, avoiding
 	// re-installation and conflicts.
 	skipCertManagerInstall = os.Getenv("CERT_MANAGER_INSTALL_SKIP") == "true"
-	// isCertManagerAlreadyInstalled will be set true when CertManager CRDs be found on the cluster
+	skipKubeVirtInstall    = os.Getenv("KUBEVIRT_INSTALL_SKIP") == "true"
+	skipCDIInstall         = os.Getenv("CDI_INSTALL_SKIP") == "true"
+	skipMinIOInstall       = os.Getenv("MINIO_INSTALL_SKIP") == "true"
+	skipVeleroInstall      = os.Getenv("VELERO_INSTALL_SKIP") == "true"
+
+	// Track what was installed by the test suite (vs already present)
 	isCertManagerAlreadyInstalled = false
+	isKubeVirtAlreadyInstalled    = false
+	isCDIAlreadyInstalled          = false
+	isMinIOAlreadyInstalled        = false
+	isVeleroAlreadyInstalled       = false
 
 	// projectImage is the name of the image which will be build and loaded
 	// with the code source changes to be tested.
@@ -56,6 +71,10 @@ func TestE2E(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
+	// Check system limits before running tests
+	By("checking system inotify limits")
+	checkInotifyLimits()
+
 	By("building the manager(Operator) image")
 	cmd := exec.Command("make", "docker-build", fmt.Sprintf("IMG=%s", projectImage))
 	_, err := utils.Run(cmd)
@@ -66,9 +85,10 @@ var _ = BeforeSuite(func() {
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager(Operator) image into Kind")
 
 	// The tests-e2e are intended to run on a temporary cluster that is created and destroyed for testing.
-	// To prevent errors when tests run in environments with CertManager already installed,
-	// we check for its presence before execution.
-	// Setup CertManager before the suite if not skipped and if not already installed
+	// To prevent errors when tests run in environments with components already installed,
+	// we check for their presence before execution.
+
+	// Setup CertManager
 	if !skipCertManagerInstall {
 		By("checking if cert manager is installed already")
 		isCertManagerAlreadyInstalled = utils.IsCertManagerCRDsInstalled()
@@ -79,12 +99,125 @@ var _ = BeforeSuite(func() {
 			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: CertManager is already installed. Skipping installation...\n")
 		}
 	}
+
+	// Setup KubeVirt
+	if !skipKubeVirtInstall {
+		By("checking if KubeVirt is installed already")
+		isKubeVirtAlreadyInstalled = utils.IsKubeVirtInstalled()
+		if !isKubeVirtAlreadyInstalled {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Installing KubeVirt...\n")
+			Expect(utils.InstallKubeVirt()).To(Succeed(), "Failed to install KubeVirt")
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: KubeVirt is already installed. Skipping installation...\n")
+		}
+	}
+
+	// Setup CDI (Containerized Data Importer)
+	if !skipCDIInstall {
+		By("checking if CDI is installed already")
+		isCDIAlreadyInstalled = utils.IsCDIInstalled()
+		if !isCDIAlreadyInstalled {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Installing CDI...\n")
+			Expect(utils.InstallCDI()).To(Succeed(), "Failed to install CDI")
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: CDI is already installed. Skipping installation...\n")
+		}
+	}
+
+	// Setup MinIO (backup storage for Velero)
+	if !skipMinIOInstall {
+		By("checking if MinIO is installed already")
+		cmd := exec.Command("kubectl", "get", "namespace", "minio")
+		_, err = utils.Run(cmd)
+		isMinIOAlreadyInstalled = (err == nil)
+		if !isMinIOAlreadyInstalled {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Installing MinIO...\n")
+			Expect(utils.InstallMinIO()).To(Succeed(), "Failed to install MinIO")
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: MinIO is already installed. Skipping installation...\n")
+		}
+	}
+
+	// Setup Velero (with kubevirt and openshift plugins)
+	if !skipVeleroInstall {
+		By("checking if Velero is installed already")
+		isVeleroAlreadyInstalled = utils.IsVeleroInstalled()
+		if !isVeleroAlreadyInstalled {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Installing Velero with plugins...\n")
+			Expect(utils.InstallVelero()).To(Succeed(), "Failed to install Velero")
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: Velero is already installed. Skipping installation...\n")
+		}
+	}
 })
 
 var _ = AfterSuite(func() {
-	// Teardown CertManager after the suite if not skipped and if it was not already installed
+	// Teardown components in reverse order if they were installed by this test suite
+
+	if !skipVeleroInstall && !isVeleroAlreadyInstalled {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling Velero...\n")
+		utils.UninstallVelero()
+	}
+
+	if !skipMinIOInstall && !isMinIOAlreadyInstalled {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling MinIO...\n")
+		utils.UninstallMinIO()
+	}
+
+	if !skipCDIInstall && !isCDIAlreadyInstalled {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling CDI...\n")
+		utils.UninstallCDI()
+	}
+
+	if !skipKubeVirtInstall && !isKubeVirtAlreadyInstalled {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling KubeVirt...\n")
+		utils.UninstallKubeVirt()
+	}
+
 	if !skipCertManagerInstall && !isCertManagerAlreadyInstalled {
 		_, _ = fmt.Fprintf(GinkgoWriter, "Uninstalling CertManager...\n")
 		utils.UninstallCertManager()
 	}
 })
+
+// checkInotifyLimits warns if system inotify limits are too low for running tests
+func checkInotifyLimits() {
+	const (
+		minInstances = 1024
+		minWatches   = 524288
+	)
+
+	// Read max_user_instances
+	cmd := exec.Command("sysctl", "-n", "fs.inotify.max_user_instances")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		instances, err := strconv.Atoi(strings.TrimSpace(string(output)))
+		if err == nil && instances < minInstances {
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "========================================================================\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: System inotify limits are too low!\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "Current: fs.inotify.max_user_instances = %d\n", instances)
+			_, _ = fmt.Fprintf(GinkgoWriter, "Recommended: %d or higher\n", minInstances)
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "This will likely cause 'too many files open' errors and test timeouts.\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "To fix, run:\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "  sudo sysctl fs.inotify.max_user_instances=%d\n", minInstances)
+			_, _ = fmt.Fprintf(GinkgoWriter, "  sudo sysctl fs.inotify.max_user_watches=%d\n", minWatches)
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "See test/e2e/KIND_LIMITATIONS.md for more details.\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "========================================================================\n")
+			_, _ = fmt.Fprintf(GinkgoWriter, "\n")
+		}
+	}
+
+	// Read max_user_watches
+	cmd = exec.Command("sysctl", "-n", "fs.inotify.max_user_watches")
+	output, err = cmd.CombinedOutput()
+	if err == nil {
+		watches, err := strconv.Atoi(strings.TrimSpace(string(output)))
+		if err == nil && watches < minWatches {
+			_, _ = fmt.Fprintf(GinkgoWriter, "WARNING: fs.inotify.max_user_watches = %d (recommended: %d)\n", watches, minWatches)
+		}
+	}
+}

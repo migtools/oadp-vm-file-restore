@@ -2115,8 +2115,9 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		logger.V(0).Info("Created ServiceAccount for file server", "serviceAccount", serviceAccountName, "namespace", namespaceName)
 	}
 
-	// Bind ServiceAccount to privileged SCC via RoleBinding
+	// Bind ServiceAccount to privileged SCC via RoleBinding (OpenShift-specific)
 	// This grants the file server pod permission to use privileged mode, hostPath volumes, and spc_t SELinux type
+	// On non-OpenShift clusters (like vanilla Kubernetes), this ClusterRole won't exist and will be skipped
 	sccRoleBinding := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "vmfr-file-server-privileged",
@@ -2144,6 +2145,10 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			logger.V(1).Info("SCC RoleBinding already exists", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
+		} else if apierrors.IsNotFound(err) {
+			// NotFound means the system:openshift:scc:privileged ClusterRole doesn't exist
+			// This is expected on non-OpenShift clusters (vanilla Kubernetes, Kind, etc.)
+			logger.V(0).Info("Skipping SCC RoleBinding creation - not running on OpenShift", "namespace", namespaceName)
 		} else {
 			return "", fmt.Errorf("failed to create SCC RoleBinding in namespace '%s': %w", namespaceName, err)
 		}
