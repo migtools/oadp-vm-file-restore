@@ -7370,7 +7370,8 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 									VeleroBackupName:      "backup-1",
 									VeleroBackupNamespace: testOADPNamespace,
 									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseInProgress,
+									Phase:                 velerov1api.RestorePhaseCompleted,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
 								},
 							},
 						},
@@ -7391,6 +7392,9 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 						Labels: map[string]string{
 							constant.VMFROriginUUIDLabel: "test-uid",
 						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
 					},
 					Status: velerov1api.RestoreStatus{
 						Phase: velerov1api.RestorePhaseCompleted,
@@ -7401,6 +7405,12 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 						Name:      "pvc-1",
 						Namespace: "restore-ns",
 						UID:       "pvc-uid-1",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
 					},
 				},
 			},
@@ -7446,7 +7456,8 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 									VeleroBackupName:      "backup-1",
 									VeleroBackupNamespace: testOADPNamespace,
 									VeleroRestoreName:     "restore-1",
-									Phase:                 velerov1api.RestorePhaseInProgress,
+									Phase:                 velerov1api.RestorePhaseFailed,
+									State:                 string(oadptypes.BackupDiscoveryStateAvailable),
 								},
 							},
 						},
@@ -7467,9 +7478,25 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 						Labels: map[string]string{
 							constant.VMFROriginUUIDLabel: "test-uid",
 						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
 					},
 					Status: velerov1api.RestoreStatus{
 						Phase: velerov1api.RestorePhaseFailed,
+					},
+				},
+				&corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "pvc-1",
+						Namespace: "restore-ns",
+						UID:       "pvc-uid-1",
+						Labels: map[string]string{
+							"velero.io/restore-name": "restore-1",
+						},
+						Annotations: map[string]string{
+							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
+						},
 					},
 				},
 			},
@@ -7479,7 +7506,7 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 				},
 			},
 			expectedRequeue: false,
-			expectError:     true,
+			expectError:     false,
 		},
 		{
 			name: "waiting for restores - partial completion",
