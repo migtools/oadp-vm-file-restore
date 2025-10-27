@@ -2703,10 +2703,10 @@ func (r *VirtualMachineFileRestoreReconciler) findRestoredPVCName(
 		return "", fmt.Errorf("failed to list PVCs for restore %s: %w", veleroRestoreName, err)
 	}
 
-	// Filter by annotation to find the PVC with the matching original name
+	// Filter by label to find the PVC with the matching original name
 	for i := range pvcList.Items {
-		if pvcList.Items[i].Annotations != nil {
-			if origName := pvcList.Items[i].Annotations[constant.VMFROriginalPVCNameAnnotation]; origName == originalPVCName {
+		if pvcList.Items[i].Labels != nil {
+			if origName := pvcList.Items[i].Labels[constant.VMFROriginalPVCNameAnnotation]; origName == originalPVCName {
 				return pvcList.Items[i].Name, nil
 			}
 		}
