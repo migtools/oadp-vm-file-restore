@@ -6169,13 +6169,13 @@ func TestMapVeleroRestoreToVMFR(t *testing.T) {
 					},
 					Annotations: map[string]string{
 						constant.VMFROriginNameAnnotation:      "my-vmfr",
-						constant.VMFROriginNamespaceAnnotation: "default",
+						constant.VMFROriginNamespaceAnnotation: testOADPNamespace,
 					},
 				},
 			},
 			expectedRequest: true,
 			expectedName:    "my-vmfr",
-			expectedNS:      "default",
+			expectedNS:      testOADPNamespace,
 		},
 		{
 			name: "restore without VMFR label",
@@ -6237,7 +6237,9 @@ func TestMapVeleroRestoreToVMFR(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &VirtualMachineFileRestoreReconciler{}
+			r := &VirtualMachineFileRestoreReconciler{
+				OADPNamespace: testOADPNamespace,
+			}
 
 			requests := r.mapVeleroRestoreToVMFR(context.TODO(), tt.restore)
 
@@ -6280,13 +6282,13 @@ func TestMapServiceToVMFR(t *testing.T) {
 					},
 					Annotations: map[string]string{
 						constant.VMFROriginNameAnnotation:      "my-vmfr",
-						constant.VMFROriginNamespaceAnnotation: "default",
+						constant.VMFROriginNamespaceAnnotation: testOADPNamespace,
 					},
 				},
 			},
 			expectedRequest: true,
 			expectedName:    "my-vmfr",
-			expectedNS:      "default",
+			expectedNS:      testOADPNamespace,
 		},
 		{
 			name: "service without VMFR label",
@@ -6332,7 +6334,9 @@ func TestMapServiceToVMFR(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &VirtualMachineFileRestoreReconciler{}
+			r := &VirtualMachineFileRestoreReconciler{
+				OADPNamespace: testOADPNamespace,
+			}
 
 			requests := r.mapServiceToVMFR(context.TODO(), tt.service)
 
@@ -6375,13 +6379,13 @@ func TestMapRouteToVMFR(t *testing.T) {
 					},
 					Annotations: map[string]string{
 						constant.VMFROriginNameAnnotation:      "my-vmfr",
-						constant.VMFROriginNamespaceAnnotation: "default",
+						constant.VMFROriginNamespaceAnnotation: testOADPNamespace,
 					},
 				},
 			},
 			expectedRequest: true,
 			expectedName:    "my-vmfr",
-			expectedNS:      "default",
+			expectedNS:      testOADPNamespace,
 		},
 		{
 			name: "route without VMFR label",
@@ -6417,7 +6421,9 @@ func TestMapRouteToVMFR(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := &VirtualMachineFileRestoreReconciler{}
+			r := &VirtualMachineFileRestoreReconciler{
+				OADPNamespace: testOADPNamespace,
+			}
 
 			requests := r.mapRouteToVMFR(context.TODO(), tt.route)
 

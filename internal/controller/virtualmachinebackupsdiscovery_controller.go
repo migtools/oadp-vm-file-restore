@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,6 +40,7 @@ import (
 	"github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
 	"github.com/migtools/oadp-vm-file-restore/internal/common/function"
+	"github.com/migtools/oadp-vm-file-restore/internal/predicate"
 	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 )
 
@@ -937,7 +939,8 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) updateStatusWithRetry(ctx con
 // SetupWithManager sets up the controller with the Manager.
 func (r *VirtualMachineBackupsDiscoveryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&oadpv1alpha1.VirtualMachineBackupsDiscovery{}).
+		For(&oadpv1alpha1.VirtualMachineBackupsDiscovery{},
+			builder.WithPredicates(predicate.NamespacePredicate{Namespace: r.OADPNamespace})).
 		Watches(&velerov1api.Backup{}, handler.EnqueueRequestsFromMapFunc(r.mapBackupToVMBD)).
 		Named("virtualmachinebackupsdiscovery").
 		Complete(r)
