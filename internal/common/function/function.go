@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
+	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -513,4 +514,16 @@ func ValidateFileBrowserSecret(secret *corev1.Secret, logger logr.Logger) error 
 		"hasUsername", secret.Data["username"] != nil)
 
 	return nil
+}
+
+// GetBackupTimestamp returns the authoritative timestamp for when a Velero backup was taken.
+// It prefers CompletionTimestamp (when the backup actually finished) over CreationTimestamp
+// (when the backup object was created/imported).
+// This is critical for synced backups where CreationTimestamp reflects import time, not backup time.
+func GetBackupTimestamp(backup *veleroapi.Backup) *metav1.Time {
+	if backup.Status.CompletionTimestamp != nil {
+		return backup.Status.CompletionTimestamp
+	}
+	// Fallback to CreationTimestamp if CompletionTimestamp is not available
+	return &backup.CreationTimestamp
 }

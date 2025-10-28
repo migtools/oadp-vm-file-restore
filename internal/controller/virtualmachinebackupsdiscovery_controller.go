@@ -38,6 +38,7 @@ import (
 	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
 	"github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
+	"github.com/migtools/oadp-vm-file-restore/internal/common/function"
 	"github.com/migtools/oadp-vm-file-restore/internal/velerohelpers"
 )
 
@@ -340,7 +341,7 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 			VeleroBackupInfo: types.VeleroBackupInfo{
 				Name:      backup.Name,
 				Namespace: r.OADPNamespace,
-				CreatedAt: &backup.CreationTimestamp,
+				CreatedAt: function.GetBackupTimestamp(&backup),
 			},
 			Status:      types.BackupDiscoveryStatusNew,
 			LastUpdated: &metav1.Time{Time: time.Now()},

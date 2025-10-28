@@ -29,7 +29,9 @@ type VeleroBackupInfo struct {
 	// Namespace is the namespace of the backup resource
 	Namespace string `json:"namespace"`
 
-	// When the backup was created.
+	// When the backup was taken (from backup.status.completionTimestamp).
+	// For synced backups, this reflects when the backup actually completed, not when it was imported.
+	// +optional
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
 
 	// PVCs contains the list of PVCs available in this backup

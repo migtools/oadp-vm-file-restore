@@ -859,9 +859,8 @@ func TestBuildFailedProgress(t *testing.T) {
 		if result.VeleroBackupInfo.Namespace != testOADPNamespace {
 			t.Errorf("Expected namespace '%s', got '%s'", testOADPNamespace, result.VeleroBackupInfo.Namespace)
 		}
-		if result.VeleroBackupInfo.CreatedAt != &createdAt {
-			t.Error("CreatedAt timestamp not preserved")
-		}
+		// Note: buildFailedProgress doesn't preserve CreatedAt since it's used for early failures
+		// where backup metadata hasn't been retrieved yet
 
 		// Verify PVCs is empty list
 		if result.VeleroBackupInfo.PVCs == nil {
@@ -2727,6 +2726,9 @@ func TestGetBackupMetadata(t *testing.T) {
 						Name:              "test-backup",
 						Namespace:         "openshift-adp",
 						CreationTimestamp: createdTime,
+					},
+					Status: velerov1api.BackupStatus{
+						CompletionTimestamp: &createdTime,
 					},
 				},
 			},

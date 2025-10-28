@@ -1370,7 +1370,9 @@ func (r *VirtualMachineFileRestoreReconciler) getBackupMetadata(
 		VeleroBackupInfo: oadptypes.VeleroBackupInfo{
 			Name:      backupInfo.Name,
 			Namespace: backupInfo.Namespace,
-			CreatedAt: &veleroBackup.CreationTimestamp,
+			// Use completionTimestamp (when backup actually finished) instead of creationTimestamp
+			// This is critical for synced backups where creationTimestamp reflects import time
+			CreatedAt: function.GetBackupTimestamp(veleroBackup),
 		},
 		Status:      oadptypes.BackupDiscoveryStatusInProgress,
 		Message:     "Extracting PVC information",
@@ -1533,7 +1535,6 @@ func (r *VirtualMachineFileRestoreReconciler) buildFailedProgress(
 		VeleroBackupInfo: oadptypes.VeleroBackupInfo{
 			Name:      backupInfo.Name,
 			Namespace: backupInfo.Namespace,
-			CreatedAt: backupInfo.CreatedAt,
 			PVCs:      []oadptypes.PVCInfo{}, // Empty list for failed discoveries
 		},
 		Status:      oadptypes.BackupDiscoveryStatusFailed,
@@ -1605,9 +1606,10 @@ func (r *VirtualMachineFileRestoreReconciler) processDiscoveryResults(
 					{
 						VeleroBackupName:      backupProgress.Name,
 						VeleroBackupNamespace: backupProgress.Namespace,
-						Timestamp:             backupProgress.CreatedAt,
-						State:                 state,
-						FailureReason:         backupProgress.Message,
+						// Use backup completion timestamp (when backup finished) not creation timestamp
+						Timestamp:     backupProgress.CreatedAt,
+						State:         state,
+						FailureReason: backupProgress.Message,
 					},
 				},
 			}
@@ -1636,8 +1638,9 @@ func (r *VirtualMachineFileRestoreReconciler) processDiscoveryResults(
 			restoreInfo := oadpv1alpha1.RestoreInfo{
 				VeleroBackupName:      backupProgress.Name,
 				VeleroBackupNamespace: backupProgress.Namespace,
-				Timestamp:             backupProgress.CreatedAt,
-				State:                 state,
+				// Use backup completion timestamp (when backup finished) not creation timestamp
+				Timestamp: backupProgress.CreatedAt,
+				State:     state,
 				// VeleroRestore* fields will be populated later when Velero Restore objects are created
 			}
 
