@@ -865,3 +865,129 @@ func TestMin(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeDNS1123Label(t *testing.T) {
+	tests := []struct {
+		name     string
+		baseName string
+		suffix   string
+		expected string
+		validate func(t *testing.T, result string)
+	}{
+		{
+			name:     "short name with suffix",
+			baseName: "my-restore",
+			suffix:   "filebrowser",
+			expected: "my-restore-filebrowser",
+		},
+		{
+			name:     "exact 63 chars",
+			baseName: strings.Repeat("a", 63-len("-filebrowser")),
+			suffix:   "filebrowser",
+			validate: func(t *testing.T, result string) {
+				if len(result) != 63 {
+					t.Errorf("Expected length 63, got %d", len(result))
+				}
+				if !strings.HasSuffix(result, "-filebrowser") {
+					t.Errorf("Expected to end with '-filebrowser', got %s", result)
+				}
+			},
+		},
+		{
+			name:     "exceeds 63 chars - truncates base name",
+			baseName: "very-long-vmfr-name-that-exceeds-maximum-length-limits-for-dns-labels",
+			suffix:   "filebrowser",
+			validate: func(t *testing.T, result string) {
+				if len(result) > 63 {
+					t.Errorf("Result exceeds 63 chars: %d", len(result))
+				}
+				if !strings.HasSuffix(result, "-filebrowser") {
+					t.Errorf("Expected to end with '-filebrowser', got %s", result)
+				}
+				if !strings.HasPrefix(result, "very-long-vmfr-name") {
+					t.Errorf("Expected to start with base name prefix, got %s", result)
+				}
+			},
+		},
+		{
+			name:     "uppercase converted to lowercase",
+			baseName: "MyRestore",
+			suffix:   "filebrowser",
+			expected: "myrestore-filebrowser",
+		},
+		{
+			name:     "invalid chars replaced with hyphens",
+			baseName: "my_restore.test",
+			suffix:   "filebrowser",
+			expected: "my-restore-test-filebrowser",
+		},
+		{
+			name:     "leading/trailing hyphens trimmed",
+			baseName: "-my-restore-",
+			suffix:   "filebrowser",
+			expected: "my-restore-filebrowser",
+		},
+		{
+			name:     "mixed invalid chars and case",
+			baseName: "My_Restore.TEST",
+			suffix:   "filebrowser",
+			expected: "my-restore-test-filebrowser",
+		},
+		{
+			name:     "single character name",
+			baseName: "a",
+			suffix:   "filebrowser",
+			expected: "a-filebrowser",
+		},
+		{
+			name:     "empty base name",
+			baseName: "",
+			suffix:   "filebrowser",
+			expected: "filebrowser",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := NormalizeDNS1123Label(tt.baseName, tt.suffix)
+
+			// Check length constraint
+			if len(result) > 63 {
+				t.Errorf("Result exceeds 63 chars: length=%d, result=%s", len(result), result)
+			}
+
+			// Check DNS-1123 compliance
+			if len(result) > 0 {
+				// Must start with alphanumeric
+				first := result[0]
+				if (first < 'a' || first > 'z') && (first < '0' || first > '9') {
+					t.Errorf("Result must start with alphanumeric, got: %s", result)
+				}
+
+				// Must end with alphanumeric
+				last := result[len(result)-1]
+				if (last < 'a' || last > 'z') && (last < '0' || last > '9') {
+					t.Errorf("Result must end with alphanumeric, got: %s", result)
+				}
+
+				// Only lowercase letters, numbers, and hyphens allowed
+				for i, c := range result {
+					if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+						t.Errorf("Invalid char at position %d: %c in %s", i, c, result)
+					}
+				}
+			}
+
+			// Use custom validation if provided
+			if tt.validate != nil {
+				tt.validate(t, result)
+			} else if tt.expected != "" {
+				// Otherwise check expected value
+				if result != tt.expected {
+					t.Errorf("NormalizeDNS1123Label(%q, %q) = %q, want %q",
+						tt.baseName, tt.suffix, result, tt.expected)
+				}
+			}
+		})
+	}
+}

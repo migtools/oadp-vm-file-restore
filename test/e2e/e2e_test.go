@@ -102,9 +102,10 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("make", "uninstall")
 		_, _ = utils.Run(cmd)
 
-		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
-		_, _ = utils.Run(cmd)
+		// NOTE: Do NOT delete the openshift-adp namespace here!
+		// It's a shared namespace that contains Velero (installed by BeforeSuite),
+		// which is needed by other test suites (e.g., vm_backup_restore_test.go).
+		// The namespace will be cleaned up by AfterSuite when Velero is uninstalled.
 	})
 
 	// After each test, check for failures and collect logs, events,
