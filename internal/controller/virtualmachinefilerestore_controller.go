@@ -1941,7 +1941,9 @@ func (r *VirtualMachineFileRestoreReconciler) updateFileServingInfo(
 
 		// Check for external Route if enabled
 		if vmfr.Spec.FileAccess.FileBrowser.ExposeExternally {
-			routeHost, err := r.findRouteHost(ctx, restoreNamespace, serviceName+"-https")
+			// Use the same normalized route name as in createRoutesIfRequested
+			routeName := function.NormalizeDNS1123Label(vmfr.Name, "filebrowser")
+			routeHost, err := r.findRouteHost(ctx, restoreNamespace, routeName)
 			if err == nil && routeHost != "" {
 				fbInfo.PublicAccess = fmt.Sprintf("https://%s", routeHost)
 			}
@@ -2983,7 +2985,8 @@ func (r *VirtualMachineFileRestoreReconciler) createRoutesIfRequested(
 		logger.V(0).Info("Creating OpenShift Route for FileBrowser access")
 
 		routeConfig := RouteConfig{
-			RouteName:      serviceName + "-https",
+			// Normalize route name to fit DNS-1123 constraints (max 63 chars)
+			RouteName:      function.NormalizeDNS1123Label(vmfr.Name, "filebrowser"),
 			RouteNamespace: namespace,
 			VMFRName:       vmfr.Name,
 			VMFRNamespace:  vmfr.Namespace,
@@ -2993,6 +2996,10 @@ func (r *VirtualMachineFileRestoreReconciler) createRoutesIfRequested(
 			// FileBrowser uses reencrypt TLS termination (Route terminates external TLS, re-encrypts to backend)
 			TLSTermination:                routev1.TLSTerminationReencrypt,
 			InsecureEdgeTerminationPolicy: routev1.InsecureEdgeTerminationPolicyRedirect,
+			// Use subdomain pattern to avoid DNS label length limits (63 chars)
+			// Pattern: <vmfr-name>.vmfr.<ingress-domain>
+			// Note: VMFR names should be unique cluster-wide when using ExposeExternally
+			Subdomain: fmt.Sprintf("%s.vmfr", vmfr.Name),
 		}
 
 		fileBrowserRoute, err := buildFileServerRoute(routeConfig)

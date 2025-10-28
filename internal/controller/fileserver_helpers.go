@@ -218,6 +218,12 @@ type RouteConfig struct {
 
 	// RouteAnnotations are additional annotations to add to the route
 	RouteAnnotations map[string]string
+
+	// Subdomain is the subdomain for the route (e.g., "vmfr-name.vmfr")
+	// When set, the route will use this subdomain instead of auto-generated hostname.
+	// Final hostname will be: <subdomain>.<ingress-domain>
+	// +optional
+	Subdomain string
 }
 
 // buildFileServerPodSpec builds a Pod spec for serving files from restored PVCs.
@@ -858,6 +864,7 @@ func buildFileServerRoute(config RouteConfig) (*routev1.Route, error) {
 			Annotations: annotations,
 		},
 		Spec: routev1.RouteSpec{
+			Subdomain: config.Subdomain,
 			To: routev1.RouteTargetReference{
 				Kind: "Service",
 				Name: config.ServiceName,

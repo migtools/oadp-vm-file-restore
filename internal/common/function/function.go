@@ -55,6 +55,68 @@ func FormatSizeHumanReadable(quantity resource.Quantity) string {
 	return newQuantity.String()
 }
 
+// NormalizeDNS1123Label generates a normalized name that fits DNS-1123 label constraints (max 63 chars).
+// This is a generic function that can be used for any Kubernetes resource name (Pod, Service, Route, etc.).
+//
+// Format: <base-name>-<suffix>
+// If the combined name exceeds 63 characters, the base-name portion is truncated.
+//
+// The function ensures the result is valid for DNS-1123 labels:
+// - Maximum 63 characters
+// - Lowercase letters, numbers, and hyphens only
+// - Must start and end with alphanumeric character
+//
+// Parameters:
+// - baseName: The primary name component (e.g., VMFR name, VM name)
+// - suffix: The suffix to append (e.g., "filebrowser", "ssh", "restore")
+//
+// Example:
+//
+//	NormalizeDNS1123Label("my-restore", "filebrowser") -> "my-restore-filebrowser"
+//	NormalizeDNS1123Label("very-long-vmfr-name-that-exceeds-maximum-length-limits", "filebrowser")
+//	  -> "very-long-vmfr-name-that-exceeds-maximum-length-lim-filebrowser"
+func NormalizeDNS1123Label(baseName, suffix string) string {
+	const maxLength = 63
+
+	// Sanitize baseName first
+	// Convert to lowercase (DNS-1123 requirement)
+	baseName = strings.ToLower(baseName)
+
+	// Replace invalid DNS-1123 chars (anything not a-z, 0-9, or '-')
+	re := regexp.MustCompile(`[^a-z0-9-]`)
+	baseName = re.ReplaceAllString(baseName, "-")
+
+	// Trim leading/trailing hyphens from baseName
+	baseName = strings.Trim(baseName, "-")
+
+	// Build the desired name
+	var normalizedName string
+	if baseName == "" {
+		normalizedName = suffix
+	} else {
+		normalizedName = baseName + "-" + suffix
+	}
+
+	// Truncate if needed
+	if len(normalizedName) > maxLength {
+		// Calculate how much space we have for the base name portion
+		// Reserve space for: hyphen (1) + suffix length
+		maxBaseNameLen := maxLength - 1 - len(suffix)
+		if maxBaseNameLen > 0 {
+			// Truncate baseName and rebuild
+			baseName = baseName[:maxBaseNameLen]
+			// Trim trailing hyphen in case truncation created one
+			baseName = strings.TrimRight(baseName, "-")
+			normalizedName = baseName + "-" + suffix
+		} else {
+			// If suffix is too long, just use it (should never happen with short suffixes)
+			normalizedName = suffix[:maxLength]
+		}
+	}
+
+	return normalizedName
+}
+
 // GenerateTemporaryVMFRNamespaceName generates a unique temporary namespace name.
 // Format: [prefix-]<vm-namespace>-<vm-name>-<suffix>
 // - prefix: optional string to prepend (can be empty)

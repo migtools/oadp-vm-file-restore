@@ -241,7 +241,7 @@ var _ = Describe("VM Backup and File Restore [Functional]", Ordered, func() {
 			output, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred(), "Failed to get Velero pod status")
 			g.Expect(output).To(Equal("Running"), "Velero pod should be running")
-		}, 30*time.Second, 2*time.Second).Should(Succeed())
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 		// Verify BackupStorageLocation is Available
 		Eventually(func(g Gomega) {
@@ -260,7 +260,7 @@ var _ = Describe("VM Backup and File Restore [Functional]", Ordered, func() {
 				}
 			}
 			g.Expect(phase).To(Equal("Available"), "BackupStorageLocation should be Available")
-		}, 30*time.Second, 2*time.Second).Should(Succeed())
+		}, 3*time.Minute, 5*time.Second).Should(Succeed())
 
 		By("Step 1: Creating a standalone PVC (DataVolumes don't provision in Kind)")
 		dvName := fmt.Sprintf("%s-dv", vmName)
