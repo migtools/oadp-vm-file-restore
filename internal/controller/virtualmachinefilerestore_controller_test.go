@@ -967,16 +967,14 @@ func TestFindRestoredPVCName(t *testing.T) {
 		errorContains     string
 	}{
 		{
-			name: "finds PVC by restore label and annotation",
+			name: "finds PVC by restore label and original name label",
 			existingPVCs: []*corev1.PersistentVolumeClaim{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "restored-pvc-abc123",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "test-restore",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "test-restore",
 							constant.VMFROriginalPVCNameAnnotation: "original-pvc-name",
 						},
 					},
@@ -1005,9 +1003,7 @@ func TestFindRestoredPVCName(t *testing.T) {
 						Name:      "wrong-restore-pvc",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "different-restore",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "different-restore",
 							constant.VMFROriginalPVCNameAnnotation: "original-pvc-name",
 						},
 					},
@@ -1020,16 +1016,14 @@ func TestFindRestoredPVCName(t *testing.T) {
 			errorContains:     "PVC not found",
 		},
 		{
-			name: "skips PVCs with wrong annotation value",
+			name: "skips PVCs with wrong original name label value",
 			existingPVCs: []*corev1.PersistentVolumeClaim{
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "wrong-annotation-pvc",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "test-restore",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "test-restore",
 							constant.VMFROriginalPVCNameAnnotation: "different-pvc-name",
 						},
 					},
@@ -1042,7 +1036,7 @@ func TestFindRestoredPVCName(t *testing.T) {
 			errorContains:     "PVC not found",
 		},
 		{
-			name: "skips PVCs with nil annotations",
+			name: "skips PVCs with nil labels",
 			existingPVCs: []*corev1.PersistentVolumeClaim{
 				{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1069,9 +1063,7 @@ func TestFindRestoredPVCName(t *testing.T) {
 						Name:      "pvc-1",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "test-restore",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "test-restore",
 							constant.VMFROriginalPVCNameAnnotation: "other-pvc",
 						},
 					},
@@ -1081,9 +1073,7 @@ func TestFindRestoredPVCName(t *testing.T) {
 						Name:      "pvc-2",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "test-restore",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "test-restore",
 							constant.VMFROriginalPVCNameAnnotation: "target-pvc",
 						},
 					},
@@ -1093,9 +1083,7 @@ func TestFindRestoredPVCName(t *testing.T) {
 						Name:      "pvc-3",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "test-restore",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "test-restore",
 							constant.VMFROriginalPVCNameAnnotation: "another-pvc",
 						},
 					},
@@ -2473,9 +2461,7 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 						Name:      "original-pvc",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "velero-restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "velero-restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "original-pvc",
 						},
 					},
@@ -2536,9 +2522,7 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 						Name:      "restored-pvc-xyz123",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "velero-restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "velero-restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "original-pvc",
 						},
 					},
@@ -2620,9 +2604,7 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 						Name:      "restored-pvc-1-abc",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "velero-restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "velero-restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -2632,9 +2614,7 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 						Name:      "restored-pvc-2-xyz",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "velero-restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "velero-restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-2",
 						},
 					},
@@ -3787,9 +3767,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-1",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -3836,9 +3814,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-1",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -3888,9 +3864,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-1",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -3987,9 +3961,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-1",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -4002,9 +3974,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-2",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-2",
 						},
 					},
@@ -4065,9 +4035,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-1",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -4130,9 +4098,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-1",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -4145,9 +4111,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 						Name:      "restored-pvc-2",
 						Namespace: "restore-ns",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-2",
 						},
 					},
@@ -7348,9 +7312,7 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 						Namespace: "restore-ns",
 						UID:       "pvc-uid-1",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -7434,9 +7396,7 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 						Namespace: "restore-ns",
 						UID:       "pvc-uid-1",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -7744,9 +7704,7 @@ func TestCreateFileServerResources(t *testing.T) {
 						Namespace: "restore-ns",
 						UID:       "restored-pvc-uid-1",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -7801,9 +7759,7 @@ func TestCreateFileServerResources(t *testing.T) {
 						Namespace: "restore-ns",
 						UID:       "restored-pvc-uid-1",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -7861,9 +7817,7 @@ func TestCreateFileServerResources(t *testing.T) {
 						Namespace: "restore-ns",
 						UID:       "restored-pvc-uid-1",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
@@ -7947,9 +7901,7 @@ func TestCreateFileServerResources(t *testing.T) {
 						Namespace: "restore-ns",
 						UID:       "restored-pvc-uid-1",
 						Labels: map[string]string{
-							"velero.io/restore-name": "restore-1",
-						},
-						Annotations: map[string]string{
+							"velero.io/restore-name":               "restore-1",
 							constant.VMFROriginalPVCNameAnnotation: "pvc-1",
 						},
 					},
