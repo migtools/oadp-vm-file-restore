@@ -145,9 +145,10 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		progressingCondition := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
 
 		// Check if we've completed validation and are in workflow execution phase
-		// Workflow reasons: ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), RestoresCompleted (credentials), CredentialsReady (file server creation), and future workflow steps
+		// Workflow reasons: DiscoveringPVCs (validation in progress), ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), RestoresCompleted (credentials), CredentialsReady (file server creation), and future workflow steps
 		isInWorkflowPhase := progressingCondition != nil &&
-			(progressingCondition.Reason == oadptypes.ReasonValidationCompleted ||
+			(progressingCondition.Reason == oadptypes.ReasonDiscoveringPVCs ||
+				progressingCondition.Reason == oadptypes.ReasonValidationCompleted ||
 				progressingCondition.Reason == oadptypes.ReasonNamespaceReady ||
 				progressingCondition.Reason == oadptypes.ReasonWaitingForRestores ||
 				progressingCondition.Reason == oadptypes.ReasonRestoresCompleted ||
@@ -686,6 +687,13 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 
 	// Determine workflow step based on current Progressing reason
 	switch progressingCondition.Reason {
+	case oadptypes.ReasonDiscoveringPVCs:
+		// PVC discovery is in progress - this reconciliation was triggered by a status update
+		// The validation function already completed and updated status, so just requeue
+		// The next reconciliation will see ReasonValidationCompleted and proceed
+		logger.V(1).Info("PVC discovery already completed in previous reconciliation, waiting for status update")
+		return false, nil // Don't requeue - next reconciliation triggered by status update will proceed
+
 	case oadptypes.ReasonValidationCompleted:
 		// Step 1: Create or validate the restore namespace
 		// At this point, we know all PVCs have available backups (validated in validateAndDiscoverPVCs)
@@ -1080,9 +1088,14 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 	case oadptypes.ReasonCredentialsReady:
 		logger.V(0).Info("Creating file server pod and service with validated credentials")
 
+		// IMPORTANT: Create patch baseline BEFORE modifying status
+		// This ensures FileServingInfo (populated by createFileServerResources) is included in the patch
+		patch := client.MergeFrom(vmfr.DeepCopy())
+
 		// Create file server pod and service
 		// PVCs are in Pending state - they will bind when the pod is created
 		// Credentials have been validated/copied/generated in previous step
+		// This also populates vmfr.Status.FileServingInfo in memory (without persisting)
 		err := r.createFileServerResources(ctx, logger, vmfr)
 		if err != nil {
 			failureMsg := fmt.Sprintf("Failed to create file server resources: %s", err.Error())
@@ -1093,6 +1106,9 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		logger.V(0).Info("File server resources created successfully")
 
 		// Update to final Completed phase with Available status
+		// These changes, along with FileServingInfo set above, will be included in the patch
+		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseCompleted
+
 		conditions := []metav1.Condition{
 			{
 				Type:               oadptypes.ConditionTypeProgressing,
@@ -1124,7 +1140,13 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 			},
 		}
 
-		if err := r.patchVmfrStatusPhaseConditions(ctx, vmfr, oadpv1alpha1.VirtualMachineFileRestorePhaseCompleted, conditions, false, logger); err != nil {
+		for _, cond := range conditions {
+			meta.SetStatusCondition(&vmfr.Status.Conditions, cond)
+		}
+
+		// Apply single atomic patch with FileServingInfo + Phase + Conditions
+		if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
+			logger.Error(err, "Failed to patch status with file server info and completed phase")
 			return false, err
 		}
 
@@ -1950,14 +1972,12 @@ func (r *VirtualMachineFileRestoreReconciler) updateFileServingInfo(
 		fileServingInfo.FileBrowser = fbInfo
 	}
 
-	// Update status with FileServingInfo
+	// Update FileServingInfo in vmfr.Status
+	// Note: Status is NOT persisted here - caller will do a single status update
+	// to avoid race conditions from multiple status updates
 	vmfr.Status.FileServingInfo = fileServingInfo
 
-	if err := r.Status().Update(ctx, vmfr); err != nil {
-		return fmt.Errorf("failed to update status with file serving info: %w", err)
-	}
-
-	logger.V(0).Info("Updated file serving info in status",
+	logger.V(0).Info("Prepared file serving info for status update",
 		"sshClusterAccess", func() string {
 			if fileServingInfo.SSH != nil {
 				return fileServingInfo.SSH.ClusterAccess
@@ -2501,8 +2521,9 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 
 		// Categorize by phase
 		switch restorePhase {
-		case veleroapi.RestorePhaseCompleted, veleroapi.RestorePhaseFinalizing:
-			// Treat Finalizing as completed since PVCs are already restored and available for mounting
+		case veleroapi.RestorePhaseCompleted, veleroapi.RestorePhaseFinalizing, veleroapi.RestorePhaseFinalizingPartiallyFailed:
+			// Treat Finalizing* phases as completed since PVCs are already restored and available for mounting
+			// FinalizingPartiallyFailed indicates some resources failed but PVCs may be ready - let PVC validation decide
 			completed++
 		case veleroapi.RestorePhaseFailed, veleroapi.RestorePhasePartiallyFailed, veleroapi.RestorePhaseFailedValidation:
 			failed++
@@ -2564,9 +2585,10 @@ func (r *VirtualMachineFileRestoreReconciler) monitorVeleroRestores(
 					}
 
 					// Always update phase if it changed (even if metadata was already set)
-					// Normalize Finalizing to Completed since from VMFR perspective they're equivalent
+					// Normalize Finalizing* phases to Completed since from VMFR perspective they're equivalent
+					// (PVCs are already created and available for mounting)
 					normalizedPhase := restorePhase
-					if restorePhase == veleroapi.RestorePhaseFinalizing {
+					if restorePhase == veleroapi.RestorePhaseFinalizing || restorePhase == veleroapi.RestorePhaseFinalizingPartiallyFailed {
 						normalizedPhase = veleroapi.RestorePhaseCompleted
 					}
 
@@ -2958,9 +2980,10 @@ func (r *VirtualMachineFileRestoreReconciler) createFileServerResources(
 		"serviceName", service.Name,
 		"namespace", restoreNamespace)
 
-	// Update FileServingInfo in status with access URLs and credentials
+	// Populate FileServingInfo in vmfr.Status with access URLs and credentials
+	// This prepares the data but doesn't persist it - the caller will do a single status update
 	if err := r.updateFileServingInfo(ctx, logger, vmfr, service); err != nil {
-		logger.Error(err, "Failed to update file serving info in status")
+		logger.Error(err, "Failed to prepare file serving info")
 		// Don't fail the entire operation, just log the error
 	}
 

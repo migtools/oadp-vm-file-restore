@@ -3614,6 +3614,64 @@ func TestMonitorVeleroRestores(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "finalizing partially failed restore treated as completed",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+						{
+							PVCInfo: oadptypes.PVCInfo{
+								PVCName:      "pvc-1",
+								PVCNamespace: "vm-ns",
+								PVCUID:       "pvc-uid-1",
+							},
+							Restores: []oadpv1alpha1.RestoreInfo{
+								{
+									VeleroBackupName:       "backup-1",
+									VeleroRestoreName:      "restore-1",
+									VeleroRestoreNamespace: "openshift-adp",
+									State:                  string(oadptypes.BackupDiscoveryStateAvailable),
+									Timestamp:              &time1,
+								},
+							},
+						},
+					},
+				},
+			},
+			existingRestores: []*velerov1api.Restore{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "restore-1",
+						Namespace: "openshift-adp",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+						Annotations: map[string]string{
+							constant.BackupNameAnnotation: "backup-1",
+						},
+					},
+					Status: velerov1api.RestoreStatus{
+						Phase: velerov1api.RestorePhaseFinalizingPartiallyFailed,
+					},
+				},
+			},
+			expectedCompleted:  1,
+			expectedFailed:     0,
+			expectedInProgress: 0,
+			expectedUpdated:    true,
+			expectError:        false,
+			validateResults: func(t *testing.T, vmfr *oadpv1alpha1.VirtualMachineFileRestore) {
+				// FinalizingPartiallyFailed should be normalized to Completed
+				if vmfr.Status.PVCRestores[0].Restores[0].Phase != velerov1api.RestorePhaseCompleted {
+					t.Errorf("Expected phase Completed (normalized from FinalizingPartiallyFailed), got %s", vmfr.Status.PVCRestores[0].Restores[0].Phase)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
