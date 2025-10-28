@@ -19,8 +19,10 @@ package function
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
+	veleroapi "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	"golang.org/x/crypto/ssh"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -861,6 +863,83 @@ func TestMin(t *testing.T) {
 			result := min(tt.a, tt.b)
 			if result != tt.expected {
 				t.Errorf("min(%d, %d) = %d, want %d", tt.a, tt.b, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetBackupTimestamp(t *testing.T) {
+	creationTime := metav1.NewTime(time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC))
+	completionTime := metav1.NewTime(time.Date(2025, 1, 15, 11, 30, 0, 0, time.UTC))
+
+	tests := []struct {
+		name      string
+		backup    veleroapi.Backup
+		wantTime  metav1.Time
+		wantIsNil bool
+	}{
+		{
+			name: "returns CompletionTimestamp when available",
+			backup: veleroapi.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-backup",
+					CreationTimestamp: creationTime,
+				},
+				Status: veleroapi.BackupStatus{
+					CompletionTimestamp: &completionTime,
+				},
+			},
+			wantTime:  completionTime,
+			wantIsNil: false,
+		},
+		{
+			name: "falls back to CreationTimestamp when CompletionTimestamp is nil",
+			backup: veleroapi.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "incomplete-backup",
+					CreationTimestamp: creationTime,
+				},
+				Status: veleroapi.BackupStatus{
+					CompletionTimestamp: nil,
+				},
+			},
+			wantTime:  creationTime,
+			wantIsNil: false,
+		},
+		{
+			name: "prefers CompletionTimestamp over CreationTimestamp for synced backups",
+			backup: veleroapi.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "synced-backup",
+					CreationTimestamp: metav1.NewTime(time.Date(2025, 10, 27, 17, 21, 0, 0, time.UTC)), // When imported
+				},
+				Status: veleroapi.BackupStatus{
+					CompletionTimestamp: &metav1.Time{Time: time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC)}, // When actually taken
+				},
+			},
+			wantTime:  metav1.Time{Time: time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC)},
+			wantIsNil: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GetBackupTimestamp(&tt.backup)
+
+			if tt.wantIsNil {
+				if result != nil {
+					t.Errorf("Expected nil timestamp, got %v", result)
+				}
+				return
+			}
+
+			if result == nil {
+				t.Error("Expected non-nil timestamp, got nil")
+				return
+			}
+
+			if !result.Equal(&tt.wantTime) {
+				t.Errorf("GetBackupTimestamp() = %v, want %v", result, tt.wantTime)
 			}
 		})
 	}

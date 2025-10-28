@@ -892,7 +892,7 @@ func buildFileServerRoute(config RouteConfig) (*routev1.Route, error) {
 }
 
 // extractPVCMountsFromVMFR extracts PVC mount information from VMFR status
-// Returns only successfully completed restores (one per PVC, choosing most recent)
+// Returns all successfully completed restores (including multiple backup versions of the same PVC)
 func extractPVCMountsFromVMFR(vmfr *oadpv1alpha1.VirtualMachineFileRestore) []PVCMountInfo {
 	var pvcMounts []PVCMountInfo
 
@@ -902,7 +902,8 @@ func extractPVCMountsFromVMFR(vmfr *oadpv1alpha1.VirtualMachineFileRestore) []PV
 			continue
 		}
 
-		// Find the most recent successfully completed restore for this PVC
+		// Mount ALL successfully completed restores for this PVC
+		// This allows users to access different backup versions of the same PVC
 		// Restores are already sorted by timestamp (newest first) in processDiscoveryResults
 		for _, restoreInfo := range pvcRestore.Restores {
 			// Include both Completed and Finalizing phases (PVCs are ready in both cases)
@@ -915,8 +916,7 @@ func extractPVCMountsFromVMFR(vmfr *oadpv1alpha1.VirtualMachineFileRestore) []PV
 					BackupTimestamp:   restoreInfo.Timestamp,
 					VeleroRestoreName: restoreInfo.VeleroRestoreName,
 				})
-				// Only mount the most recent successful restore per PVC
-				break
+				// Continue to next restore - mount all backup versions
 			}
 		}
 	}

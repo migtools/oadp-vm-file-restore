@@ -99,7 +99,9 @@ spec:
                     about backup discovery progress
                   properties:
                     createdAt:
-                      description: When the backup was created.
+                      description: |-
+                        When the backup was taken (from backup.status.completionTimestamp).
+                        For synced backups, this reflects when the backup actually completed, not when it was imported.
                       format: date-time
                       type: string
                     lastUpdated:
@@ -274,7 +276,9 @@ spec:
                     that doesn't contain the VM
                   properties:
                     createdAt:
-                      description: When the backup was created.
+                      description: |-
+                        When the backup was taken (from backup.status.completionTimestamp).
+                        For synced backups, this reflects when the backup actually completed, not when it was imported.
                       format: date-time
                       type: string
                     name:
@@ -352,7 +356,9 @@ spec:
                     backup
                   properties:
                     createdAt:
-                      description: When the backup was created.
+                      description: |-
+                        When the backup was taken (from backup.status.completionTimestamp).
+                        For synced backups, this reflects when the backup actually completed, not when it was imported.
                       format: date-time
                       type: string
                     name:

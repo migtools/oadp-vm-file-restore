@@ -24,6 +24,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	oadpv1alpha1 "github.com/migtools/oadp-vm-file-restore/api/v1alpha1"
+	oadptypes "github.com/migtools/oadp-vm-file-restore/api/v1alpha1/types"
 	"github.com/migtools/oadp-vm-file-restore/internal/common/constant"
 )
 
@@ -539,9 +541,303 @@ func TestGatherServicePorts(t *testing.T) {
 }
 
 func TestExtractPVCMountsFromVMFR(t *testing.T) {
-	// This test would require importing the API types
-	// Skipping for now as it's tested indirectly via integration tests
-	t.Skip("Requires full API types setup")
+	time1 := metav1.NewTime(time.Date(2025, 1, 27, 17, 21, 24, 0, time.UTC))
+	time2 := metav1.NewTime(time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC))
+
+	t.Run("single PVC with single backup version", func(t *testing.T) {
+		vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+			Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+				PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName:      "test-vm-disk-1",
+							PVCNamespace: "vm-test-ns",
+							PVCUID:       "pvc-uid-1",
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName: "test-vm-backup-2025-01-27",
+								Phase:            "Completed",
+								State:            "available",
+								Timestamp:        &time1,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := extractPVCMountsFromVMFR(vmfr)
+
+		if len(result) != 1 {
+			t.Fatalf("Expected 1 PVC mount, got %d", len(result))
+		}
+
+		mount := result[0]
+		if mount.PVCName != "test-vm-disk-1" {
+			t.Errorf("Expected PVC name 'test-vm-disk-1', got '%s'", mount.PVCName)
+		}
+		if mount.BackupName != "test-vm-backup-2025-01-27" {
+			t.Errorf("Expected backup name 'test-vm-backup-2025-01-27', got '%s'", mount.BackupName)
+		}
+	})
+
+	t.Run("single PVC with multiple backup versions - should mount all", func(t *testing.T) {
+		vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+			Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+				PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName:      "test-vm-disk-1",
+							PVCNamespace: "vm-test-ns",
+							PVCUID:       "pvc-uid-1",
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName:       "test-vm-backup-2025-01-27",
+								VeleroRestoreName:      "restore-1",
+								VeleroRestoreNamespace: "openshift-adp",
+								Phase:                  "Completed",
+								State:                  "available",
+								Timestamp:              &time1,
+							},
+							{
+								VeleroBackupName:       "test-vm-backup-2025-01-15",
+								VeleroRestoreName:      "restore-2",
+								VeleroRestoreNamespace: "openshift-adp",
+								Phase:                  "Completed",
+								State:                  "available",
+								Timestamp:              &time2,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := extractPVCMountsFromVMFR(vmfr)
+
+		// CRITICAL: Should return 2 mounts (one for each backup version), not just 1
+		if len(result) != 2 {
+			t.Fatalf("Expected 2 PVC mounts (one per backup version), got %d", len(result))
+		}
+
+		// Verify both backup versions are included
+		backupNames := make(map[string]bool)
+		for _, mount := range result {
+			if mount.PVCName != "test-vm-disk-1" {
+				t.Errorf("Expected PVC name 'test-vm-disk-1', got '%s'", mount.PVCName)
+			}
+			backupNames[mount.BackupName] = true
+		}
+
+		if !backupNames["test-vm-backup-2025-01-27"] {
+			t.Error("Expected backup 'test-vm-backup-2025-01-27' in mounts")
+		}
+		if !backupNames["test-vm-backup-2025-01-15"] {
+			t.Error("Expected backup 'test-vm-backup-2025-01-15' in mounts")
+		}
+	})
+
+	t.Run("skips non-completed restores", func(t *testing.T) {
+		vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+			Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+				PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName:      "test-vm-disk-1",
+							PVCNamespace: "vm-test-ns",
+							PVCUID:       "pvc-uid-1",
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName: "test-vm-backup-completed",
+								Phase:            "Completed",
+								State:            "available",
+								Timestamp:        &time1,
+							},
+							{
+								VeleroBackupName: "test-vm-backup-failed",
+								Phase:            "Failed",
+								State:            "available",
+								Timestamp:        &time2,
+							},
+							{
+								VeleroBackupName: "test-vm-backup-in-progress",
+								Phase:            "InProgress",
+								State:            "available",
+								Timestamp:        &time2,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := extractPVCMountsFromVMFR(vmfr)
+
+		// Should only include the completed restore
+		if len(result) != 1 {
+			t.Fatalf("Expected 1 PVC mount (only completed), got %d", len(result))
+		}
+
+		if result[0].BackupName != "test-vm-backup-completed" {
+			t.Errorf("Expected backup 'test-vm-backup-completed', got '%s'", result[0].BackupName)
+		}
+	})
+
+	t.Run("includes Finalizing phase restores", func(t *testing.T) {
+		vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+			Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+				PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName:      "test-vm-disk-1",
+							PVCNamespace: "vm-test-ns",
+							PVCUID:       "pvc-uid-1",
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName: "test-vm-backup-finalizing",
+								Phase:            "Finalizing",
+								State:            "available",
+								Timestamp:        &time1,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := extractPVCMountsFromVMFR(vmfr)
+
+		// Should include Finalizing phase
+		if len(result) != 1 {
+			t.Fatalf("Expected 1 PVC mount (Finalizing phase), got %d", len(result))
+		}
+
+		if result[0].BackupName != "test-vm-backup-finalizing" {
+			t.Errorf("Expected backup 'test-vm-backup-finalizing', got '%s'", result[0].BackupName)
+		}
+	})
+
+	t.Run("skips synthetic backup-level failure entries", func(t *testing.T) {
+		vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+			Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+				PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName: constant.BackupLevelFailurePVCName, // Synthetic entry
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName: "failed-backup",
+								Phase:            "Completed",
+								State:            "available",
+							},
+						},
+					},
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName:      "real-pvc",
+							PVCNamespace: "vm-test-ns",
+							PVCUID:       "pvc-uid-1",
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName: "real-backup",
+								Phase:            "Completed",
+								State:            "available",
+								Timestamp:        &time1,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := extractPVCMountsFromVMFR(vmfr)
+
+		// Should only include real PVC, not synthetic entry
+		if len(result) != 1 {
+			t.Fatalf("Expected 1 PVC mount (skipping synthetic), got %d", len(result))
+		}
+
+		if result[0].PVCName != "real-pvc" {
+			t.Errorf("Expected PVC name 'real-pvc', got '%s'", result[0].PVCName)
+		}
+	})
+
+	t.Run("multiple PVCs each with multiple backup versions", func(t *testing.T) {
+		vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+			Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+				PVCRestores: []oadpv1alpha1.PVCRestoreInfo{
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName:      "disk-1",
+							PVCNamespace: "vm-test-ns",
+							PVCUID:       "uid-1",
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName: "backup-new",
+								Phase:            "Completed",
+								State:            "available",
+								Timestamp:        &time1,
+							},
+							{
+								VeleroBackupName: "backup-old",
+								Phase:            "Completed",
+								State:            "available",
+								Timestamp:        &time2,
+							},
+						},
+					},
+					{
+						PVCInfo: oadptypes.PVCInfo{
+							PVCName:      "disk-2",
+							PVCNamespace: "vm-test-ns",
+							PVCUID:       "uid-2",
+						},
+						Restores: []oadpv1alpha1.RestoreInfo{
+							{
+								VeleroBackupName: "backup-new",
+								Phase:            "Completed",
+								State:            "available",
+								Timestamp:        &time1,
+							},
+							{
+								VeleroBackupName: "backup-old",
+								Phase:            "Completed",
+								State:            "available",
+								Timestamp:        &time2,
+							},
+						},
+					},
+				},
+			},
+		}
+
+		result := extractPVCMountsFromVMFR(vmfr)
+
+		// Should return 4 mounts: 2 PVCs × 2 backup versions each
+		if len(result) != 4 {
+			t.Fatalf("Expected 4 PVC mounts (2 PVCs × 2 versions), got %d", len(result))
+		}
+
+		// Count mounts per PVC
+		pvcCounts := make(map[string]int)
+		for _, mount := range result {
+			pvcCounts[mount.PVCName]++
+		}
+
+		if pvcCounts["disk-1"] != 2 {
+			t.Errorf("Expected 2 mounts for disk-1, got %d", pvcCounts["disk-1"])
+		}
+		if pvcCounts["disk-2"] != 2 {
+			t.Errorf("Expected 2 mounts for disk-2, got %d", pvcCounts["disk-2"])
+		}
+	})
 }
 
 func TestBuildBackupPVCMapJSON(t *testing.T) {
