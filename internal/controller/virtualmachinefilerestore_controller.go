@@ -1745,8 +1745,10 @@ func (r *VirtualMachineFileRestoreReconciler) getDiscoveryResource(ctx context.C
 // SetupWithManager sets up the controller with the Manager.
 func (r *VirtualMachineFileRestoreReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
-		For(&oadpv1alpha1.VirtualMachineFileRestore{}).
-		Watches(&oadpv1alpha1.VirtualMachineBackupsDiscovery{}, handler.EnqueueRequestsFromMapFunc(r.mapVMBDToVMFR)).
+		For(&oadpv1alpha1.VirtualMachineFileRestore{},
+			builder.WithPredicates(predicate.NamespacePredicate{Namespace: r.OADPNamespace})).
+		Watches(&oadpv1alpha1.VirtualMachineBackupsDiscovery{}, handler.EnqueueRequestsFromMapFunc(r.mapVMBDToVMFR),
+			builder.WithPredicates(predicate.NamespacePredicate{Namespace: r.OADPNamespace})).
 		Watches(&veleroapi.Restore{}, handler.EnqueueRequestsFromMapFunc(r.mapVeleroRestoreToVMFR),
 			builder.WithPredicates(predicate.VeleroRestorePredicate{OADPNamespace: r.OADPNamespace})).
 		Watches(&corev1.Service{}, handler.EnqueueRequestsFromMapFunc(r.mapServiceToVMFR),
@@ -1818,6 +1820,11 @@ func (r *VirtualMachineFileRestoreReconciler) mapVeleroRestoreToVMFR(ctx context
 		return nil
 	}
 
+	// Only enqueue reconcile requests for VMFRs in the OADP namespace
+	if vmfrNamespace != r.OADPNamespace {
+		return nil
+	}
+
 	// Return a reconcile request for the VMFR that owns this Velero Restore
 	return []ctrl.Request{
 		{
@@ -1849,6 +1856,11 @@ func (r *VirtualMachineFileRestoreReconciler) mapServiceToVMFR(ctx context.Conte
 		return nil
 	}
 
+	// Only enqueue reconcile requests for VMFRs in the OADP namespace
+	if vmfrNamespace != r.OADPNamespace {
+		return nil
+	}
+
 	// Return a reconcile request for the VMFR that owns this Service
 	return []ctrl.Request{
 		{
@@ -1872,6 +1884,11 @@ func (r *VirtualMachineFileRestoreReconciler) mapRouteToVMFR(ctx context.Context
 	vmfrName, nameExists := obj.GetAnnotations()[constant.VMFROriginNameAnnotation]
 	vmfrNamespace, nsExists := obj.GetAnnotations()[constant.VMFROriginNamespaceAnnotation]
 	if !nameExists || !nsExists {
+		return nil
+	}
+
+	// Only enqueue reconcile requests for VMFRs in the OADP namespace
+	if vmfrNamespace != r.OADPNamespace {
 		return nil
 	}
 
