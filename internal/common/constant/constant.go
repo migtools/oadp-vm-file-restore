@@ -74,8 +74,8 @@ const (
 // Common string constants
 const (
 	EmptyString     = ""
-	TrueString      = "True"
-	FalseString     = "False"
+	TrueString      = "true"  // lowercase to match Kubernetes conventions and external plugin expectations
+	FalseString     = "false" // lowercase to match Kubernetes conventions
 	NameDelimiter   = "-"
 	NamespaceString = "Namespace"
 	NameString      = "name"

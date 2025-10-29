@@ -505,7 +505,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			// Verify labels
 			Expect(ns.Labels).To(HaveKeyWithValue(constant.VMFROriginUUIDLabel, "12345678-1234-5678-9012-123456789012"))
-			Expect(ns.Labels).To(HaveKeyWithValue(constant.VMFRTempNamespaceLabel, "true"))
+			Expect(ns.Labels).To(HaveKeyWithValue(constant.VMFRTempNamespaceLabel, constant.TrueString))
 			Expect(ns.Labels).To(HaveKeyWithValue(constant.ManagedByLabel, constant.ManagedByLabelValue))
 
 			// Verify owner references
@@ -2135,6 +2135,393 @@ func TestHandleVeleroRestoreCleanup(t *testing.T) {
 			if tt.expectDeletedCount != expectedToDelete {
 				t.Errorf("Test setup error: expectDeletedCount=%d but calculated %d restores should be deleted",
 					tt.expectDeletedCount, expectedToDelete)
+			}
+		})
+	}
+}
+
+func TestHandleResourceCleanup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = routev1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	tests := []struct {
+		name                   string
+		vmfr                   *oadpv1alpha1.VirtualMachineFileRestore
+		existingNamespace      *corev1.Namespace
+		existingPods           []*corev1.Pod
+		existingServices       []*corev1.Service
+		existingRoutes         []*routev1.Route
+		expectRequeue          bool
+		expectError            bool
+		expectFinalizerRemoved bool
+		expectNamespaceDeleted bool
+		expectPodsDeleted      int
+		expectServicesDeleted  int
+		expectRoutesDeleted    int
+	}{
+		{
+			name: "finalizer not present returns false",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-vmfr",
+					Namespace:  "openshift-adp",
+					UID:        "test-uid",
+					Finalizers: []string{}, // No finalizer
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "test-ns",
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-ns",
+				},
+			},
+			expectRequeue:          false,
+			expectError:            false,
+			expectFinalizerRemoved: false,
+			expectNamespaceDeleted: false,
+		},
+		{
+			name: "no namespace in status removes finalizer",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VMFileRestoreFinalizer,
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "", // No namespace
+				},
+			},
+			expectRequeue:          false,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+		},
+		{
+			name: "deletes temporary namespace created by controller",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VMFileRestoreFinalizer,
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "vm-test-ns-abcd",
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "vm-test-ns-abcd",
+					Labels: map[string]string{
+						constant.VMFRTempNamespaceLabel: constant.TrueString,
+						constant.VMFROriginUUIDLabel:    "test-uid",
+					},
+				},
+			},
+			expectRequeue:          false,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectNamespaceDeleted: true,
+		},
+		{
+			name: "cleans up resources in user-provided namespace including routes",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VMFileRestoreFinalizer,
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "user-ns",
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "user-ns",
+					// No VMFRTempNamespaceLabel - user-provided namespace
+				},
+			},
+			existingPods: []*corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pod",
+						Namespace: "user-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+							"app":                        "vmfr-file-server",
+						},
+					},
+				},
+			},
+			existingServices: []*corev1.Service{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-service",
+						Namespace: "user-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+							"app":                        "vmfr-file-server",
+						},
+					},
+				},
+			},
+			existingRoutes: []*routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-route",
+						Namespace: "user-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			expectRequeue:          false,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectNamespaceDeleted: false, // User-provided namespace should not be deleted
+			expectPodsDeleted:      1,
+			expectServicesDeleted:  1,
+			expectRoutesDeleted:    1,
+		},
+		{
+			name: "cleans up multiple routes in user namespace",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VMFileRestoreFinalizer,
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "user-ns",
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "user-ns",
+				},
+			},
+			existingRoutes: []*routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "filebrowser-route",
+						Namespace: "user-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "another-route",
+						Namespace: "user-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			expectRequeue:          false,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectRoutesDeleted:    2,
+		},
+		{
+			name: "skips routes without matching label",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "openshift-adp",
+					UID:       "test-uid",
+					Finalizers: []string{
+						constant.VMFileRestoreFinalizer,
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					CreatedNamespace: "user-ns",
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "user-ns",
+				},
+			},
+			existingRoutes: []*routev1.Route{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "vmfr-route",
+						Namespace: "user-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-route",
+						Namespace: "user-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "different-uid",
+						},
+					},
+				},
+			},
+			expectRequeue:          false,
+			expectError:            false,
+			expectFinalizerRemoved: true,
+			expectRoutesDeleted:    1, // Only one route with matching UID
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{tt.vmfr}
+			if tt.existingNamespace != nil {
+				objects = append(objects, tt.existingNamespace)
+			}
+			for _, pod := range tt.existingPods {
+				objects = append(objects, pod)
+			}
+			for _, svc := range tt.existingServices {
+				objects = append(objects, svc)
+			}
+			for _, route := range tt.existingRoutes {
+				objects = append(objects, route)
+			}
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:        fakeClient,
+				Scheme:        scheme,
+				OADPNamespace: "openshift-adp",
+			}
+
+			requeue, err := reconciler.handleResourceCleanup(ctx, zap.New(), tt.vmfr)
+
+			// Validate error expectations
+			if tt.expectError {
+				if err == nil {
+					t.Error("Expected error, got nil")
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+			}
+
+			// Validate requeue expectation
+			if requeue != tt.expectRequeue {
+				t.Errorf("Expected requeue=%v, got %v", tt.expectRequeue, requeue)
+			}
+
+			// Get updated VMFR to check finalizer
+			updated := &oadpv1alpha1.VirtualMachineFileRestore{}
+			err = fakeClient.Get(ctx, types.NamespacedName{Name: tt.vmfr.Name, Namespace: tt.vmfr.Namespace}, updated)
+			if err != nil {
+				t.Fatalf("Failed to get updated VMFR: %v", err)
+			}
+
+			// Validate finalizer removal
+			hasFinalizer := controllerutil.ContainsFinalizer(updated, constant.VMFileRestoreFinalizer)
+			if tt.expectFinalizerRemoved && hasFinalizer {
+				t.Error("Expected finalizer to be removed, but it's still present")
+			}
+			if !tt.expectFinalizerRemoved && !hasFinalizer && len(tt.vmfr.Finalizers) > 0 {
+				t.Error("Expected finalizer to remain, but it was removed")
+			}
+
+			// Check namespace deletion if expected
+			if tt.existingNamespace != nil {
+				ns := &corev1.Namespace{}
+				err = fakeClient.Get(ctx, types.NamespacedName{Name: tt.existingNamespace.Name}, ns)
+				if tt.expectNamespaceDeleted {
+					if err == nil {
+						// Check if deletion timestamp is set (namespace is being deleted)
+						if ns.DeletionTimestamp == nil {
+							t.Error("Expected namespace to be marked for deletion, but DeletionTimestamp is nil")
+						}
+					}
+				} else {
+					if err != nil {
+						t.Errorf("Expected namespace to exist, got error: %v", err)
+					}
+				}
+			}
+
+			// Validate pod deletion count
+			if tt.expectPodsDeleted > 0 {
+				remainingPods := &corev1.PodList{}
+				listOpts := []client.ListOption{
+					client.InNamespace(tt.vmfr.Status.CreatedNamespace),
+					client.MatchingLabels{
+						constant.VMFROriginUUIDLabel: string(tt.vmfr.UID),
+						"app":                        "vmfr-file-server",
+					},
+				}
+				err = fakeClient.List(ctx, remainingPods, listOpts...)
+				if err != nil {
+					t.Fatalf("Failed to list remaining pods: %v", err)
+				}
+				if len(remainingPods.Items) != 0 {
+					t.Errorf("Expected 0 remaining pods, found %d", len(remainingPods.Items))
+				}
+			}
+
+			// Validate service deletion count
+			if tt.expectServicesDeleted > 0 {
+				remainingServices := &corev1.ServiceList{}
+				listOpts := []client.ListOption{
+					client.InNamespace(tt.vmfr.Status.CreatedNamespace),
+					client.MatchingLabels{
+						constant.VMFROriginUUIDLabel: string(tt.vmfr.UID),
+						"app":                        "vmfr-file-server",
+					},
+				}
+				err = fakeClient.List(ctx, remainingServices, listOpts...)
+				if err != nil {
+					t.Fatalf("Failed to list remaining services: %v", err)
+				}
+				if len(remainingServices.Items) != 0 {
+					t.Errorf("Expected 0 remaining services, found %d", len(remainingServices.Items))
+				}
+			}
+
+			// Validate route deletion count (KEY TEST FOR ISSUE FIX)
+			if tt.expectRoutesDeleted > 0 {
+				remainingRoutes := &routev1.RouteList{}
+				listOpts := []client.ListOption{
+					client.InNamespace(tt.vmfr.Status.CreatedNamespace),
+					client.MatchingLabels{
+						constant.VMFROriginUUIDLabel: string(tt.vmfr.UID),
+					},
+				}
+				err = fakeClient.List(ctx, remainingRoutes, listOpts...)
+				if err != nil {
+					t.Fatalf("Failed to list remaining routes: %v", err)
+				}
+				if len(remainingRoutes.Items) != 0 {
+					t.Errorf("Expected 0 remaining routes after cleanup, found %d. This indicates routes are not being cleaned up properly (issue #44 related bug).", len(remainingRoutes.Items))
+				}
 			}
 		})
 	}

@@ -58,6 +58,8 @@ LABEL name="oadp-vmfr-access" \
 # See README.md "Installed Tools - Why Each Tool Is Needed" for detailed rationale
 #
 RUN dnf install -y \
+                --setopt=install_weak_deps=False \
+                --setopt=tsflags=nodocs \
     # =========================================================================
     # Category 1: VM Disk Image Tools - CRITICAL for reading VM disk images
     # =========================================================================
@@ -141,6 +143,12 @@ RUN dnf install -y \
     #   - Why: ALL VM disks have partition tables
     #   - Coverage: 100% of VMs have partitions
     parted \
+    #
+    # kpartx: Partition mapper for devices
+    #   - Why: Maps partitions inside raw disk images (used by guestmount/libguestfs)
+    #   - Use case: Required for mounting disk images with multiple partitions
+    #   - Impact: Without this, guestmount may fail on partitioned disks
+    kpartx \
     #
     # gdisk: GPT partition table support (UEFI VMs)
     #   - Why: GPT (GUID Partition Table) is standard for modern UEFI VMs

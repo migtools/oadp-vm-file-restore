@@ -2106,7 +2106,7 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 			Name: namespaceName,
 			Labels: map[string]string{
 				constant.VMFROriginUUIDLabel:    string(vmfr.UID),
-				constant.VMFRTempNamespaceLabel: "true",
+				constant.VMFRTempNamespaceLabel: constant.TrueString,
 				constant.ManagedByLabel:         constant.ManagedByLabelValue,
 			},
 			OwnerReferences: []metav1.OwnerReference{
@@ -2392,7 +2392,7 @@ func (r *VirtualMachineFileRestoreReconciler) createVeleroRestores(
 					constant.VirtualMachineNameAnnotation:      vmbd.Spec.VirtualMachineName,
 					constant.VirtualMachineNamespaceAnnotation: vmbd.Spec.VirtualMachineNamespace,
 					constant.BackupNameAnnotation:              backupName,
-					"oadp.openshift.io/vmfr-restore":           "true",
+					"oadp.openshift.io/vmfr-restore":           constant.TrueString,
 				},
 			},
 			Spec: veleroapi.RestoreSpec{
@@ -3883,6 +3883,11 @@ func (r *VirtualMachineFileRestoreReconciler) handleResourceCleanup(
 			return false, err
 		}
 
+		// Delete file server routes created by this controller (OpenShift only)
+		if err := r.deleteFileServerRoutes(ctx, logger, vmfr, restoreNamespace); err != nil {
+			return false, err
+		}
+
 		// Delete PVCs restored by this VMFR's Velero Restore objects
 		if err := r.deleteRestoredPVCs(ctx, logger, vmfr, restoreNamespace); err != nil {
 			return false, err
@@ -3901,6 +3906,12 @@ func (r *VirtualMachineFileRestoreReconciler) handleResourceCleanup(
 	patch := client.MergeFrom(vmfr.DeepCopy())
 	controllerutil.RemoveFinalizer(vmfr, constant.VMFileRestoreFinalizer)
 	if err := r.Patch(ctx, vmfr, patch); err != nil {
+		if apierrors.IsNotFound(err) {
+			// VMFR was already deleted (possibly force-deleted during cleanup)
+			// This is fine - cleanup is complete
+			logger.V(0).Info("VMFR already deleted, cleanup complete")
+			return false, nil
+		}
 		logger.Error(err, "Failed to remove VMFileRestoreFinalizer")
 		return false, fmt.Errorf("failed to remove VMFileRestoreFinalizer: %w", err)
 	}
@@ -4127,5 +4138,63 @@ func (r *VirtualMachineFileRestoreReconciler) deleteFileServerServices(
 	}
 
 	logger.V(0).Info("Deleted file server services", "count", deletedCount, "namespace", namespace)
+	return nil
+}
+
+// deleteFileServerRoutes removes file server routes created by this controller (OpenShift only).
+// Routes are identified by the VMFROriginUUIDLabel matching this VMFR's UID.
+// This function gracefully handles non-OpenShift clusters by checking if the Route CRD exists.
+func (r *VirtualMachineFileRestoreReconciler) deleteFileServerRoutes(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	namespace string,
+) error {
+	logger.V(0).Info("Deleting file server routes", "namespace", namespace)
+
+	// Check if Route CRD exists (OpenShift only)
+	// On non-OpenShift clusters, skip this step
+	routeList := &routev1.RouteList{}
+	testErr := r.List(ctx, routeList, client.Limit(1))
+	if testErr != nil {
+		// Route CRD doesn't exist - skip route deletion (not an OpenShift cluster)
+		logger.V(1).Info("Route CRD not available, skipping route deletion (expected on non-OpenShift clusters)")
+		return nil
+	}
+
+	// List routes created by this VMFR
+	listOpts := []client.ListOption{
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		},
+	}
+
+	if err := r.List(ctx, routeList, listOpts...); err != nil {
+		logger.Error(err, "Failed to list file server routes")
+		return fmt.Errorf("failed to list file server routes: %w", err)
+	}
+
+	logger.V(0).Info("Found file server routes to delete", "count", len(routeList.Items))
+
+	deletedCount := 0
+	for i := range routeList.Items {
+		route := &routeList.Items[i]
+		logger.V(1).Info("Deleting file server route",
+			"routeName", route.Name,
+			"namespace", route.Namespace)
+
+		if err := r.Delete(ctx, route); err != nil {
+			if apierrors.IsNotFound(err) {
+				logger.V(1).Info("Route already deleted", "routeName", route.Name)
+				continue
+			}
+			logger.Error(err, "Failed to delete route", "routeName", route.Name)
+			return fmt.Errorf("failed to delete route %s: %w", route.Name, err)
+		}
+		deletedCount++
+	}
+
+	logger.V(0).Info("Deleted file server routes", "count", deletedCount, "namespace", namespace)
 	return nil
 }
