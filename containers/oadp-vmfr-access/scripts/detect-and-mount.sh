@@ -75,6 +75,53 @@ error() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $*" >&2
 }
 
+# cleanup_mounts - Cleanup function called on script termination
+# This is the secondary mechanism (trap-based) that works with the primary
+# PreStop hook in the controller. See issue #44.
+# Unmounts all FUSE filesystems to prevent pods/PVCs from getting stuck in Terminating state
+cleanup_mounts() {
+    # Disable strict error handling for cleanup - we want to try everything
+    # even if individual operations fail
+    set +e
+    set +u
+    set +o pipefail
+
+    log "[Trap] Received termination signal, cleaning up FUSE mounts..."
+
+    local mounted_count=0
+    local unmounted_count=0
+
+    # Find all FUSE mount points under /restores/
+    # Structure: /restores/<date>/<backup>/<pvc>/
+    if [ -d "$FS_MOUNT_DIR" ]; then
+        # Use shopt to handle failed glob patterns gracefully
+        shopt -s nullglob 2>/dev/null || true
+        for mount_point in "$FS_MOUNT_DIR"/*/*/*; do
+            # Check if it's a directory
+            if [ -d "$mount_point" ]; then
+                # Check if it's actually a mount point
+                if mountpoint -q "$mount_point" 2>/dev/null; then
+                    mounted_count=$((mounted_count + 1))
+                    log "[Trap] Unmounting: $mount_point"
+                    # Use existing unmount_disk function
+                    unmount_disk "$mount_point" || true
+                    unmounted_count=$((unmounted_count + 1))
+                fi
+            fi
+        done
+        shopt -u nullglob 2>/dev/null || true
+    fi
+
+    log "[Trap] Cleanup complete: unmounted $unmounted_count of $mounted_count FUSE mounts"
+    log "[Trap] Exiting gracefully"
+}
+
+# Set up trap to handle termination signals
+# SIGTERM: Kubernetes sends this when deleting the pod
+# SIGINT: User presses Ctrl+C
+# EXIT: Script exits for any reason
+trap cleanup_mounts SIGTERM SIGINT EXIT
+
 # detect_disk_format - Identify the disk image format
 #
 # Uses qemu-img to detect the format of a disk image file.
@@ -574,10 +621,15 @@ main() {
     log "Keeping container alive to maintain FUSE mounts..."
     log "Container will run indefinitely (sleep infinity)"
     log ""
+    log "Trap handler installed for graceful cleanup on termination"
+    log ""
 
     # Sleep forever to keep container running
+    # IMPORTANT: Do NOT use 'exec sleep' - we need the bash process to stay alive
+    # to handle trap signals (SIGTERM/SIGINT) for graceful FUSE unmounting
+    # The '& wait $!' pattern allows trap handlers to execute before termination
     # Future: This will be replaced with SSH/HTTP server (Issues #8, #9)
-    exec sleep infinity
+    sleep infinity & wait $!
 }
 
 # Execute main function with all script arguments

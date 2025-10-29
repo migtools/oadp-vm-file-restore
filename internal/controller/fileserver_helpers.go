@@ -617,6 +617,19 @@ func buildVMFileServerMainContainer(pvcMounts []PVCMountInfo) corev1.Container {
 			},
 		},
 
+		// Lifecycle hooks
+		// PreStop: Kubernetes-native cleanup hook (primary mechanism)
+		// This is guaranteed to run BEFORE the container receives SIGTERM
+		// Works in conjunction with trap handler in detect-and-mount.sh (secondary mechanism)
+		// See issue #44: https://github.com/migtools/oadp-vm-file-restore/issues/44
+		Lifecycle: &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"/bin/bash", "-c", vmFileServerPreStopScript},
+				},
+			},
+		},
+
 		// Container-level security context
 		// CRITICAL: Privileged mode required for /dev/kvm access with SELinux
 		SecurityContext: &corev1.SecurityContext{
