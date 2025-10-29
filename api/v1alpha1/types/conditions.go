@@ -126,6 +126,7 @@ const (
 	ReasonWaitingForRestores            = "WaitingForRestores"
 	ReasonRestoresCompleted             = "RestoresCompleted"
 	ReasonCredentialsReady              = "CredentialsReady"
+	ReasonWaitingForRoute               = "WaitingForRoute"
 	ReasonRestoresCompletedWithFailures = "RestoresCompletedWithFailures"
 	ReasonRestoresFailed                = "RestoresFailed"
 	ReasonFileServerCreated             = "FileServerCreated"

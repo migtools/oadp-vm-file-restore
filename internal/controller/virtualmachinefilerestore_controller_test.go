@@ -7088,6 +7088,7 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 	_ = velerov1api.AddToScheme(scheme)
 	_ = rbacv1.AddToScheme(scheme)
+	_ = routev1.AddToScheme(scheme)
 
 	tests := []struct {
 		name              string
@@ -7561,6 +7562,145 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 			},
 			expectedRequeue: false,
 			expectError:     true,
+		},
+		{
+			name: "waiting for route - external route requested but hostname not ready",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						FileBrowser: &oadpv1alpha1.FileBrowserAccessSpec{
+							ExposeExternally: true,
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:            oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					CreatedNamespace: "restore-ns",
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonWaitingForRoute,
+						},
+					},
+					FileServingInfo: &oadpv1alpha1.FileServingInfo{
+						FileBrowser: &oadpv1alpha1.FileBrowserServingInfo{
+							ClusterAccess: "https://test-svc.restore-ns.svc.cluster.local:8443",
+							// PublicAccess is empty - route hostname not yet assigned
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+			},
+			objects: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-service",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue: true, // Should requeue while waiting for route
+			expectError:     false,
+		},
+		{
+			name: "waiting for route - route hostname becomes available",
+			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: "test-ns",
+					UID:       "test-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					BackupsDiscoveryRef: "test-vmbd",
+					FileAccess: &oadpv1alpha1.FileAccessSpec{
+						FileBrowser: &oadpv1alpha1.FileBrowserAccessSpec{
+							ExposeExternally: true,
+						},
+					},
+				},
+				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+					Phase:            oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress,
+					CreatedNamespace: "restore-ns",
+					Conditions: []metav1.Condition{
+						{
+							Type:   oadptypes.ConditionTypeProgressing,
+							Status: metav1.ConditionTrue,
+							Reason: oadptypes.ReasonWaitingForRoute,
+						},
+					},
+					FileServingInfo: &oadpv1alpha1.FileServingInfo{
+						FileBrowser: &oadpv1alpha1.FileBrowserServingInfo{
+							ClusterAccess: "https://test-svc.restore-ns.svc.cluster.local:8443",
+							PublicAccess:  "", // Will be populated by updateFileServingInfo
+						},
+					},
+				},
+			},
+			vmbd: &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmbd",
+					Namespace: "test-ns",
+				},
+			},
+			objects: []client.Object{
+				&corev1.Service{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-service",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+					Spec: corev1.ServiceSpec{
+						Ports: []corev1.ServicePort{
+							{
+								Name: "https",
+								Port: 8443,
+							},
+						},
+					},
+				},
+				&routev1.Route{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vmfr-filebrowser",
+						Namespace: "restore-ns",
+						Labels: map[string]string{
+							constant.VMFROriginUUIDLabel: "test-uid",
+						},
+					},
+					Spec: routev1.RouteSpec{
+						Host: "test-vmfr.apps.example.com", // Route hostname is now available
+					},
+				},
+			},
+			existingNamespace: &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "restore-ns",
+				},
+			},
+			expectedRequeue:   false, // Should complete when route is ready
+			expectError:       false,
+			expectedNewReason: oadptypes.ReasonFileServerCreated,
 		},
 	}
 

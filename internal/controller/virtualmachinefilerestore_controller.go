@@ -145,14 +145,15 @@ func (r *VirtualMachineFileRestoreReconciler) Reconcile(ctx context.Context, req
 		progressingCondition := meta.FindStatusCondition(vmfr.Status.Conditions, oadptypes.ConditionTypeProgressing)
 
 		// Check if we've completed validation and are in workflow execution phase
-		// Workflow reasons: DiscoveringPVCs (validation in progress), ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), RestoresCompleted (credentials), CredentialsReady (file server creation), and future workflow steps
+		// Workflow reasons: DiscoveringPVCs (validation in progress), ValidationCompleted (transition point), NamespaceReady, WaitingForRestores (monitoring), RestoresCompleted (credentials), CredentialsReady (file server creation), WaitingForRoute (route monitoring), and future workflow steps
 		isInWorkflowPhase := progressingCondition != nil &&
 			(progressingCondition.Reason == oadptypes.ReasonDiscoveringPVCs ||
 				progressingCondition.Reason == oadptypes.ReasonValidationCompleted ||
 				progressingCondition.Reason == oadptypes.ReasonNamespaceReady ||
 				progressingCondition.Reason == oadptypes.ReasonWaitingForRestores ||
 				progressingCondition.Reason == oadptypes.ReasonRestoresCompleted ||
-				progressingCondition.Reason == oadptypes.ReasonCredentialsReady)
+				progressingCondition.Reason == oadptypes.ReasonCredentialsReady ||
+				progressingCondition.Reason == oadptypes.ReasonWaitingForRoute)
 
 		if isInWorkflowPhase {
 			// Validation complete — proceed with restore workflow
@@ -1105,8 +1106,73 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 
 		logger.V(0).Info("File server resources created successfully")
 
-		// Update to final Completed phase with Available status
-		// These changes, along with FileServingInfo set above, will be included in the patch
+		// Check if we need to wait for external route hostname
+		externalRouteRequested := vmfr.Spec.FileAccess != nil &&
+			vmfr.Spec.FileAccess.FileBrowser != nil &&
+			vmfr.Spec.FileAccess.FileBrowser.ExposeExternally
+
+		if externalRouteRequested {
+			// Check if route hostname is available
+			routeReady := vmfr.Status.FileServingInfo != nil &&
+				vmfr.Status.FileServingInfo.FileBrowser != nil &&
+				vmfr.Status.FileServingInfo.FileBrowser.PublicAccess != ""
+
+			if !routeReady {
+				// Route hostname not yet assigned - stay in InProgress and wait
+				logger.V(0).Info("External route requested but hostname not yet assigned, waiting for route readiness")
+
+				vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseInProgress
+
+				conditions := []metav1.Condition{
+					{
+						Type:               oadptypes.ConditionTypeProgressing,
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: metav1.Now(),
+						Reason:             oadptypes.ReasonWaitingForRoute,
+						Message:            "File server created, waiting for external route hostname to be assigned",
+					},
+					{
+						Type:               oadptypes.ConditionTypeAvailable,
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: metav1.Now(),
+						Reason:             oadptypes.ReasonFileServerAvailable,
+						Message:            "File server is accessible via cluster-internal URL, external route pending",
+					},
+					{
+						Type:               oadptypes.ConditionTypeDegraded,
+						Status:             metav1.ConditionFalse,
+						LastTransitionTime: metav1.Now(),
+						Reason:             oadptypes.ReasonNoFailures,
+						Message:            "All operations completed successfully",
+					},
+					{
+						Type:               oadptypes.ConditionTypeReady,
+						Status:             metav1.ConditionFalse,
+						LastTransitionTime: metav1.Now(),
+						Reason:             oadptypes.ReasonWaitingForRoute,
+						Message:            "Waiting for external route hostname assignment",
+					},
+				}
+
+				for _, cond := range conditions {
+					meta.SetStatusCondition(&vmfr.Status.Conditions, cond)
+				}
+
+				// Apply patch with FileServingInfo + Phase + Conditions
+				if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
+					logger.Error(err, "Failed to patch status while waiting for route")
+					return false, err
+				}
+
+				logger.V(0).Info("Waiting for external route hostname, will requeue")
+				return true, nil // Requeue to check route status
+			}
+
+			logger.V(0).Info("External route hostname is ready",
+				"publicAccess", vmfr.Status.FileServingInfo.FileBrowser.PublicAccess)
+		}
+
+		// Route is ready (or not requested) - transition to Completed
 		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseCompleted
 
 		conditions := []metav1.Condition{
@@ -1151,6 +1217,105 @@ func (r *VirtualMachineFileRestoreReconciler) executeFileRestoreWorkflow(ctx con
 		}
 
 		logger.V(0).Info("Successfully transitioned to Completed phase with file server available")
+		return false, nil // Terminal state - no requeue
+
+	// Step 6: Monitor external route readiness
+	case oadptypes.ReasonWaitingForRoute:
+		logger.V(0).Info("Monitoring external route for hostname assignment")
+
+		restoreNamespace := vmfr.Status.CreatedNamespace
+		if restoreNamespace == "" {
+			return false, fmt.Errorf("restore namespace not found in status")
+		}
+
+		// Find the service created by this VMFR
+		serviceList := &corev1.ServiceList{}
+		listOpts := []client.ListOption{
+			client.InNamespace(restoreNamespace),
+			client.MatchingLabels{
+				constant.VMFROriginUUIDLabel: string(vmfr.UID),
+			},
+		}
+
+		if err := r.List(ctx, serviceList, listOpts...); err != nil {
+			logger.Error(err, "Failed to list services for route monitoring")
+			return false, err
+		}
+
+		if len(serviceList.Items) == 0 {
+			return false, fmt.Errorf("no service found for this VMFR")
+		}
+
+		service := &serviceList.Items[0]
+
+		// Create patch baseline BEFORE modifying status
+		patch := client.MergeFrom(vmfr.DeepCopy())
+
+		// Update FileServingInfo with current route status
+		if err := r.updateFileServingInfo(ctx, logger, vmfr, service); err != nil {
+			logger.Error(err, "Failed to update file serving info")
+			return false, err
+		}
+
+		// Check if route hostname is now available
+		routeReady := vmfr.Status.FileServingInfo != nil &&
+			vmfr.Status.FileServingInfo.FileBrowser != nil &&
+			vmfr.Status.FileServingInfo.FileBrowser.PublicAccess != ""
+
+		if !routeReady {
+			logger.V(1).Info("Route hostname still not available, will continue waiting")
+			// Don't update status - just requeue to check again
+			return true, nil
+		}
+
+		logger.V(0).Info("External route hostname is now available, transitioning to Completed",
+			"publicAccess", vmfr.Status.FileServingInfo.FileBrowser.PublicAccess)
+
+		// Transition to Completed phase
+		vmfr.Status.Phase = oadpv1alpha1.VirtualMachineFileRestorePhaseCompleted
+
+		conditions := []metav1.Condition{
+			{
+				Type:               oadptypes.ConditionTypeProgressing,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonFileServerCreated,
+				Message:            "File server and external route are ready",
+			},
+			{
+				Type:               oadptypes.ConditionTypeAvailable,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonFileServerAvailable,
+				Message:            "File server is accessible and serving files",
+			},
+			{
+				Type:               oadptypes.ConditionTypeDegraded,
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonNoFailures,
+				Message:            "All operations completed successfully",
+			},
+			{
+				Type:               oadptypes.ConditionTypeReady,
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				Reason:             oadptypes.ReasonCompleted,
+				Message:            "File restore completed, files accessible via file server and external route",
+			},
+		}
+
+		for _, cond := range conditions {
+			meta.SetStatusCondition(&vmfr.Status.Conditions, cond)
+		}
+
+		// Apply patch with updated FileServingInfo + Phase + Conditions
+		if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
+			logger.Error(err, "Failed to patch status after route became ready")
+			return false, err
+		}
+
+		logger.V(0).Info("Successfully transitioned to Completed phase with external route ready")
 		return false, nil // Terminal state - no requeue
 
 	default:
