@@ -94,6 +94,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - security.openshift.io
+  resourceNames:
+  - privileged
+  resources:
+  - securitycontextconstraints
+  verbs:
+  - use
+- apiGroups:
   - velero.io
   resources:
   - backups
