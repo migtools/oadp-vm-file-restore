@@ -83,8 +83,8 @@ var _ = Describe("Manager", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred(), "Failed to patch imagePullPolicy")
 	})
 
-	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
-	// and deleting the namespace.
+	// After all tests have been executed, clean up by deleting controller resources
+	// but NOT the namespace (which contains Velero needed by other test suites).
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
 		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
@@ -94,8 +94,20 @@ var _ = Describe("Manager", Ordered, func() {
 		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName)
 		_, _ = utils.Run(cmd)
 
-		By("undeploying the controller-manager")
-		cmd = exec.Command("make", "undeploy")
+		By("deleting the controller deployment")
+		cmd = exec.Command("kubectl", "delete", "deployment", "oadp-vm-file-restore-controller-manager", "-n", namespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		By("deleting controller RBAC resources")
+		cmd = exec.Command("kubectl", "delete", "clusterrole,clusterrolebinding,role,rolebinding", "-l", "app.kubernetes.io/name=oadp-vm-file-restore", "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		By("deleting controller service account")
+		cmd = exec.Command("kubectl", "delete", "serviceaccount", serviceAccountName, "-n", namespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+
+		By("deleting metrics service")
+		cmd = exec.Command("kubectl", "delete", "service", metricsServiceName, "-n", namespace, "--ignore-not-found")
 		_, _ = utils.Run(cmd)
 
 		By("uninstalling CRDs")
