@@ -283,6 +283,13 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 			continue
 		}
 
+		// Skip backups with incomplete async operations (e.g., data mover upload not finished)
+		// This prevents attempting restores from backups where the DataUpload completed
+		// after the backup was marked as Completed, leaving BackupItemOperationsCompleted unset.
+		if velerohelpers.BackupAsyncOperationsIncomplete(&backup) {
+			continue
+		}
+
 		// Check if backup should be included based on time range and/or explicit list
 		includeByTime := !backup.CreationTimestamp.Time.Before(startTime) && !backup.CreationTimestamp.Time.After(endTime)
 		includeByExplicitList := false
@@ -351,66 +358,8 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 	}
 
 	// Handle missing and filtered backups when explicit list is provided
-	var invalidBackups []types.InvalidBackupInfo
-	var missingBackupsCount int
-	var filteredOutBackups []types.BackupDiscoveryProgress
-
+	invalidBackups, missingBackupsCount, filteredOutBackups := r.classifyRequestedBackups(vmbd, backupList)
 	if len(vmbd.Spec.RequestedBackups) > 0 {
-		// Check which requested backups exist and classify them
-		requestedBackupsStatus := make(map[string]string) // name -> status: "missing", "filtered", "candidate"
-		for _, requestedName := range vmbd.Spec.RequestedBackups {
-			requestedBackupsStatus[requestedName] = "missing"
-		}
-
-		// Check all backups in cluster against requested list
-		for _, backup := range backupList.Items {
-			if _, isRequested := requestedBackupsStatus[backup.Name]; isRequested {
-				// Create VM object for filtering check
-				vm := &kubevirtv1.VirtualMachine{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      vmbd.Spec.VirtualMachineName,
-						Namespace: vmbd.Spec.VirtualMachineNamespace,
-					},
-				}
-
-				// Check if backup is valid for this VM (basic spec filtering)
-				if velerohelpers.ValidateVMInBackupSpec(&backup, vm) {
-					requestedBackupsStatus[backup.Name] = "candidate" // Will go through discovery
-				} else {
-					requestedBackupsStatus[backup.Name] = "filtered" // Exists but filtered out
-				}
-			}
-		}
-
-		// Process the results
-		for requestedName, status := range requestedBackupsStatus {
-			switch status {
-			case "missing":
-				invalidBackups = append(invalidBackups, types.InvalidBackupInfo{
-					VeleroBackupInfo: types.VeleroBackupInfo{
-						Name:      requestedName,
-						Namespace: r.OADPNamespace,
-					},
-					Reason: "Backup not found in cluster",
-				})
-				missingBackupsCount++
-
-			case "filtered":
-				// Add to filtered out backups that will show in backupDiscoveryProgress
-				filteredOutBackups = append(filteredOutBackups, types.BackupDiscoveryProgress{
-					VeleroBackupInfo: types.VeleroBackupInfo{
-						Name:      requestedName,
-						Namespace: r.OADPNamespace,
-						// Note: We can't easily get CreatedAt for filtered backups here without another lookup
-					},
-					Status:      types.BackupDiscoveryStatusSkipped,
-					Message:     "Backup doesn't include target VM namespace",
-					LastUpdated: &metav1.Time{Time: time.Now()},
-				})
-				// "candidate" status backups are already in the candidates slice and will be processed normally
-			}
-		}
-
 		// Always set invalidBackups for explicit requests (even if empty)
 		// This ensures missing backups are properly tracked
 		vmbd.Status.InvalidBackups = invalidBackups
@@ -448,6 +397,106 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 	logger.V(4).Info("Started backup discovery", "candidates", len(candidates))
 	logger.V(1).Info("Discovery initialized", "candidates", len(candidates))
 	return true, nil // Requeue to start processing
+}
+
+// classifyRequestedBackups classifies explicitly requested backups into categories:
+// - missing: backup not found in cluster
+// - filtered: backup exists but doesn't include target VM namespace
+// - async-incomplete: backup has incomplete async operations (data mover upload not finished)
+// - candidate: backup is valid and will go through discovery
+// Returns invalidBackups, missingBackupsCount, and filteredOutBackups
+func (r *VirtualMachineBackupsDiscoveryReconciler) classifyRequestedBackups(
+	vmbd *oadpv1alpha1.VirtualMachineBackupsDiscovery,
+	backupList *velerov1api.BackupList,
+) ([]types.InvalidBackupInfo, int, []types.BackupDiscoveryProgress) {
+	var invalidBackups []types.InvalidBackupInfo
+	var missingBackupsCount int
+	var filteredOutBackups []types.BackupDiscoveryProgress
+
+	if len(vmbd.Spec.RequestedBackups) == 0 {
+		return invalidBackups, missingBackupsCount, filteredOutBackups
+	}
+
+	// Check which requested backups exist and classify them
+	requestedBackupsStatus := make(map[string]string) // name -> status: "missing", "filtered", "candidate", "async-incomplete"
+	for _, requestedName := range vmbd.Spec.RequestedBackups {
+		requestedBackupsStatus[requestedName] = "missing"
+	}
+
+	// Check all backups in cluster against requested list
+	// Store backup references for later use in async reason generation
+	backupRefs := make(map[string]*velerov1api.Backup)
+	for i := range backupList.Items {
+		backup := &backupList.Items[i]
+		if _, isRequested := requestedBackupsStatus[backup.Name]; isRequested {
+			backupRefs[backup.Name] = backup
+
+			// Check for incomplete async operations first (e.g., data mover upload not finished)
+			if velerohelpers.BackupAsyncOperationsIncomplete(backup) {
+				requestedBackupsStatus[backup.Name] = "async-incomplete"
+				continue
+			}
+
+			// Create VM object for filtering check
+			vm := &kubevirtv1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      vmbd.Spec.VirtualMachineName,
+					Namespace: vmbd.Spec.VirtualMachineNamespace,
+				},
+			}
+
+			// Check if backup is valid for this VM (basic spec filtering)
+			if velerohelpers.ValidateVMInBackupSpec(backup, vm) {
+				requestedBackupsStatus[backup.Name] = "candidate" // Will go through discovery
+			} else {
+				requestedBackupsStatus[backup.Name] = "filtered" // Exists but filtered out
+			}
+		}
+	}
+
+	// Process the results
+	for requestedName, status := range requestedBackupsStatus {
+		switch status {
+		case "missing":
+			invalidBackups = append(invalidBackups, types.InvalidBackupInfo{
+				VeleroBackupInfo: types.VeleroBackupInfo{
+					Name:      requestedName,
+					Namespace: r.OADPNamespace,
+				},
+				Reason: "Backup not found in cluster",
+			})
+			missingBackupsCount++
+
+		case "filtered":
+			// Add to filtered out backups that will show in backupDiscoveryProgress
+			filteredOutBackups = append(filteredOutBackups, types.BackupDiscoveryProgress{
+				VeleroBackupInfo: types.VeleroBackupInfo{
+					Name:      requestedName,
+					Namespace: r.OADPNamespace,
+				},
+				Status:      types.BackupDiscoveryStatusSkipped,
+				Message:     "Backup doesn't include target VM namespace",
+				LastUpdated: &metav1.Time{Time: time.Now()},
+			})
+
+		case "async-incomplete":
+			// Backup exists but has incomplete async operations (data mover upload not finished)
+			reason := velerohelpers.BackupAsyncOperationsReason(backupRefs[requestedName])
+			if reason == "" {
+				reason = "Backup has incomplete async operations"
+			}
+			invalidBackups = append(invalidBackups, types.InvalidBackupInfo{
+				VeleroBackupInfo: types.VeleroBackupInfo{
+					Name:      requestedName,
+					Namespace: r.OADPNamespace,
+					CreatedAt: function.GetBackupTimestamp(backupRefs[requestedName]),
+				},
+				Reason: reason,
+			})
+		}
+	}
+
+	return invalidBackups, missingBackupsCount, filteredOutBackups
 }
 
 // processDiscoveryBatch continues the discovery process by checking pending backups

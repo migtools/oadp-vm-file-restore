@@ -108,3 +108,64 @@ func extractKindFromGVK(gvk string) string {
 
 	return string(parts[start:end])
 }
+
+// BackupAsyncOperationsIncomplete checks if a backup has incomplete async operations.
+// This is used to validate that backups with data mover operations (e.g., snapshotMoveData: true)
+// have completed all their async operations before being considered valid for restore.
+//
+// Returns true if the backup has async operations that haven't completed (backup is NOT ready for restore).
+// Returns false if:
+//   - No async operations were attempted (BackupItemOperationsAttempted == 0)
+//   - All async operations completed successfully (Completed == Attempted)
+//
+// This prevents attempting restores from backups where the data mover upload completed
+// after the backup was marked as Completed, leaving BackupItemOperationsCompleted unset.
+func BackupAsyncOperationsIncomplete(backup *veleroapi.Backup) bool {
+	if backup == nil || backup.Status.BackupItemOperationsAttempted == 0 {
+		// No async operations attempted, backup is ready
+		return false
+	}
+
+	// If attempted > 0, completed must equal attempted for the backup to be ready
+	return backup.Status.BackupItemOperationsCompleted != backup.Status.BackupItemOperationsAttempted
+}
+
+// BackupAsyncOperationsReason returns a human-readable reason for why a backup's async operations are incomplete.
+// Returns empty string if async operations are complete or not applicable.
+func BackupAsyncOperationsReason(backup *veleroapi.Backup) string {
+	if backup == nil || backup.Status.BackupItemOperationsAttempted == 0 {
+		return ""
+	}
+
+	if backup.Status.BackupItemOperationsCompleted != backup.Status.BackupItemOperationsAttempted {
+		return "backup has incomplete async operations (data mover upload may not have finished); " +
+			"BackupItemOperationsAttempted=" + itoa(backup.Status.BackupItemOperationsAttempted) +
+			", BackupItemOperationsCompleted=" + itoa(backup.Status.BackupItemOperationsCompleted) +
+			", BackupItemOperationsFailed=" + itoa(backup.Status.BackupItemOperationsFailed)
+	}
+
+	return ""
+}
+
+// itoa converts an integer to a string without importing strconv
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	negative := i < 0
+	if negative {
+		i = -i
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = byte('0' + i%10)
+		i /= 10
+	}
+	if negative {
+		pos--
+		buf[pos] = '-'
+	}
+	return string(buf[pos:])
+}
