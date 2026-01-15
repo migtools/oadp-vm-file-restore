@@ -726,6 +726,118 @@ var _ = Describe("VirtualMachineBackupsDiscovery Controller Comprehensive Tests"
 			})
 		})
 
+		Describe("BackupAsyncOperationsIncomplete", func() {
+			It("should return false for nil backup", func() {
+				result := velerohelpers.BackupAsyncOperationsIncomplete(nil)
+				Expect(result).To(BeFalse())
+			})
+
+			It("should return false when no async operations were attempted", func() {
+				backup := &velerov1api.Backup{
+					Status: velerov1api.BackupStatus{
+						BackupItemOperationsAttempted: 0,
+						BackupItemOperationsCompleted: 0,
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsIncomplete(backup)
+				Expect(result).To(BeFalse())
+			})
+
+			It("should return false when all async operations completed successfully", func() {
+				backup := &velerov1api.Backup{
+					Status: velerov1api.BackupStatus{
+						BackupItemOperationsAttempted: 3,
+						BackupItemOperationsCompleted: 3,
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsIncomplete(backup)
+				Expect(result).To(BeFalse())
+			})
+
+			It("should return true when async operations are incomplete (none completed)", func() {
+				backup := &velerov1api.Backup{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "incomplete-backup",
+						Namespace: "velero",
+					},
+					Status: velerov1api.BackupStatus{
+						Phase:                         velerov1api.BackupPhaseCompleted,
+						BackupItemOperationsAttempted: 1,
+						BackupItemOperationsCompleted: 0, // DataUpload finished after backup was marked complete
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsIncomplete(backup)
+				Expect(result).To(BeTrue())
+			})
+
+			It("should return true when async operations are partially completed", func() {
+				backup := &velerov1api.Backup{
+					Status: velerov1api.BackupStatus{
+						BackupItemOperationsAttempted: 5,
+						BackupItemOperationsCompleted: 3,
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsIncomplete(backup)
+				Expect(result).To(BeTrue())
+			})
+
+			It("should return false when completed equals attempted (even with failures)", func() {
+				// This tests the case where all operations completed, but some failed
+				// The backup is still "complete" in terms of async operations
+				backup := &velerov1api.Backup{
+					Status: velerov1api.BackupStatus{
+						BackupItemOperationsAttempted: 3,
+						BackupItemOperationsCompleted: 3,
+						BackupItemOperationsFailed:    1,
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsIncomplete(backup)
+				Expect(result).To(BeFalse())
+			})
+		})
+
+		Describe("BackupAsyncOperationsReason", func() {
+			It("should return empty string for nil backup", func() {
+				result := velerohelpers.BackupAsyncOperationsReason(nil)
+				Expect(result).To(BeEmpty())
+			})
+
+			It("should return empty string when no async operations attempted", func() {
+				backup := &velerov1api.Backup{
+					Status: velerov1api.BackupStatus{
+						BackupItemOperationsAttempted: 0,
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsReason(backup)
+				Expect(result).To(BeEmpty())
+			})
+
+			It("should return empty string when all operations completed", func() {
+				backup := &velerov1api.Backup{
+					Status: velerov1api.BackupStatus{
+						BackupItemOperationsAttempted: 1,
+						BackupItemOperationsCompleted: 1,
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsReason(backup)
+				Expect(result).To(BeEmpty())
+			})
+
+			It("should return detailed reason when operations are incomplete", func() {
+				backup := &velerov1api.Backup{
+					Status: velerov1api.BackupStatus{
+						BackupItemOperationsAttempted: 1,
+						BackupItemOperationsCompleted: 0,
+						BackupItemOperationsFailed:    0,
+					},
+				}
+				result := velerohelpers.BackupAsyncOperationsReason(backup)
+				Expect(result).To(ContainSubstring("incomplete async operations"))
+				Expect(result).To(ContainSubstring("BackupItemOperationsAttempted=1"))
+				Expect(result).To(ContainSubstring("BackupItemOperationsCompleted=0"))
+			})
+		})
+
 		Describe("mapBackupToVMBD", func() {
 			var (
 				backupObj *velerov1api.Backup
