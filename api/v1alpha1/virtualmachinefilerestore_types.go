@@ -271,6 +271,10 @@ type RestoreInfo struct {
 
 // FileServingInfo summarizes how restored files can be accessed
 type FileServingInfo struct {
+	// PodName is the name of the file server pod created in the restore namespace.
+	// +optional
+	PodName string `json:"podName,omitempty"`
+
 	// SSH contains SSH/SFTP/SCP/rsync access information, if enabled.
 	// +optional
 	SSH *SSHServingInfo `json:"ssh,omitempty"`
@@ -325,6 +329,7 @@ type FileBrowserServingInfo struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Discovery",type=string,JSONPath=`.spec.backupsDiscoveryRef`
+// +kubebuilder:printcolumn:name="Pod-NS",type=string,JSONPath=`.status.createdNamespace`
 // +kubebuilder:printcolumn:name="Pod",type=string,JSONPath=`.status.fileServingInfo.podName`
 
 // VirtualMachineFileRestore is the Schema for the virtualmachinefilerestores API
