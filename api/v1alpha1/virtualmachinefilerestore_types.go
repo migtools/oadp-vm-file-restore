@@ -271,6 +271,10 @@ type RestoreInfo struct {
 
 // FileServingInfo summarizes how restored files can be accessed
 type FileServingInfo struct {
+	// PodName is the name of the file server pod created in the restore namespace.
+	// +optional
+	PodName string `json:"podName,omitempty"`
+
 	// SSH contains SSH/SFTP/SCP/rsync access information, if enabled.
 	// +optional
 	SSH *SSHServingInfo `json:"ssh,omitempty"`

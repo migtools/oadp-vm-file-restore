@@ -2077,13 +2077,19 @@ func (r *VirtualMachineFileRestoreReconciler) updateFileServingInfo(
 	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
 	service *corev1.Service,
 ) error {
+	// Assign to vmfr.Status immediately so PodName is always persisted even if
+	// the function returns early (e.g. restoreNamespace not yet set in status).
+	fileServingInfo := &oadpv1alpha1.FileServingInfo{
+		PodName: fmt.Sprintf("%s-fileserver", vmfr.Name),
+	}
+	vmfr.Status.FileServingInfo = fileServingInfo
+
 	restoreNamespace := vmfr.Status.CreatedNamespace
 	if restoreNamespace == "" {
 		return fmt.Errorf("restore namespace not set in status")
 	}
 
 	serviceName := service.Name
-	fileServingInfo := &oadpv1alpha1.FileServingInfo{}
 
 	// Build SSH serving info if SSH is enabled
 	if vmfr.Spec.FileAccess != nil && vmfr.Spec.FileAccess.SSH != nil {
@@ -2160,11 +2166,9 @@ func (r *VirtualMachineFileRestoreReconciler) updateFileServingInfo(
 		fileServingInfo.FileBrowser = fbInfo
 	}
 
-	// Update FileServingInfo in vmfr.Status
-	// Note: Status is NOT persisted here - caller will do a single status update
-	// to avoid race conditions from multiple status updates
-	vmfr.Status.FileServingInfo = fileServingInfo
-
+	// Status is NOT persisted here - caller does a single atomic status patch.
+	// fileServingInfo was already assigned to vmfr.Status.FileServingInfo above,
+	// so SSH/FileBrowser fields set above are already reflected in the status.
 	logger.V(0).Info("Prepared file serving info for status update",
 		"sshClusterAccess", func() string {
 			if fileServingInfo.SSH != nil {
