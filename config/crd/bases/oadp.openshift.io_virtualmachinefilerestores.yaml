@@ -249,6 +249,10 @@ spec:
                 description: Information about the file serving resources that have
                   been created.
                 properties:
+                  podName:
+                    description: PodName is the name of the file server pod created
+                      in the restore namespace.
+                    type: string
                   fileBrowser:
                     description: FileBrowser contains HTTPS file browser access information,
                       if enabled.
