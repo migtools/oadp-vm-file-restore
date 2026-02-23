@@ -24,7 +24,7 @@ spec:
       name: Discovery
       type: string
     - jsonPath: .status.createdNamespace
-      name: Namespace
+      name: Pod-NS
       type: string
     - jsonPath: .status.fileServingInfo.podName
       name: Pod
