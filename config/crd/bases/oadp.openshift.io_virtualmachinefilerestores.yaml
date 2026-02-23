@@ -23,6 +23,9 @@ spec:
     - jsonPath: .spec.backupsDiscoveryRef
       name: Discovery
       type: string
+    - jsonPath: .status.createdNamespace
+      name: Namespace
+      type: string
     - jsonPath: .status.fileServingInfo.podName
       name: Pod
       type: string

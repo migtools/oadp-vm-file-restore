@@ -329,6 +329,7 @@ type FileBrowserServingInfo struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Discovery",type=string,JSONPath=`.spec.backupsDiscoveryRef`
+// +kubebuilder:printcolumn:name="Namespace",type=string,JSONPath=`.status.createdNamespace`
 // +kubebuilder:printcolumn:name="Pod",type=string,JSONPath=`.status.fileServingInfo.podName`
 
 // VirtualMachineFileRestore is the Schema for the virtualmachinefilerestores API
