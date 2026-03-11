@@ -1530,6 +1530,16 @@ func (r *VirtualMachineFileRestoreReconciler) getBackupMetadata(
 		return oadptypes.BackupDiscoveryProgress{}, fmt.Errorf("failed to get Velero backup metadata: %w", err)
 	}
 
+	// Validate backup async operations are complete (e.g., data mover upload finished)
+	// This is a secondary validation - VMBD should have already filtered out incomplete backups
+	if velerohelpers.BackupAsyncOperationsIncomplete(veleroBackup) {
+		reason := velerohelpers.BackupAsyncOperationsReason(veleroBackup)
+		if reason == "" {
+			reason = "backup has incomplete async operations"
+		}
+		return oadptypes.BackupDiscoveryProgress{}, fmt.Errorf("%s", reason)
+	}
+
 	// Initialize progress with backup metadata
 	now := metav1.Now()
 	progress := oadptypes.BackupDiscoveryProgress{
