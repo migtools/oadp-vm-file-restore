@@ -345,6 +345,235 @@ func TestParseNamespacedName(t *testing.T) {
 	}
 }
 
+func TestBackupAsyncOperationsIncomplete(t *testing.T) {
+	tests := []struct {
+		name     string
+		backup   *veleroapi.Backup
+		expected bool
+	}{
+		{
+			name:     "nil backup - should return false (not incomplete)",
+			backup:   nil,
+			expected: false,
+		},
+		{
+			name: "no async operations attempted - should return false",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 0,
+					BackupItemOperationsCompleted: 0,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "all async operations completed - should return false",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 1,
+					BackupItemOperationsCompleted: 1,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "multiple async operations all completed - should return false",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 5,
+					BackupItemOperationsCompleted: 5,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "async operations attempted but none completed (zero) - should return true",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 1,
+					BackupItemOperationsCompleted: 0,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "async operations partially completed - should return true",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 3,
+					BackupItemOperationsCompleted: 2,
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "async operations with some failures but all accounted for - should return false",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 3,
+					BackupItemOperationsCompleted: 3,
+					BackupItemOperationsFailed:    1,
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "backup marked complete before DataUpload finished (race condition scenario) - should return true",
+			backup: &veleroapi.Backup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "backupvmtest1",
+					Namespace: "openshift-adp",
+				},
+				Status: veleroapi.BackupStatus{
+					Phase:                         veleroapi.BackupPhaseCompleted,
+					BackupItemOperationsAttempted: 1,
+					BackupItemOperationsCompleted: 0, // Never updated because backup finalized prematurely
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := BackupAsyncOperationsIncomplete(tt.backup)
+			if result != tt.expected {
+				t.Errorf("BackupAsyncOperationsIncomplete() = %v, expected %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBackupAsyncOperationsReason(t *testing.T) {
+	tests := []struct {
+		name           string
+		backup         *veleroapi.Backup
+		expectEmpty    bool
+		expectContains []string
+	}{
+		{
+			name:        "nil backup - should return empty",
+			backup:      nil,
+			expectEmpty: true,
+		},
+		{
+			name: "no async operations - should return empty",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 0,
+				},
+			},
+			expectEmpty: true,
+		},
+		{
+			name: "all completed - should return empty",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 1,
+					BackupItemOperationsCompleted: 1,
+				},
+			},
+			expectEmpty: true,
+		},
+		{
+			name: "incomplete operations - should return detailed reason",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 1,
+					BackupItemOperationsCompleted: 0,
+					BackupItemOperationsFailed:    0,
+				},
+			},
+			expectEmpty: false,
+			expectContains: []string{
+				"incomplete async operations",
+				"BackupItemOperationsAttempted=1",
+				"BackupItemOperationsCompleted=0",
+				"BackupItemOperationsFailed=0",
+			},
+		},
+		{
+			name: "partially completed with failures - should return detailed reason",
+			backup: &veleroapi.Backup{
+				Status: veleroapi.BackupStatus{
+					BackupItemOperationsAttempted: 5,
+					BackupItemOperationsCompleted: 3,
+					BackupItemOperationsFailed:    1,
+				},
+			},
+			expectEmpty: false,
+			expectContains: []string{
+				"BackupItemOperationsAttempted=5",
+				"BackupItemOperationsCompleted=3",
+				"BackupItemOperationsFailed=1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := BackupAsyncOperationsReason(tt.backup)
+
+			if tt.expectEmpty {
+				if result != "" {
+					t.Errorf("BackupAsyncOperationsReason() = %q, expected empty string", result)
+				}
+				return
+			}
+
+			if result == "" {
+				t.Error("BackupAsyncOperationsReason() returned empty string, expected non-empty reason")
+				return
+			}
+
+			for _, substr := range tt.expectContains {
+				if !containsSubstring(result, substr) {
+					t.Errorf("BackupAsyncOperationsReason() = %q, expected to contain %q", result, substr)
+				}
+			}
+		})
+	}
+}
+
+// containsSubstring checks if s contains substr
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+func TestItoa(t *testing.T) {
+	tests := []struct {
+		input    int
+		expected string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{10, "10"},
+		{123, "123"},
+		{-1, "-1"},
+		{-123, "-123"},
+		{1000000, "1000000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := itoa(tt.input)
+			if result != tt.expected {
+				t.Errorf("itoa(%d) = %q, expected %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestExtractKindFromGVK(t *testing.T) {
 	tests := []struct {
 		name         string
