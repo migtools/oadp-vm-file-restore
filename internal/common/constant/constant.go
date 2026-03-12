@@ -137,9 +137,9 @@ const (
 	FileServerServicePrefix  = "vmfr-service"
 
 	// Container images for file serving
-	VMFileServerImage       = "quay.io/konveyor/oadp-vmfr-access:latest"             // Main virtual machine file restore access for mounting VM disk images
-	SSHSidecarImage         = "quay.io/konveyor/oadp-vmfr-access-sshd:latest"        // SSH sidecar for SSH/SFTP/SCP/rsync access
-	FileBrowserSidecarImage = "quay.io/konveyor/oadp-vmfr-access-filebrowser:latest" // FileBrowser sidecar for HTTPS web-based file browser
+	VMFileServerImage       = "quay.io/konveyor/oadp-vmfr-access:oadp-1.6"             // Main virtual machine file restore access for mounting VM disk images
+	SSHSidecarImage         = "quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6"        // SSH sidecar for SSH/SFTP/SCP/rsync access
+	FileBrowserSidecarImage = "quay.io/konveyor/oadp-vmfr-access-filebrowser:oadp-1.6" // FileBrowser sidecar for HTTPS web-based file browser
 
 	// Default ports for file access methods
 	// Using unprivileged ports (>1024) since sidecars run as non-root

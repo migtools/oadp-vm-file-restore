@@ -66,7 +66,7 @@ spec:
   containers:
   # File Browser container - provides web-based file access
   - name: filebrowser
-    image: quay.io/konveyor/oadp-vmfr-access-filebrowser:latest
+    image: quay.io/konveyor/oadp-vmfr-access-filebrowser:oadp-1.6
     command:
       - /bin/bash
       - -c

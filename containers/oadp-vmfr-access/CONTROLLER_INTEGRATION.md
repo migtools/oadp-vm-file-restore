@@ -41,7 +41,7 @@ Before the controller creates a file-server pod, verify these prerequisites:
 
 ### ✅ Image Requirements
 
-- [ ] **Container image available:** `quay.io/konveyor/oadp-vmfr-access:latest`
+- [ ] **Container image available:** `quay.io/konveyor/oadp-vmfr-access:oadp-1.6`
 - [ ] **Image pull secrets configured** (if using private registry)
 
 ---
@@ -262,7 +262,7 @@ env:
 ```yaml
 containers:
 - name: file-server
-  image: quay.io/konveyor/oadp-vmfr-access:latest
+  image: quay.io/konveyor/oadp-vmfr-access:oadp-1.6
   imagePullPolicy: Always  # Use Always for :dev, IfNotPresent for tagged versions
 
   # Run detect-and-mount.sh to automatically mount all disks
@@ -469,7 +469,7 @@ spec:
 
   containers:
   - name: file-server
-    image: quay.io/konveyor/oadp-vmfr-access:latest
+    image: quay.io/konveyor/oadp-vmfr-access:oadp-1.6
     imagePullPolicy: Always
 
     # Run detect-and-mount.sh to automatically mount all disks
@@ -636,6 +636,6 @@ oc delete vmfr test-vm-restore
 
 **Last Updated:** Based on live cluster testing completed in Issue #6 (October 2025)
 
-**Container Image Version:** `quay.io/konveyor/oadp-vmfr-access:latest`
+**Container Image Version:** `quay.io/konveyor/oadp-vmfr-access:oadp-1.6`
 
 **Status:** ✅ Ready for controller implementation

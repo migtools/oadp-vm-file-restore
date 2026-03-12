@@ -82,7 +82,7 @@ spec:
   # SSHD sidecar container - provides read-only access via rsync/sftp with chroot
   # Uses custom pre-built image with chroot environment
   - name: sshd
-    image: quay.io/konveyor/oadp-vmfr-access-sshd:latest
+    image: quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6
     ports:
     - containerPort: 2222
       name: ssh

@@ -22,7 +22,7 @@
 #   - VM created with test data (test-vm)
 #   - VM stopped (safe for read-only mounting)
 #   - PVC containing VM disk: test-vm-rootdisk
-#   - Container image: quay.io/konveyor/oadp-vmfr-access:latest
+#   - Container image: quay.io/konveyor/oadp-vmfr-access:oadp-1.6
 #
 # ==============================================================================
 
@@ -45,7 +45,7 @@ spec:
   containers:
   - name: file-server
     # Our container with all the tools (libguestfs, qemu-img, FUSE, etc.)
-    image: quay.io/konveyor/oadp-vmfr-access:latest
+    image: quay.io/konveyor/oadp-vmfr-access:oadp-1.6
     imagePullPolicy: Always
 
     # Run detect-and-mount.sh to automatically mount VM disk filesystem

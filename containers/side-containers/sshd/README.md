@@ -44,21 +44,21 @@ make info
 **Single-arch:**
 ```bash
 # Podman or Docker
-podman build -t quay.io/konveyor/oadp-vmfr-access-sshd:latest -f Containerfile .
-docker build -t quay.io/konveyor/oadp-vmfr-access-sshd:latest -f Containerfile .
+podman build -t quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6 -f Containerfile .
+docker build -t quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6 -f Containerfile .
 ```
 
 **Multi-arch:**
 ```bash
 # Podman (native multi-arch support)
 podman build --platform linux/amd64,linux/arm64 \
-  --manifest quay.io/konveyor/oadp-vmfr-access-sshd:latest -f Containerfile .
-podman manifest push quay.io/konveyor/oadp-vmfr-access-sshd:latest
+  --manifest quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6 -f Containerfile .
+podman manifest push quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6
 
 # Docker (requires buildx)
 docker buildx create --name multiarch-builder --use  # One-time setup
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t quay.io/konveyor/oadp-vmfr-access-sshd:latest -f Containerfile --push .
+  -t quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6 -f Containerfile --push .
 ```
 
 **Supported Platforms:** linux/amd64, linux/arm64
@@ -72,7 +72,7 @@ make build-push
 
 # Manual
 podman login quay.io  # or docker login
-podman push quay.io/konveyor/oadp-vmfr-access-sshd:latest
+podman push quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6
 ```
 
 ## Deployment
@@ -102,7 +102,7 @@ spec:
     fsGroup: 1001
   containers:
   - name: sshd
-    image: quay.io/konveyor/oadp-vmfr-access-sshd:latest
+    image: quay.io/konveyor/oadp-vmfr-access-sshd:oadp-1.6
     ports:
     - containerPort: 2222
       name: ssh
