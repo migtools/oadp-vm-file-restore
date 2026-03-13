@@ -872,7 +872,7 @@ spec:
       level: "s0:c468,c664"  # Must match PVC's SELinux label
   containers:
   - name: file-server
-    image: quay.io/konveyor/oadp-vmfr-access:latest
+    image: quay.io/konveyor/oadp-vmfr-access:oadp-1.6
     command: ["/usr/local/bin/detect-and-mount.sh"]
     securityContext:
       privileged: true    # Required for /dev/kvm access

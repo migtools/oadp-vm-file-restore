@@ -145,7 +145,7 @@ jobs:
           podman login -u="${{ secrets.QUAY_USER }}" \
                       -p="${{ secrets.QUAY_TOKEN }}" \
                       quay.io
-          podman push quay.io/konveyor/oadp-vmfr-access:latest
+          podman push quay.io/konveyor/oadp-vmfr-access:oadp-1.6
 ```
 
 **Required GitHub Secrets:**
@@ -261,7 +261,7 @@ podman build --platform linux/arm64 \
 
 # Push manifest
 podman manifest push oadp-vmfr-access:latest \
-  quay.io/konveyor/oadp-vmfr-access:latest
+  quay.io/konveyor/oadp-vmfr-access:oadp-1.6
 ```
 
 ### Konflux (Downstream)

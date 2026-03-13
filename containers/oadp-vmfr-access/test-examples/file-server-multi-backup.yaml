@@ -13,7 +13,7 @@ spec:
 
   containers:
   - name: file-server
-    image: quay.io/konveyor/oadp-vmfr-access:latest
+    image: quay.io/konveyor/oadp-vmfr-access:oadp-1.6
     imagePullPolicy: Always
 
     # Run detect-and-mount.sh with BACKUP_PVC_MAP

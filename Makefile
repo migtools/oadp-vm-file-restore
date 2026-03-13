@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= quay.io/konveyor/oadp-vm-file-restore:latest
+IMG ?= quay.io/konveyor/oadp-vm-file-restore:oadp-1.6
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
