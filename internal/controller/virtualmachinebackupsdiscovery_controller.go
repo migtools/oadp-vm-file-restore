@@ -343,8 +343,11 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 		return candidates[i].CreationTimestamp.Time.After(candidates[j].CreationTimestamp.Time)
 	})
 
+	// Handle missing and filtered backups when explicit list is provided
+	invalidBackups, missingBackupsCount, filteredOutBackups := r.classifyRequestedBackups(vmbd, backupList)
+
 	// Initialize discovery progress tracking
-	discoveryProgress := make([]types.BackupDiscoveryProgress, len(candidates))
+	discoveryProgress := make([]types.BackupDiscoveryProgress, len(candidates), len(candidates)+len(filteredOutBackups))
 	for i, backup := range candidates {
 		discoveryProgress[i] = types.BackupDiscoveryProgress{
 			VeleroBackupInfo: types.VeleroBackupInfo{
@@ -356,9 +359,6 @@ func (r *VirtualMachineBackupsDiscoveryReconciler) initializeDiscovery(ctx conte
 			LastUpdated: &metav1.Time{Time: time.Now()},
 		}
 	}
-
-	// Handle missing and filtered backups when explicit list is provided
-	invalidBackups, missingBackupsCount, filteredOutBackups := r.classifyRequestedBackups(vmbd, backupList)
 	if len(vmbd.Spec.RequestedBackups) > 0 {
 		// Always set invalidBackups for explicit requests (even if empty)
 		// This ensures missing backups are properly tracked
