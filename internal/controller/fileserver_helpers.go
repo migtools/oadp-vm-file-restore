@@ -434,7 +434,8 @@ func buildFileServerPodSpec(config FileServerPodConfig) (*corev1.Pod, error) {
 	}
 
 	// Combine main container with sidecars
-	containers := []corev1.Container{mainContainer}
+	containers := make([]corev1.Container, 0, 1+len(sidecarContainers))
+	containers = append(containers, mainContainer)
 	containers = append(containers, sidecarContainers...)
 
 	// Build labels and annotations
@@ -1028,7 +1029,7 @@ func buildSSHSidecar(
 	}
 
 	// Add volumes for read-only root filesystem
-	var volumes []corev1.Volume
+	volumes := make([]corev1.Volume, 0, 6)
 
 	// EmptyDir volumes for runtime directories (required for read-only root filesystem)
 	sshEtcVolume := corev1.Volume{
@@ -1248,7 +1249,7 @@ func buildFileBrowserSidecar(
 	}
 
 	// Add volumes for FileBrowser
-	var volumes []corev1.Volume
+	volumes := make([]corev1.Volume, 0, 4)
 
 	// Database volume for FileBrowser state (in-memory)
 	databaseVolume := corev1.Volume{
