@@ -169,7 +169,7 @@ func (m *MockBackupContentsReader) SetupTestBackup(backupName string, vmName, vm
 	m.VMs[vmKey] = vm
 
 	// Create mock PVCs
-	metadataItems := make([]BackupResourceItem, 0)
+	metadataItems := make([]BackupResourceItem, 0, 1+len(pvcNames))
 	metadataItems = append(metadataItems, BackupResourceItem{
 		APIVersion: "kubevirt.io/v1",
 		Kind:       "VirtualMachine",
