@@ -20,7 +20,7 @@ LABEL name="oadp-vmfr-access" \
       version="1.5.0"
 
 # Install required licenses
-COPY LICENSE /licenses/LICENSE
+COPY containers/oadp-vmfr-access/LICENSE /licenses/LICENSE
 
 # ==============================================================================
 # Package Installation - All required tools for VM disk and filesystem access
@@ -142,8 +142,8 @@ RUN dnf install -y \
 # Copy helper scripts into container
 # - detect-and-mount.sh: Auto-detects disk formats and mounts filesystems read-only
 # - entrypoint.sh: Simple entrypoint that keeps container alive
-COPY scripts/detect-and-mount.sh /usr/local/bin/detect-and-mount.sh
-COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY containers/oadp-vmfr-access/scripts/detect-and-mount.sh /usr/local/bin/detect-and-mount.sh
+COPY containers/oadp-vmfr-access/scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Make scripts executable
 RUN chmod +x /usr/local/bin/detect-and-mount.sh /usr/local/bin/entrypoint.sh
