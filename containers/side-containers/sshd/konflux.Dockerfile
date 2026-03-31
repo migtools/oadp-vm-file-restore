@@ -1,12 +1,12 @@
 FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:rhel_9_golang_1.25 AS builder
 WORKDIR /workspace
-COPY oadp-sshd.go .
+COPY containers/side-containers/sshd/oadp-sshd.go .
 ENV GOEXPERIMENT strictfipsruntime
 RUN CGO_ENABLED=1 GOOS=linux go build -tags strictfipsruntime -ldflags="-s -w" -o oadp-sshd oadp-sshd.go
 
 FROM registry.redhat.io/ubi9/ubi-minimal:latest
 
-COPY LICENSE /licenses/LICENSE
+COPY containers/side-containers/sshd/LICENSE /licenses/LICENSE
 
 # Install required packages
 RUN microdnf install -y \
@@ -61,7 +61,7 @@ RUN for binary in /usr/bin/rsync /usr/bin/scp /bin/bash /usr/libexec/openssh/sft
 COPY --from=builder /workspace/oadp-sshd /oadp/bin/oadp-sshd
 
 # Copy entrypoint script
-COPY entrypoint.sh /entrypoint.sh
+COPY containers/side-containers/sshd/entrypoint.sh /entrypoint.sh
 
 # Make binaries executable
 RUN chmod 711 /oadp/bin/oadp-sshd \
