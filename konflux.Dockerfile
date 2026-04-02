@@ -1,4 +1,5 @@
 FROM brew.registry.redhat.io/rh-osbs/openshift-golang-builder:rhel_9_golang_1.25 AS builder
+ENV GOTOOLCHAIN=go1.25.7
 COPY . .
 WORKDIR $APP_ROOT/app/
 COPY go.mod go.mod
