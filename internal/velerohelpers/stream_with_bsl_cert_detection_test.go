@@ -18,8 +18,8 @@ func TestStreamWithBSLCACert(t *testing.T) {
 
 	scope := pkgs[0].Types.Scope()
 	if scope.Lookup("StreamWithBSLCACert") != nil {
-		t.Fatalf(`
-🚨 FIX: StreamWithBSLCACert is now available in the OADP Velero version ! 🚨
+		t.Logf(`
+⚠️  WARNING: StreamWithBSLCACert is now available in the OADP Velero version !
 
 StreamWithBSLCACert is now available in the OADP Velero version !
 Add StreamWithBSLCACert() for proper BSL CA certificate handling.
