@@ -4,7 +4,7 @@ Design and create container with tools to access restored file systems
 
 ## Overview
 
-This container provides a standardized environment with comprehensive tools to access and mount VM disk images (qcow2, raw) and various filesystems (ext4, xfs, ntfs, btrfs, etc.) from Velero/OADP backups. It serves as a toolbox for the VMFR (VirtualMachineFileRestore) controller to create file-serving pods.
+This container provides a standardized environment with comprehensive tools to access and mount VM disk images (qcow2, raw) and various filesystems (ext4, xfs, ntfs, fat) from Velero/OADP backups. It serves as a toolbox for the VMFR (VirtualMachineFileRestore) controller to create file-serving pods.
 
 ## Key Concepts
 
@@ -52,7 +52,7 @@ Understanding the core technologies that make this container work:
 - ✅ No kernel modules required (unlike NBD - Network Block Device)
 - ✅ Safer than kernel-level mounting
 - ✅ Works in containers without dangerous kernel access
-- ✅ Standard technology (used by sshfs, ntfs-3g, many others)
+- ✅ Standard technology (used by sshfs, libguestfs, many others)
 
 **Security advantage:** All filesystem code runs as a regular process, not in the kernel.
 
@@ -98,7 +98,7 @@ Without KVM:  libguestfs ready in 5+ minutes  ❌ (often times out)
 After researching KubeVirt's approach and VM filesystem requirements, we chose an **all-in-one container** approach over a plugin architecture:
 
 **Rationale:**
-- ✅ **Limited, well-defined set**: VM filesystem types are finite and well-known (ext4, xfs, ntfs, btrfs, fat)
+- ✅ **Limited, well-defined set**: VM filesystem types are finite and well-known (ext4, xfs, ntfs, fat)
 - ✅ **Lightweight tooling**: All required packages combined are relatively small (~200-300MB)
 - ✅ **Simpler deployment**: Single image, no plugin management complexity
 - ✅ **Easier debugging**: All tools in one place, straightforward troubleshooting
@@ -154,11 +154,12 @@ This section explains **why** we need each tool and **what** it does, so everyon
 
 #### Category 1: VM Disk Image Tools
 
-**`libguestfs-tools`** - **CRITICAL: Our primary tool**
+**`libguestfs`** - **CRITICAL: Our primary tool**
 - **Why:** Allows accessing VM disk images without starting the VM
-- **What:** Provides `guestmount` (FUSE-based mounting), `guestfish` (disk inspection), and tools to read/modify disk images
+- **What:** Provides `guestmount` (FUSE-based mounting), `guestfish` (disk inspection), `guestunmount`, and tools to read/modify disk images
 - **Use Case:** Mount backed-up VM disks to extract files without booting the VM
 - **Example:** `guestmount -a disk.qcow2 -i /mnt/disk --ro`
+- **Note:** In RHEL 9, `guestmount`/`guestfish` are in the base `libguestfs` package (`libguestfs-tools` does not exist as a separate package in el9)
 
 **`libguestfs-xfs`** - **CRITICAL: Required for RHEL/CentOS VMs**
 - **Why:** XFS is the default filesystem for RHEL 7+, CentOS 7+, Fedora (most common in OpenShift)
@@ -199,17 +200,17 @@ This section explains **why** we need each tool and **what** it does, so everyon
 - **Use Case:** Access ext4 filesystems inside VM disk images
 - **Coverage:** ~15% of VMs (Ubuntu/Debian-based)
 
-**`btrfs-progs`** - **Btrfs (SUSE, modern Fedora)**
-- **Why:** Btrfs is used in SUSE Linux, some Fedora installations
-- **What:** Tools to read Btrfs filesystems (copy-on-write, snapshots)
-- **Use Case:** Access Btrfs filesystems if VM uses it
-- **Coverage:** ~3% of VMs
-
-**`ntfs-3g`** - **NTFS (Windows Server VMs)**
+**`libguestfs-winsupport`** - **NTFS (Windows Server VMs)**
 - **Why:** NTFS is the Windows filesystem
-- **What:** FUSE-based NTFS driver for reading/writing Windows filesystems
+- **What:** Injects NTFS driver into the libguestfs appliance via supermin
 - **Use Case:** Access Windows Server VM disk images
 - **Coverage:** ~2% of VMs (Windows workloads)
+- **Note:** Replaces `ntfs-3g` which is only available in EPEL, not in RHEL repos. Available in RHEL 9 AppStream.
+
+> **Btrfs is NOT supported:** Red Hat deprecated Btrfs in RHEL 7 and fully removed it in RHEL 8+.
+> There is no `btrfs-progs` in RHEL 9 repos (only available via EPEL), and the libguestfs appliance
+> kernel (based on RHEL) lacks the `btrfs.ko` module. VMs using Btrfs (primarily SUSE guests)
+> cannot be mounted. This is a known limitation.
 
 **`dosfstools`** - **FAT32 (EFI System Partitions)**
 - **Why:** FAT32 is used for EFI System Partitions (ESP) on **all** UEFI VMs
@@ -300,10 +301,14 @@ Uses `guestmount` from libguestfs instead of NBD for Kubernetes compatibility:
 **Supported Filesystems:**
 - ext2/ext3/ext4 (Linux)
 - XFS (Linux)
-- Btrfs (Linux)
-- NTFS (Windows)
+- NTFS (Windows) — via `libguestfs-winsupport`
 - FAT/FAT32 (boot partitions)
 - LVM (Logical Volume Manager)
+- ~~Btrfs~~ — not supported on RHEL 9 (no kernel module or userspace tools available)
+
+**Not Supported:**
+- **LUKS-encrypted VM disks** — `cryptsetup` is not included; guestmount cannot unlock encrypted partitions. Supporting LUKS would also require passing decryption keys via Kubernetes Secrets and CRD changes, not just a package install.
+- **Btrfs filesystems** — removed from RHEL 8+; primarily affects SUSE guest VMs
 
 **Read-Only Safety:**
 - All filesystems mounted with `--ro` (read-only)

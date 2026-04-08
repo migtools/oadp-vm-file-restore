@@ -17,10 +17,10 @@
 # Supported Filesystems:
 #   - ext2/ext3/ext4 (Linux)
 #   - XFS (Linux)
-#   - Btrfs (Linux)
-#   - NTFS (Windows)
+#   - NTFS (Windows) — via libguestfs-winsupport
 #   - FAT/FAT32 (Boot partitions, Windows)
 #   - LVM (Logical Volume Manager)
+#   Note: Btrfs is NOT supported on RHEL 9 (no kernel module or userspace tools)
 #
 # Directory Structure:
 #   When BACKUP_PVC_MAP is provided, creates structured mounts:
@@ -161,7 +161,7 @@ detect_disk_format() {
 #
 # guestmount capabilities:
 #   - Auto-detects partitions and filesystems (-i flag)
-#   - Supports LVM, RAID, encryption
+#   - Supports LVM, RAID (encryption/LUKS is NOT supported)
 #   - Works with qcow2, raw, vmdk, vdi formats
 #   - Read-only mounting for data safety
 #
