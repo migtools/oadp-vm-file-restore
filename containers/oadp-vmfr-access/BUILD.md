@@ -176,24 +176,22 @@ For Konflux configuration, see Red Hat internal documentation.
 
 #### Error: "No package libguestfs-tools available"
 
-**Cause:** Fedora version too old or mirrors not synced.
+**Cause:** In RHEL 9, `libguestfs-tools` does not exist as a separate package. The `guestmount`, `guestfish`, and `guestunmount` binaries are provided by the base `libguestfs` package.
 
-**Fix:**
-1. Verify Fedora 42 is available: https://fedoraproject.org/
-2. Try with explicit mirror: `dnf install --setopt=fastestmirror=false ...`
+**Fix:** Use `libguestfs` instead of `libguestfs-tools` in the Dockerfile.
 
 ### Konflux Build Issues
 
-#### Error: "Unable to find a match: libguestfs-tools"
+#### Error: "Unable to find a match: libguestfs"
 
-**Cause:** Running konflux.Dockerfile outside the Konflux environment.
+**Cause:** Running konflux.Dockerfile outside the Konflux environment. Packages like `libguestfs`, `qemu-img`, `e2fsprogs`, `xfsprogs`, `dosfstools`, `parted`, and `gdisk` are in RHEL AppStream/BaseOS repos, not in the free UBI repos.
 
 **Fix:** Use the Fedora Dockerfile for local development:
 ```bash
 podman build -f Dockerfile -t oadp-vmfr-access:dev .
 ```
 
-The konflux.Dockerfile is designed for automated Konflux builds only.
+The konflux.Dockerfile is designed for automated Konflux builds only (which have access to full RHEL repos).
 
 ### Build is Slow
 

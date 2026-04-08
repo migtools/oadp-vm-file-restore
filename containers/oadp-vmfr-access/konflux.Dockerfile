@@ -32,11 +32,14 @@ RUN dnf install -y \
     # =========================================================================
     # Category 1: VM Disk Image Tools - CRITICAL for reading VM disk images
     # =========================================================================
-    # libguestfs-tools: PRIMARY TOOL - Mount VM disks without booting the VM
-    #   - Provides: guestmount (FUSE-based mounting), guestfish (inspection)
+    # libguestfs: PRIMARY TOOL - Mount VM disks without booting the VM
+    #   - Provides: guestmount (FUSE-based mounting), guestfish (inspection),
+    #     guestunmount, virt-copy-in, virt-copy-out, virt-tar-in, virt-tar-out
     #   - Use case: Mount backed-up qcow2/raw disk images to extract files
     #   - Example: guestmount -a disk.qcow2 -i /mnt/disk --ro
-    libguestfs-tools \
+    #   - Note: In RHEL 9, guestmount/guestfish moved into the base libguestfs
+    #     package (libguestfs-tools does not exist as a separate package in el9)
+    libguestfs \
     #
     # libguestfs-xfs: CRITICAL - Required for RHEL/CentOS/Fedora VMs
     #   - Why: XFS is default filesystem for RHEL 7+, CentOS 7+, Fedora
@@ -74,16 +77,26 @@ RUN dnf install -y \
     #   - Coverage: ~80% of OpenShift VMs
     xfsprogs \
     #
-    # btrfs-progs: Btrfs filesystem support (SUSE, modern Fedora)
-    #   - Why: Btrfs used in SUSE Linux, some Fedora installations
-    #   - Coverage: ~3% of VMs
-    btrfs-progs \
-    #
-    # ntfs-3g: NTFS filesystem support (Windows Server VMs)
+    # libguestfs-winsupport: NTFS filesystem support (Windows Server VMs)
     #   - Why: NTFS is the Windows filesystem
-    #   - What: FUSE-based NTFS driver for reading/writing Windows filesystems
+    #   - What: Injects NTFS driver into the libguestfs appliance via supermin
+    #   - Available in: RHEL 9 AppStream (official Red Hat package)
+    #   - Note: Replaces ntfs-3g which is only available in EPEL, not in RHEL repos
     #   - Coverage: ~2% of VMs (Windows workloads)
-    ntfs-3g \
+    libguestfs-winsupport \
+    #
+    # NOTE: Btrfs is NOT supported on RHEL 9
+    #   - Red Hat deprecated Btrfs in RHEL 7 and fully removed it in RHEL 8+
+    #   - No kernel module (btrfs.ko), no btrfs-progs, no libguestfs-btrfs in RHEL 9
+    #   - btrfs-progs is only available via EPEL, and even then the libguestfs
+    #     appliance kernel (based on RHEL) lacks the btrfs module
+    #   - Impact: VMs using Btrfs (primarily SUSE guests) cannot be mounted
+    #
+    # NOTE: LUKS-encrypted VM disks are NOT supported
+    #   - cryptsetup is not included; guestmount cannot unlock encrypted partitions
+    #   - Supporting LUKS would also require passing decryption keys via Kubernetes
+    #     Secrets and CRD changes — not just a package install
+    #
     #
     # dosfstools: FAT12/FAT16/FAT32 filesystem support (EFI System Partitions)
     #   - Why: FAT32 used for EFI System Partitions (ESP) on ALL UEFI VMs
@@ -111,29 +124,19 @@ RUN dnf install -y \
     gdisk \
     #
     # =========================================================================
-    # Category 5: Utility Tools - Detection & Debugging
+    # Category 5: Utility Tools
     # =========================================================================
+    # Pre-installed in UBI9 base image (no need to install explicitly):
+    #   - util-linux (lsblk, blkid, mount, mountpoint)
+    #   - findutils (find, xargs)
+    #   - coreutils-single (mkdir, basename, date, sleep, ls, cat, etc.)
+    #     Note: Do NOT install 'coreutils' — it conflicts with coreutils-single
+    #   - python3 (JSON parsing in detect-and-mount.sh)
+    #
     # file: File type detection by content (magic numbers)
     #   - Why: Verify actual file type, not just extension
     #   - Example: file disk.qcow2 → "QEMU QCOW2 Image (v3)"
     file \
-    #
-    # util-linux: Block device utilities
-    #   - Provides: lsblk, blkid, mount
-    #   - Use case: Inspect mounted filesystems, debug block devices
-    util-linux \
-    #
-    # findutils, coreutils: Standard Unix tools
-    #   - Provides: find, ls, cat, grep, awk, etc.
-    #   - Use case: Used by detect-and-mount.sh automation scripts
-    findutils \
-    coreutils \
-    #
-    # python3: Python interpreter for JSON parsing
-    #   - Why: detect-and-mount.sh uses Python for parsing BACKUP_PVC_MAP JSON
-    #   - What: Provides reliable JSON parsing (more robust than jq or bash)
-    #   - Use case: Parse backup-to-PVC mapping from VMFR controller
-    python3 \
     #
     # Clean up dnf cache to reduce image size
     && dnf clean all \
