@@ -8,7 +8,7 @@ require (
 	github.com/onsi/gomega v1.40.0
 	github.com/openshift/api v0.0.0-20240830023148-b7d0481c9094
 	github.com/sirupsen/logrus v1.9.4
-	github.com/vmware-tanzu/velero v1.15.0
+	github.com/vmware-tanzu/velero v1.18.2-rc.2
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.53.0
 	golang.org/x/tools v0.45.0
@@ -109,4 +109,6 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
 
-replace github.com/vmware-tanzu/velero => github.com/openshift/velero v0.10.2-0.20260625184912-30af95b19e2d
+replace github.com/vmware-tanzu/velero => github.com/openshift/velero v0.10.2-0.20260630214535-9f9d4dc4bf29
+
+exclude github.com/kcp-dev/kcp/sdk v0.0.0-00010101000000-000000000000
