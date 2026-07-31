@@ -1,8 +1,6 @@
 approvers:
   - kaovilai
   - mpryc
-  - mrnold
-  - rayfordj
   - shawn-hurley
   - shubham-pampattiwar
   - sseago
@@ -10,7 +8,6 @@ approvers:
 reviewers:
   - kaovilai
   - mpryc
-  - mrnold
   - shubham-pampattiwar
   - sseago
   - weshayutin
