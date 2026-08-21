@@ -208,8 +208,8 @@ github.com/openshift/api v0.0.0-20240830023148-b7d0481c9094 h1:J1wuGhVxpsHykZBa6
 github.com/openshift/api v0.0.0-20240830023148-b7d0481c9094/go.mod h1:CxgbWAlvu2iQB0UmKTtRu1YfepRg1/vJ64n2DlIEVz4=
 github.com/openshift/custom-resource-status v1.1.2 h1:C3DL44LEbvlbItfd8mT5jWrqPfHnSOQoQf/sypqA6A4=
 github.com/openshift/custom-resource-status v1.1.2/go.mod h1:DB/Mf2oTeiAmVVX1gN+NEqweonAPY0TKUwADizj8+ZA=
-github.com/openshift/velero v0.10.2-0.20260701234155-b7b4cdc9cc18 h1:qaH/w53f3k7rdQIMEaNCEHdQ0cnOOu5BnZP415PUbNM=
-github.com/openshift/velero v0.10.2-0.20260701234155-b7b4cdc9cc18/go.mod h1:+M4c2Q5ewkyTAKNh4Y+Z+EOX7u9bZo1xtlo98dpx1Gc=
+github.com/openshift/velero v0.10.2-0.20260731161015-9bb8423aba58 h1:4WYJmfx7GqYdxhpV+M/dMV5TxC3QogG8ZpHjkxzAiAE=
+github.com/openshift/velero v0.10.2-0.20260731161015-9bb8423aba58/go.mod h1:+M4c2Q5ewkyTAKNh4Y+Z+EOX7u9bZo1xtlo98dpx1Gc=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
