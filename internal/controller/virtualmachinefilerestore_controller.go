@@ -4000,7 +4000,7 @@ func (r *VirtualMachineFileRestoreReconciler) handleVeleroRestoreCleanup(
 	return true, nil
 }
 
-// handleResourceCleanup cleans up namespace, PVCs, and secrets based on namespace ownership.
+// handleResourceCleanup cleans up namespace, PVCs, secrets, and file server access resources based on namespace ownership.
 // For temporary namespaces created by the controller, the entire namespace is deleted
 // (which cascades to all contained resources). For user-provided namespaces, only
 // resources created by this controller are individually deleted.
@@ -4097,6 +4097,12 @@ func (r *VirtualMachineFileRestoreReconciler) handleResourceCleanup(
 			return false, err
 		}
 
+		// Delete the file server ServiceAccount and SCC RoleBinding when no other
+		// active VMFR is using the shared user-provided namespace.
+		if err := r.deleteFileServerAccess(ctx, logger, vmfr, restoreNamespace); err != nil {
+			return false, err
+		}
+
 		logger.V(0).Info("Completed cleanup of controller resources",
 			"namespace", restoreNamespace)
 	}
@@ -4117,6 +4123,75 @@ func (r *VirtualMachineFileRestoreReconciler) handleResourceCleanup(
 
 	logger.V(0).Info("Removed VMFileRestoreFinalizer, VMFR cleanup complete")
 	return false, nil
+}
+
+// deleteFileServerAccess removes controller-created file server access resources
+// from a user-provided namespace when no other active VMFR uses that namespace.
+func (r *VirtualMachineFileRestoreReconciler) deleteFileServerAccess(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	namespace string,
+) error {
+	vmfrList := &oadpv1alpha1.VirtualMachineFileRestoreList{}
+	if err := r.List(ctx, vmfrList); err != nil {
+		logger.Error(err, "Failed to list VMFRs while cleaning up file server access")
+		return fmt.Errorf("failed to list VMFRs while cleaning up file server access: %w", err)
+	}
+
+	for i := range vmfrList.Items {
+		otherVMFR := &vmfrList.Items[i]
+		if otherVMFR.UID == vmfr.UID || otherVMFR.DeletionTimestamp != nil {
+			continue
+		}
+		if otherVMFR.Status.CreatedNamespace == namespace || otherVMFR.Spec.RestoreNamespace == namespace {
+			logger.V(0).Info("Preserving shared file server access resources",
+				"namespace", namespace,
+				"vmfr", fmt.Sprintf("%s/%s", otherVMFR.Namespace, otherVMFR.Name))
+			return nil
+		}
+	}
+
+	roleBinding := &rbacv1.RoleBinding{}
+	roleBindingKey := types.NamespacedName{
+		Name:      "vmfr-file-server-privileged",
+		Namespace: namespace,
+	}
+	if err := r.Get(ctx, roleBindingKey, roleBinding); err != nil {
+		if !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to get file server SCC RoleBinding", "namespace", namespace)
+			return fmt.Errorf("failed to get file server SCC RoleBinding: %w", err)
+		}
+	} else if isControllerManagedResource(roleBinding) {
+		if err := r.Delete(ctx, roleBinding); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete file server SCC RoleBinding", "namespace", namespace)
+			return fmt.Errorf("failed to delete file server SCC RoleBinding: %w", err)
+		}
+	}
+
+	serviceAccount := &corev1.ServiceAccount{}
+	serviceAccountKey := types.NamespacedName{
+		Name:      "vmfr-file-server",
+		Namespace: namespace,
+	}
+	if err := r.Get(ctx, serviceAccountKey, serviceAccount); err != nil {
+		if !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to get file server ServiceAccount", "namespace", namespace)
+			return fmt.Errorf("failed to get file server ServiceAccount: %w", err)
+		}
+	} else if isControllerManagedResource(serviceAccount) {
+		if err := r.Delete(ctx, serviceAccount); err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "Failed to delete file server ServiceAccount", "namespace", namespace)
+			return fmt.Errorf("failed to delete file server ServiceAccount: %w", err)
+		}
+	}
+
+	logger.V(0).Info("Deleted file server access resources", "namespace", namespace)
+	return nil
+}
+
+func isControllerManagedResource(obj client.Object) bool {
+	return obj.GetLabels()[constant.ManagedByLabel] == constant.ManagedByLabelValue
 }
 
 // deleteRestoredPVCs removes PVCs that were created by this VMFR's Velero Restore operations.
