@@ -2254,6 +2254,10 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		}
 		logger.V(1).Info("Using existing restore namespace", "namespace", vmfr.Spec.RestoreNamespace)
 
+		if err := r.ensureFileServerAccess(ctx, logger, vmfr, vmfr.Spec.RestoreNamespace); err != nil {
+			return "", err
+		}
+
 		// Update VMFR status with the namespace (same as we do for temporary namespaces)
 		patch := client.MergeFrom(vmfr.DeepCopy())
 		vmfr.Status.CreatedNamespace = vmfr.Spec.RestoreNamespace
@@ -2313,6 +2317,29 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		logger.V(0).Info("Created temporary restore namespace", "namespace", namespaceName)
 	}
 
+	if err := r.ensureFileServerAccess(ctx, logger, vmfr, namespaceName); err != nil {
+		return "", err
+	}
+
+	// Update VMFR status with the created namespace
+	patch := client.MergeFrom(vmfr.DeepCopy())
+	vmfr.Status.CreatedNamespace = namespaceName
+	if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
+		logger.Error(err, "Failed to update status with created namespace")
+		return "", fmt.Errorf("failed to update status with created namespace: %w", err)
+	}
+
+	return namespaceName, nil
+}
+
+// ensureFileServerAccess ensures the file server ServiceAccount and its
+// privileged SCC RoleBinding exist in the restore namespace.
+func (r *VirtualMachineFileRestoreReconciler) ensureFileServerAccess(
+	ctx context.Context,
+	logger logr.Logger,
+	vmfr *oadpv1alpha1.VirtualMachineFileRestore,
+	namespaceName string,
+) error {
 	// Create ServiceAccount for file server pods with privileged SCC access
 	serviceAccountName := "vmfr-file-server"
 	serviceAccount := &corev1.ServiceAccount{
@@ -2326,12 +2353,12 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		},
 	}
 
-	err = r.Create(ctx, serviceAccount)
+	err := r.Create(ctx, serviceAccount)
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			logger.V(1).Info("ServiceAccount already exists", "serviceAccount", serviceAccountName, "namespace", namespaceName)
 		} else {
-			return "", fmt.Errorf("failed to create ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
+			return fmt.Errorf("failed to create ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
 		}
 	} else {
 		logger.V(0).Info("Created ServiceAccount for file server", "serviceAccount", serviceAccountName, "namespace", namespaceName)
@@ -2372,21 +2399,13 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 			// This is expected on non-OpenShift clusters (vanilla Kubernetes, Kind, etc.)
 			logger.V(0).Info("Skipping SCC RoleBinding creation - not running on OpenShift", "namespace", namespaceName)
 		} else {
-			return "", fmt.Errorf("failed to create SCC RoleBinding in namespace '%s': %w", namespaceName, err)
+			return fmt.Errorf("failed to create SCC RoleBinding in namespace '%s': %w", namespaceName, err)
 		}
 	} else {
 		logger.V(0).Info("Bound ServiceAccount to privileged SCC", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
 	}
 
-	// Update VMFR status with the created namespace
-	patch := client.MergeFrom(vmfr.DeepCopy())
-	vmfr.Status.CreatedNamespace = namespaceName
-	if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
-		logger.Error(err, "Failed to update status with created namespace")
-		return "", fmt.Errorf("failed to update status with created namespace: %w", err)
-	}
-
-	return namespaceName, nil
+	return nil
 }
 
 // findExistingVeleroRestore finds an existing Velero Restore for the given backup and VMFR.

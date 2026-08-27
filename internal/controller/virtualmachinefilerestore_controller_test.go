@@ -415,6 +415,67 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 			Expect(ns.Labels).NotTo(HaveKey(constant.VMFRTempNamespaceLabel))
 		})
 
+		It("should create file server access resources in a specified namespace", func() {
+			existingNamespace := &corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "existing-restore-ns",
+				},
+			}
+
+			vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "oadp.openshift.io/v1alpha1",
+					Kind:       "VirtualMachineFileRestore",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vmfr",
+					Namespace: namespace,
+					UID:       "test-vmfr-uid",
+				},
+				Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+					RestoreNamespace: "existing-restore-ns",
+				},
+			}
+
+			client := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(existingNamespace, vmfr).
+				WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+				Build()
+
+			reconciler := &VirtualMachineFileRestoreReconciler{
+				Client:        client,
+				Scheme:        scheme,
+				OADPNamespace: oadpNamespace,
+			}
+
+			restoreNamespace, err := reconciler.ensureRestoreNamespace(ctx, zap.New(), vmfr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(restoreNamespace).To(Equal("existing-restore-ns"))
+
+			serviceAccount := &corev1.ServiceAccount{}
+			Expect(client.Get(ctx, types.NamespacedName{
+				Name:      "vmfr-file-server",
+				Namespace: "existing-restore-ns",
+			}, serviceAccount)).To(Succeed())
+
+			roleBinding := &rbacv1.RoleBinding{}
+			Expect(client.Get(ctx, types.NamespacedName{
+				Name:      "vmfr-file-server-privileged",
+				Namespace: "existing-restore-ns",
+			}, roleBinding)).To(Succeed())
+			Expect(roleBinding.RoleRef).To(Equal(rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     "system:openshift:scc:privileged",
+			}))
+			Expect(roleBinding.Subjects).To(ConsistOf(rbacv1.Subject{
+				Kind:      "ServiceAccount",
+				Name:      "vmfr-file-server",
+				Namespace: "existing-restore-ns",
+			}))
+		})
+
 		It("should fail when specified namespace does not exist", func() {
 			discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
 				ObjectMeta: metav1.ObjectMeta{
