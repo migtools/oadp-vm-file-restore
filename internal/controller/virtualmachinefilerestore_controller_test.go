@@ -2217,9 +2217,6 @@ func TestHandleResourceCleanup(t *testing.T) {
 		existingPods           []*corev1.Pod
 		existingServices       []*corev1.Service
 		existingRoutes         []*routev1.Route
-		existingServiceAccount *corev1.ServiceAccount
-		existingRoleBinding    *rbacv1.RoleBinding
-		otherVMFRs             []*oadpv1alpha1.VirtualMachineFileRestore
 		expectRequeue          bool
 		expectError            bool
 		expectFinalizerRemoved bool
@@ -2227,7 +2224,6 @@ func TestHandleResourceCleanup(t *testing.T) {
 		expectPodsDeleted      int
 		expectServicesDeleted  int
 		expectRoutesDeleted    int
-		expectAccessDeleted    bool
 	}{
 		{
 			name: "finalizer not present returns false",
@@ -2365,105 +2361,6 @@ func TestHandleResourceCleanup(t *testing.T) {
 			expectRoutesDeleted:    1,
 		},
 		{
-			name: "cleans up controller-created file server access resources",
-			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vmfr",
-					Namespace: "openshift-adp",
-					UID:       "test-uid",
-					Finalizers: []string{
-						constant.VMFileRestoreFinalizer,
-					},
-				},
-				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
-					CreatedNamespace: "user-ns",
-				},
-			},
-			existingNamespace: &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{Name: "user-ns"},
-			},
-			existingServiceAccount: &corev1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "vmfr-file-server",
-					Namespace: "user-ns",
-					Labels: map[string]string{
-						constant.ManagedByLabel:      constant.ManagedByLabelValue,
-						constant.VMFROriginUUIDLabel: "test-uid",
-					},
-				},
-			},
-			existingRoleBinding: &rbacv1.RoleBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "vmfr-file-server-privileged",
-					Namespace: "user-ns",
-					Labels: map[string]string{
-						constant.ManagedByLabel:      constant.ManagedByLabelValue,
-						constant.VMFROriginUUIDLabel: "test-uid",
-					},
-				},
-			},
-			expectRequeue:          false,
-			expectError:            false,
-			expectFinalizerRemoved: true,
-			expectAccessDeleted:    true,
-		},
-		{
-			name: "preserves shared file server access resources",
-			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vmfr",
-					Namespace: "openshift-adp",
-					UID:       "test-uid",
-					Finalizers: []string{
-						constant.VMFileRestoreFinalizer,
-					},
-				},
-				Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
-					CreatedNamespace: "user-ns",
-				},
-			},
-			otherVMFRs: []*oadpv1alpha1.VirtualMachineFileRestore{
-				{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "other-vmfr",
-						Namespace: "openshift-adp",
-						UID:       "other-uid",
-					},
-					Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
-						RestoreNamespace: "user-ns",
-					},
-					Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
-						CreatedNamespace: "user-ns",
-					},
-				},
-			},
-			existingNamespace: &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{Name: "user-ns"},
-			},
-			existingServiceAccount: &corev1.ServiceAccount{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "vmfr-file-server",
-					Namespace: "user-ns",
-					Labels: map[string]string{
-						constant.ManagedByLabel: constant.ManagedByLabelValue,
-					},
-				},
-			},
-			existingRoleBinding: &rbacv1.RoleBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "vmfr-file-server-privileged",
-					Namespace: "user-ns",
-					Labels: map[string]string{
-						constant.ManagedByLabel: constant.ManagedByLabelValue,
-					},
-				},
-			},
-			expectRequeue:          false,
-			expectError:            false,
-			expectFinalizerRemoved: true,
-			expectAccessDeleted:    false,
-		},
-		{
 			name: "cleans up multiple routes in user namespace",
 			vmfr: &oadpv1alpha1.VirtualMachineFileRestore{
 				ObjectMeta: metav1.ObjectMeta{
@@ -2569,15 +2466,6 @@ func TestHandleResourceCleanup(t *testing.T) {
 			}
 			for _, route := range tt.existingRoutes {
 				objects = append(objects, route)
-			}
-			if tt.existingServiceAccount != nil {
-				objects = append(objects, tt.existingServiceAccount)
-			}
-			if tt.existingRoleBinding != nil {
-				objects = append(objects, tt.existingRoleBinding)
-			}
-			for _, otherVMFR := range tt.otherVMFRs {
-				objects = append(objects, otherVMFR)
 			}
 
 			fakeClient := fake.NewClientBuilder().
@@ -2699,38 +2587,115 @@ func TestHandleResourceCleanup(t *testing.T) {
 				}
 			}
 
-			if tt.existingServiceAccount != nil {
-				serviceAccount := &corev1.ServiceAccount{}
-				err = fakeClient.Get(ctx, types.NamespacedName{
-					Name:      tt.existingServiceAccount.Name,
-					Namespace: tt.existingServiceAccount.Namespace,
-				}, serviceAccount)
-				if tt.expectAccessDeleted {
-					if err == nil {
-						t.Error("Expected file server ServiceAccount to be deleted")
-					} else if !errors.IsNotFound(err) {
-						t.Errorf("Expected ServiceAccount NotFound, got: %v", err)
-					}
-				} else if err != nil {
-					t.Errorf("Expected file server ServiceAccount to remain, got: %v", err)
-				}
+		})
+	}
+}
+
+func TestDeleteFileServerAccess(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = oadpv1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = rbacv1.AddToScheme(scheme)
+	ctx := context.Background()
+
+	newVMFR := func(name, uid string, deleting bool) *oadpv1alpha1.VirtualMachineFileRestore {
+		vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "openshift-adp",
+				UID:       types.UID(uid),
+				Finalizers: []string{
+					constant.VMFileRestoreFinalizer,
+				},
+			},
+			Spec: oadpv1alpha1.VirtualMachineFileRestoreSpec{
+				RestoreNamespace: "user-ns",
+			},
+			Status: oadpv1alpha1.VirtualMachineFileRestoreStatus{
+				CreatedNamespace: "user-ns",
+			},
+		}
+		if deleting {
+			now := metav1.Now()
+			vmfr.DeletionTimestamp = &now
+		}
+		return vmfr
+	}
+
+	newAccessObjects := func() []client.Object {
+		return []client.Object{
+			&corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "vmfr-file-server",
+					Namespace: "user-ns",
+					Labels: map[string]string{
+						constant.ManagedByLabel: constant.ManagedByLabelValue,
+					},
+				},
+			},
+			&rbacv1.RoleBinding{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "vmfr-file-server-privileged",
+					Namespace: "user-ns",
+					Labels: map[string]string{
+						constant.ManagedByLabel: constant.ManagedByLabelValue,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name                  string
+		vmfr                  *oadpv1alpha1.VirtualMachineFileRestore
+		otherVMFR             *oadpv1alpha1.VirtualMachineFileRestore
+		expectAccessResources bool
+	}{
+		{
+			name:                  "deletes controller-created resources when namespace is unused",
+			vmfr:                  newVMFR("test-vmfr", "test-uid", true),
+			expectAccessResources: false,
+		},
+		{
+			name:                  "preserves resources while another VMFR uses namespace",
+			vmfr:                  newVMFR("test-vmfr", "test-uid", true),
+			otherVMFR:             newVMFR("other-vmfr", "other-uid", false),
+			expectAccessResources: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objects := []client.Object{
+				&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "user-ns"}},
+				tt.vmfr,
+			}
+			objects = append(objects, newAccessObjects()...)
+			if tt.otherVMFR != nil {
+				objects = append(objects, tt.otherVMFR)
 			}
 
-			if tt.existingRoleBinding != nil {
-				roleBinding := &rbacv1.RoleBinding{}
-				err = fakeClient.Get(ctx, types.NamespacedName{
-					Name:      tt.existingRoleBinding.Name,
-					Namespace: tt.existingRoleBinding.Namespace,
-				}, roleBinding)
-				if tt.expectAccessDeleted {
-					if err == nil {
-						t.Error("Expected file server SCC RoleBinding to be deleted")
-					} else if !errors.IsNotFound(err) {
-						t.Errorf("Expected RoleBinding NotFound, got: %v", err)
-					}
-				} else if err != nil {
-					t.Errorf("Expected file server SCC RoleBinding to remain, got: %v", err)
-				}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(scheme).
+				WithObjects(objects...).
+				Build()
+			reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+
+			err := reconciler.deleteFileServerAccess(ctx, zap.New(), tt.vmfr, "user-ns")
+			if err != nil {
+				t.Fatalf("deleteFileServerAccess returned error: %v", err)
+			}
+
+			serviceAccount := &corev1.ServiceAccount{}
+			err = fakeClient.Get(ctx, types.NamespacedName{Name: "vmfr-file-server", Namespace: "user-ns"}, serviceAccount)
+			if (err == nil) != tt.expectAccessResources {
+				t.Errorf("ServiceAccount presence = %v, want %v", err == nil, tt.expectAccessResources)
+			}
+
+			roleBinding := &rbacv1.RoleBinding{}
+			err = fakeClient.Get(ctx, types.NamespacedName{Name: "vmfr-file-server-privileged", Namespace: "user-ns"}, roleBinding)
+			if (err == nil) != tt.expectAccessResources {
+				t.Errorf("RoleBinding presence = %v, want %v", err == nil, tt.expectAccessResources)
 			}
 		})
 	}
