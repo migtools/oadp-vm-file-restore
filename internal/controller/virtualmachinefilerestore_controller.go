@@ -2254,16 +2254,17 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		}
 		logger.V(1).Info("Using existing restore namespace", "namespace", vmfr.Spec.RestoreNamespace)
 
-		if err := r.ensureFileServerAccess(ctx, logger, vmfr, vmfr.Spec.RestoreNamespace); err != nil {
-			return "", err
-		}
-
-		// Update VMFR status with the namespace (same as we do for temporary namespaces)
+		// Record the namespace before creating access resources. This makes partial
+		// access-resource creation recoverable through the normal finalizer cleanup.
 		patch := client.MergeFrom(vmfr.DeepCopy())
 		vmfr.Status.CreatedNamespace = vmfr.Spec.RestoreNamespace
 		if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
 			logger.Error(err, "Failed to update status with restore namespace")
 			return "", fmt.Errorf("failed to update status with restore namespace: %w", err)
+		}
+
+		if err := r.ensureFileServerAccess(ctx, logger, vmfr, vmfr.Spec.RestoreNamespace); err != nil {
+			return "", err
 		}
 
 		return vmfr.Spec.RestoreNamespace, nil
@@ -4144,7 +4145,7 @@ func (r *VirtualMachineFileRestoreReconciler) deleteFileServerAccess(
 		if otherVMFR.UID == vmfr.UID || otherVMFR.DeletionTimestamp != nil {
 			continue
 		}
-		if otherVMFR.Status.CreatedNamespace == namespace || otherVMFR.Spec.RestoreNamespace == namespace {
+		if otherVMFR.Status.CreatedNamespace == namespace {
 			logger.V(0).Info("Preserving shared file server access resources",
 				"namespace", namespace,
 				"vmfr", fmt.Sprintf("%s/%s", otherVMFR.Namespace, otherVMFR.Name))

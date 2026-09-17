@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -44,6 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -2651,6 +2653,7 @@ func TestDeleteFileServerAccess(t *testing.T) {
 		name                  string
 		vmfr                  *oadpv1alpha1.VirtualMachineFileRestore
 		otherVMFR             *oadpv1alpha1.VirtualMachineFileRestore
+		otherCreatedNamespace string
 		expectAccessResources bool
 	}{
 		{
@@ -2662,7 +2665,15 @@ func TestDeleteFileServerAccess(t *testing.T) {
 			name:                  "preserves resources while another VMFR uses namespace",
 			vmfr:                  newVMFR("test-vmfr", "test-uid", true),
 			otherVMFR:             newVMFR("other-vmfr", "other-uid", false),
+			otherCreatedNamespace: "user-ns",
 			expectAccessResources: true,
+		},
+		{
+			name:                  "deletes resources when another VMFR only references the namespace",
+			vmfr:                  newVMFR("test-vmfr", "test-uid", true),
+			otherVMFR:             newVMFR("other-vmfr", "other-uid", false),
+			otherCreatedNamespace: "",
+			expectAccessResources: false,
 		},
 	}
 
@@ -2674,6 +2685,7 @@ func TestDeleteFileServerAccess(t *testing.T) {
 			}
 			objects = append(objects, newAccessObjects()...)
 			if tt.otherVMFR != nil {
+				tt.otherVMFR.Status.CreatedNamespace = tt.otherCreatedNamespace
 				objects = append(objects, tt.otherVMFR)
 			}
 
@@ -2700,6 +2712,56 @@ func TestDeleteFileServerAccess(t *testing.T) {
 				t.Errorf("RoleBinding presence = %v, want %v", err == nil, tt.expectAccessResources)
 			}
 		})
+	}
+}
+
+func TestEnsureRestoreNamespaceRecordsUserNamespaceBeforeCreatingAccess(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := oadpv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbacv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-vmfr", Namespace: "openshift-adp", UID: "test-uid"},
+		Spec:       oadpv1alpha1.VirtualMachineFileRestoreSpec{RestoreNamespace: "user-ns"},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "user-ns"}}, vmfr).
+		WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, isRoleBinding := obj.(*rbacv1.RoleBinding); isRoleBinding {
+					return fmt.Errorf("injected RoleBinding creation failure")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+	_, err := reconciler.ensureRestoreNamespace(context.Background(), zap.New(), vmfr)
+	if err == nil {
+		t.Fatal("ensureRestoreNamespace succeeded despite RoleBinding creation failure")
+	}
+
+	persistedVMFR := &oadpv1alpha1.VirtualMachineFileRestore{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: vmfr.Name, Namespace: vmfr.Namespace}, persistedVMFR); err != nil {
+		t.Fatal(err)
+	}
+	if persistedVMFR.Status.CreatedNamespace != "user-ns" {
+		t.Fatalf("CreatedNamespace = %q, want user-ns", persistedVMFR.Status.CreatedNamespace)
+	}
+
+	serviceAccount := &corev1.ServiceAccount{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "vmfr-file-server", Namespace: "user-ns"}, serviceAccount); err != nil {
+		t.Fatalf("ServiceAccount was not created before the injected failure: %v", err)
 	}
 }
 
