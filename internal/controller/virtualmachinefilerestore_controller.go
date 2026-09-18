@@ -2318,16 +2318,17 @@ func (r *VirtualMachineFileRestoreReconciler) ensureRestoreNamespace(
 		logger.V(0).Info("Created temporary restore namespace", "namespace", namespaceName)
 	}
 
-	if err := r.ensureFileServerAccess(ctx, logger, vmfr, namespaceName); err != nil {
-		return "", err
-	}
-
-	// Update VMFR status with the created namespace
+	// Record the namespace before creating access resources. This makes partial
+	// access-resource creation recoverable through the normal finalizer cleanup.
 	patch := client.MergeFrom(vmfr.DeepCopy())
 	vmfr.Status.CreatedNamespace = namespaceName
 	if err := r.Status().Patch(ctx, vmfr, patch); err != nil {
 		logger.Error(err, "Failed to update status with created namespace")
 		return "", fmt.Errorf("failed to update status with created namespace: %w", err)
+	}
+
+	if err := r.ensureFileServerAccess(ctx, logger, vmfr, namespaceName); err != nil {
+		return "", err
 	}
 
 	return namespaceName, nil

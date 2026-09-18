@@ -2763,6 +2763,63 @@ func TestEnsureRestoreNamespaceRecordsUserNamespaceBeforeCreatingAccess(t *testi
 	}
 }
 
+func TestEnsureRestoreNamespaceRecordsTemporaryNamespaceBeforeCreatingAccess(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := oadpv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbacv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-vmfr", Namespace: "openshift-adp", UID: "test-uid"},
+		Spec:       oadpv1alpha1.VirtualMachineFileRestoreSpec{BackupsDiscoveryRef: "test-discovery"},
+	}
+	discovery := &oadpv1alpha1.VirtualMachineBackupsDiscovery{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-discovery", Namespace: "openshift-adp"},
+		Spec: oadpv1alpha1.VirtualMachineBackupsDiscoverySpec{
+			VirtualMachineName:      "test-vm",
+			VirtualMachineNamespace: "test-vm-ns",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(vmfr, discovery).
+		WithStatusSubresource(&oadpv1alpha1.VirtualMachineFileRestore{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, isRoleBinding := obj.(*rbacv1.RoleBinding); isRoleBinding {
+					return fmt.Errorf("injected RoleBinding creation failure")
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+	_, err := reconciler.ensureRestoreNamespace(context.Background(), zap.New(), vmfr)
+	if err == nil {
+		t.Fatal("ensureRestoreNamespace succeeded despite RoleBinding creation failure")
+	}
+
+	persistedVMFR := &oadpv1alpha1.VirtualMachineFileRestore{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: vmfr.Name, Namespace: vmfr.Namespace}, persistedVMFR); err != nil {
+		t.Fatal(err)
+	}
+	if persistedVMFR.Status.CreatedNamespace == "" {
+		t.Fatal("CreatedNamespace was not persisted before access-resource creation")
+	}
+
+	serviceAccount := &corev1.ServiceAccount{}
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "vmfr-file-server", Namespace: persistedVMFR.Status.CreatedNamespace}, serviceAccount); err != nil {
+		t.Fatalf("ServiceAccount was not created before the injected failure: %v", err)
+	}
+}
+
 func TestEnsureFileServerAccessRejectsConflictingResources(t *testing.T) {
 	scheme := runtime.NewScheme()
 	if err := oadpv1alpha1.AddToScheme(scheme); err != nil {
