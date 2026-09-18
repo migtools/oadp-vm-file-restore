@@ -92,7 +92,7 @@ func (e ErrUnsupportedBackup) Error() string {
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=security.openshift.io,resources=securitycontextconstraints,resourceNames=privileged,verbs=use
@@ -2354,15 +2354,26 @@ func (r *VirtualMachineFileRestoreReconciler) ensureFileServerAccess(
 		},
 	}
 
-	err := r.Create(ctx, serviceAccount)
-	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			logger.V(1).Info("ServiceAccount already exists", "serviceAccount", serviceAccountName, "namespace", namespaceName)
+	serviceAccountKey := types.NamespacedName{Name: serviceAccountName, Namespace: namespaceName}
+	existingServiceAccount := &corev1.ServiceAccount{}
+	err := r.Get(ctx, serviceAccountKey, existingServiceAccount)
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, serviceAccount); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("failed to create ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
+			}
+			logger.V(1).Info("ServiceAccount was created concurrently", "serviceAccount", serviceAccountName, "namespace", namespaceName)
 		} else {
-			return fmt.Errorf("failed to create ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
+			logger.V(0).Info("Created ServiceAccount for file server", "serviceAccount", serviceAccountName, "namespace", namespaceName)
 		}
-	} else {
-		logger.V(0).Info("Created ServiceAccount for file server", "serviceAccount", serviceAccountName, "namespace", namespaceName)
+		if err := r.Get(ctx, serviceAccountKey, existingServiceAccount); err != nil {
+			return fmt.Errorf("failed to get ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to get ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
+	}
+	if !isControllerManagedResource(existingServiceAccount) {
+		return fmt.Errorf("existing ServiceAccount '%s' in namespace '%s' is not managed by VMFR", serviceAccountName, namespaceName)
 	}
 
 	// Bind ServiceAccount to privileged SCC via RoleBinding (OpenShift-specific)
@@ -2391,19 +2402,38 @@ func (r *VirtualMachineFileRestoreReconciler) ensureFileServerAccess(
 		},
 	}
 
-	err = r.Create(ctx, sccRoleBinding)
-	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			logger.V(1).Info("SCC RoleBinding already exists", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
-		} else if apierrors.IsNotFound(err) {
-			// NotFound means the system:openshift:scc:privileged ClusterRole doesn't exist
-			// This is expected on non-OpenShift clusters (vanilla Kubernetes, Kind, etc.)
-			logger.V(0).Info("Skipping SCC RoleBinding creation - not running on OpenShift", "namespace", namespaceName)
+	roleBindingKey := types.NamespacedName{Name: sccRoleBinding.Name, Namespace: namespaceName}
+	existingRoleBinding := &rbacv1.RoleBinding{}
+	err = r.Get(ctx, roleBindingKey, existingRoleBinding)
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, sccRoleBinding); err != nil {
+			if apierrors.IsNotFound(err) {
+				// NotFound means the system:openshift:scc:privileged ClusterRole doesn't exist
+				// This is expected on non-OpenShift clusters (vanilla Kubernetes, Kind, etc.)
+				logger.V(0).Info("Skipping SCC RoleBinding creation - not running on OpenShift", "namespace", namespaceName)
+				return nil
+			}
+			if !apierrors.IsAlreadyExists(err) {
+				return fmt.Errorf("failed to create SCC RoleBinding in namespace '%s': %w", namespaceName, err)
+			}
+			logger.V(1).Info("SCC RoleBinding was created concurrently", "roleBinding", sccRoleBinding.Name, "namespace", namespaceName)
 		} else {
-			return fmt.Errorf("failed to create SCC RoleBinding in namespace '%s': %w", namespaceName, err)
+			logger.V(0).Info("Bound ServiceAccount to privileged SCC", "roleBinding", sccRoleBinding.Name, "namespace", namespaceName)
 		}
-	} else {
-		logger.V(0).Info("Bound ServiceAccount to privileged SCC", "roleBinding", "vmfr-file-server-privileged", "namespace", namespaceName)
+		if err := r.Get(ctx, roleBindingKey, existingRoleBinding); err != nil {
+			return fmt.Errorf("failed to get SCC RoleBinding in namespace '%s': %w", namespaceName, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to get SCC RoleBinding in namespace '%s': %w", namespaceName, err)
+	}
+	if !isControllerManagedResource(existingRoleBinding) {
+		return fmt.Errorf("existing SCC RoleBinding '%s' in namespace '%s' is not managed by VMFR", sccRoleBinding.Name, namespaceName)
+	}
+	if existingRoleBinding.RoleRef != sccRoleBinding.RoleRef {
+		return fmt.Errorf("existing SCC RoleBinding '%s' in namespace '%s' has an unexpected role reference", sccRoleBinding.Name, namespaceName)
+	}
+	if len(existingRoleBinding.Subjects) != 1 || existingRoleBinding.Subjects[0] != sccRoleBinding.Subjects[0] {
+		return fmt.Errorf("existing SCC RoleBinding '%s' in namespace '%s' has unexpected subjects", sccRoleBinding.Name, namespaceName)
 	}
 
 	return nil
