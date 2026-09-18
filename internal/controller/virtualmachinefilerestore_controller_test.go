@@ -2765,6 +2765,103 @@ func TestEnsureRestoreNamespaceRecordsUserNamespaceBeforeCreatingAccess(t *testi
 	}
 }
 
+func TestEnsureFileServerAccessRejectsConflictingResources(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := oadpv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbacv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	managedLabels := map[string]string{constant.ManagedByLabel: constant.ManagedByLabelValue}
+	expectedRoleRef := rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "system:openshift:scc:privileged"}
+	expectedSubject := rbacv1.Subject{Kind: "ServiceAccount", Name: "vmfr-file-server", Namespace: "user-ns"}
+	newManagedServiceAccount := func() *corev1.ServiceAccount {
+		return &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server", Namespace: "user-ns", Labels: managedLabels}}
+	}
+
+	tests := []struct {
+		name         string
+		objects      []client.Object
+		expectError  bool
+		errorMessage string
+	}{
+		{
+			name: "correctly configured managed resources",
+			objects: []client.Object{
+				newManagedServiceAccount(),
+				&rbacv1.RoleBinding{
+					ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server-privileged", Namespace: "user-ns", Labels: managedLabels},
+					RoleRef:    expectedRoleRef,
+					Subjects:   []rbacv1.Subject{expectedSubject},
+				},
+			},
+		},
+		{
+			name: "unmanaged ServiceAccount",
+			objects: []client.Object{
+				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server", Namespace: "user-ns"}},
+			},
+			expectError:  true,
+			errorMessage: "is not managed by VMFR",
+		},
+		{
+			name: "unmanaged RoleBinding",
+			objects: []client.Object{
+				newManagedServiceAccount(),
+				&rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server-privileged", Namespace: "user-ns"}},
+			},
+			expectError:  true,
+			errorMessage: "is not managed by VMFR",
+		},
+		{
+			name: "managed RoleBinding with unexpected role reference",
+			objects: []client.Object{
+				newManagedServiceAccount(),
+				&rbacv1.RoleBinding{
+					ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server-privileged", Namespace: "user-ns", Labels: managedLabels},
+					RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "view"},
+					Subjects:   []rbacv1.Subject{expectedSubject},
+				},
+			},
+			expectError:  true,
+			errorMessage: "unexpected role reference",
+		},
+		{
+			name: "managed RoleBinding with unexpected subjects",
+			objects: []client.Object{
+				newManagedServiceAccount(),
+				&rbacv1.RoleBinding{
+					ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server-privileged", Namespace: "user-ns", Labels: managedLabels},
+					RoleRef:    expectedRoleRef,
+					Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "other", Namespace: "user-ns"}},
+				},
+			},
+			expectError:  true,
+			errorMessage: "unexpected subjects",
+		},
+	}
+
+	vmfr := &oadpv1alpha1.VirtualMachineFileRestore{ObjectMeta: metav1.ObjectMeta{UID: "test-uid"}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+			err := reconciler.ensureFileServerAccess(context.Background(), zap.New(), vmfr, "user-ns")
+			if !tt.expectError && err != nil {
+				t.Fatalf("ensureFileServerAccess returned unexpected error: %v", err)
+			}
+			if tt.expectError && (err == nil || !strings.Contains(err.Error(), tt.errorMessage)) {
+				t.Fatalf("ensureFileServerAccess error = %v, want error containing %q", err, tt.errorMessage)
+			}
+		})
+	}
+}
+
 func TestFixDataDownloadPVCNames(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = oadpv1alpha1.AddToScheme(scheme)
