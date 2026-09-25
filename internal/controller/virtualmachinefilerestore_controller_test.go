@@ -88,6 +88,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -122,6 +123,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -164,6 +166,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -222,6 +225,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -271,6 +275,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -330,6 +335,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -402,6 +408,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -447,6 +454,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -509,6 +517,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -554,6 +563,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -612,6 +622,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -676,6 +687,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -727,6 +739,7 @@ var _ = Describe("VirtualMachineFileRestore Controller", func() {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        client,
+				APIReader:     client,
 				Scheme:        scheme,
 				OADPNamespace: oadpNamespace,
 			}
@@ -1173,8 +1186,9 @@ func TestFindRestoredPVCName(t *testing.T) {
 				Build()
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			name, err := reconciler.findRestoredPVCName(ctx, tt.restoreNamespace, tt.veleroRestoreName, tt.originalPVCName)
@@ -1694,6 +1708,7 @@ func TestProcessDiscoveryResults(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -1787,8 +1802,9 @@ func TestGetVeleroBackup(t *testing.T) {
 				Build()
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			backup, err := reconciler.getVeleroBackup(ctx, tt.backupName, tt.backupNS)
@@ -1876,8 +1892,9 @@ func TestGetDiscoveryResource(t *testing.T) {
 				Build()
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			vmfr := &oadpv1alpha1.VirtualMachineFileRestore{
@@ -2123,6 +2140,7 @@ func TestHandleVeleroRestoreCleanup(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -2477,6 +2495,7 @@ func TestHandleResourceCleanup(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -2691,7 +2710,7 @@ func TestDeleteFileServerAccess(t *testing.T) {
 				WithScheme(scheme).
 				WithObjects(objects...).
 				Build()
-			reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+			reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme}
 
 			err := reconciler.deleteFileServerAccess(ctx, zap.New(), tt.vmfr, "user-ns")
 			if err != nil {
@@ -2743,7 +2762,7 @@ func TestEnsureRestoreNamespaceRecordsUserNamespaceBeforeCreatingAccess(t *testi
 		}).
 		Build()
 
-	reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+	reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme}
 	_, err := reconciler.ensureRestoreNamespace(context.Background(), zap.New(), vmfr)
 	if err == nil {
 		t.Fatal("ensureRestoreNamespace succeeded despite RoleBinding creation failure")
@@ -2800,7 +2819,7 @@ func TestEnsureRestoreNamespaceRecordsTemporaryNamespaceBeforeCreatingAccess(t *
 		}).
 		Build()
 
-	reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+	reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme}
 	_, err := reconciler.ensureRestoreNamespace(context.Background(), zap.New(), vmfr)
 	if err == nil {
 		t.Fatal("ensureRestoreNamespace succeeded despite RoleBinding creation failure")
@@ -2905,7 +2924,7 @@ func TestEnsureFileServerAccessRejectsConflictingResources(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
-			reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, Scheme: scheme}
+			reconciler := &VirtualMachineFileRestoreReconciler{Client: fakeClient, APIReader: fakeClient, Scheme: scheme}
 			err := reconciler.ensureFileServerAccess(context.Background(), zap.New(), vmfr, "user-ns")
 			if !tt.expectError && err != nil {
 				t.Fatalf("ensureFileServerAccess returned unexpected error: %v", err)
@@ -2914,6 +2933,56 @@ func TestEnsureFileServerAccessRejectsConflictingResources(t *testing.T) {
 				t.Fatalf("ensureFileServerAccess error = %v, want error containing %q", err, tt.errorMessage)
 			}
 		})
+	}
+}
+
+func TestEnsureFileServerAccessToleratesStaleCacheAfterCreate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := oadpv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := rbacv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	vmfr := &oadpv1alpha1.VirtualMachineFileRestore{ObjectMeta: metav1.ObjectMeta{UID: "test-uid"}}
+	managedLabels := map[string]string{
+		constant.VMFROriginUUIDLabel: string(vmfr.UID),
+		constant.ManagedByLabel:      constant.ManagedByLabelValue,
+	}
+
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server", Namespace: "user-ns", Labels: managedLabels},
+	}
+	roleBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "vmfr-file-server-privileged", Namespace: "user-ns", Labels: managedLabels},
+		RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "system:openshift:scc:privileged"},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: "vmfr-file-server", Namespace: "user-ns"}},
+	}
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(serviceAccount, roleBinding).Build()
+
+	cachedClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				switch obj.(type) {
+				case *corev1.ServiceAccount:
+					return errors.NewNotFound(corev1.Resource("serviceaccounts"), key.Name)
+				case *rbacv1.RoleBinding:
+					return errors.NewNotFound(rbacv1.Resource("rolebindings"), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &VirtualMachineFileRestoreReconciler{Client: cachedClient, APIReader: apiReader, Scheme: scheme}
+
+	if err := reconciler.ensureFileServerAccess(context.Background(), zap.New(), vmfr, "user-ns"); err != nil {
+		t.Fatalf("ensureFileServerAccess failed despite a stale cache: %v", err)
 	}
 }
 
@@ -3422,6 +3491,7 @@ func TestFixDataDownloadPVCNames(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -3582,8 +3652,9 @@ func TestGetBackupMetadata(t *testing.T) {
 				Build()
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			progress, err := reconciler.getBackupMetadata(ctx, tt.backupInfo)
@@ -3858,6 +3929,7 @@ func TestRunConcurrentPVCDiscovery(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:               fakeClient,
+				APIReader:            fakeClient,
 				Scheme:               scheme,
 				OADPNamespace:        "openshift-adp",
 				BackupContentsReader: tt.mockReader,
@@ -4468,6 +4540,7 @@ func TestMonitorVeleroRestores(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -4980,6 +5053,7 @@ func TestValidateRestoredPVCs(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -5344,6 +5418,7 @@ func TestCreateVeleroRestores(t *testing.T) {
 
 			reconciler := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: "openshift-adp",
 			}
@@ -6725,6 +6800,7 @@ func TestFindExistingVeleroRestore(t *testing.T) {
 
 			r := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: testOADPNamespace,
 			}
@@ -6895,8 +6971,9 @@ func TestMapVMBDToVMFR(t *testing.T) {
 				Build()
 
 			r := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			requests := r.mapVMBDToVMFR(context.TODO(), tt.vmbd)
@@ -7271,8 +7348,9 @@ func TestIsOpenShiftCluster(t *testing.T) {
 			}
 
 			r := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			result := r.isOpenShiftCluster(mgr)
@@ -7384,8 +7462,9 @@ func TestFindRouteHost(t *testing.T) {
 				Build()
 
 			r := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			host, err := r.findRouteHost(context.Background(), tt.routeNS, tt.routeName)
@@ -7511,8 +7590,9 @@ func TestFindSecretByLabels(t *testing.T) {
 				Build()
 
 			r := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			secretName, err := r.findSecretByLabels(
@@ -7824,6 +7904,7 @@ func TestValidateAndDiscoverPVCs(t *testing.T) {
 
 			r := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: testOADPNamespace,
 			}
@@ -8503,6 +8584,7 @@ func TestExecuteFileRestoreWorkflow(t *testing.T) {
 
 			r := &VirtualMachineFileRestoreReconciler{
 				Client:        fakeClient,
+				APIReader:     fakeClient,
 				Scheme:        scheme,
 				OADPNamespace: testOADPNamespace,
 			}
@@ -8932,8 +9014,9 @@ func TestCreateFileServerResources(t *testing.T) {
 				Build()
 
 			r := &VirtualMachineFileRestoreReconciler{
-				Client: fakeClient,
-				Scheme: scheme,
+				Client:    fakeClient,
+				APIReader: fakeClient,
+				Scheme:    scheme,
 			}
 
 			logger := zap.New(zap.UseDevMode(true))

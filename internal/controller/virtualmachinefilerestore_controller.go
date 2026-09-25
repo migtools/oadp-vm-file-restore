@@ -56,7 +56,8 @@ import (
 // VirtualMachineFileRestoreReconciler reconciles a VirtualMachineFileRestore object
 type VirtualMachineFileRestoreReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 
 	// OADPNamespace is the namespace where OADP and Velero backups are located
 	OADPNamespace string
@@ -2367,7 +2368,7 @@ func (r *VirtualMachineFileRestoreReconciler) ensureFileServerAccess(
 		} else {
 			logger.V(0).Info("Created ServiceAccount for file server", "serviceAccount", serviceAccountName, "namespace", namespaceName)
 		}
-		if err := r.Get(ctx, serviceAccountKey, existingServiceAccount); err != nil {
+		if err := r.APIReader.Get(ctx, serviceAccountKey, existingServiceAccount); err != nil {
 			return fmt.Errorf("failed to get ServiceAccount '%s' in namespace '%s': %w", serviceAccountName, namespaceName, err)
 		}
 	} else if err != nil {
@@ -2421,7 +2422,7 @@ func (r *VirtualMachineFileRestoreReconciler) ensureFileServerAccess(
 		} else {
 			logger.V(0).Info("Bound ServiceAccount to privileged SCC", "roleBinding", sccRoleBinding.Name, "namespace", namespaceName)
 		}
-		if err := r.Get(ctx, roleBindingKey, existingRoleBinding); err != nil {
+		if err := r.APIReader.Get(ctx, roleBindingKey, existingRoleBinding); err != nil {
 			return fmt.Errorf("failed to get SCC RoleBinding in namespace '%s': %w", namespaceName, err)
 		}
 	} else if err != nil {
