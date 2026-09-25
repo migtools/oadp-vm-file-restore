@@ -275,6 +275,7 @@ func main() {
 	// Create VirtualMachineFileRestore controller
 	vmfrReconciler := &controller.VirtualMachineFileRestoreReconciler{
 		Client:               mgr.GetClient(),
+		APIReader:            mgr.GetAPIReader(),
 		Scheme:               mgr.GetScheme(),
 		OADPNamespace:        oadpNamespace,
 		BackupContentsReader: backupReader,
