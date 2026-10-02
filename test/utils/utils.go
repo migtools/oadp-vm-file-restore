@@ -50,7 +50,10 @@ const (
 	resticHelperImage    = "velero/velero-restic-restore-helper:v1.14.1"
 
 	// MinIO for backup storage in tests
+	// Note: both images are pulled from quay.io because MinIO deprecated its Docker Hub
+	// images (minio/minio and minio/mc), which now fail to pull with "access denied".
 	minioImage = "quay.io/minio/minio:latest"
+	mcImage    = "quay.io/minio/mc:latest"
 
 	defaultKindBinary  = "kind"
 	defaultKindCluster = "kind"
@@ -433,6 +436,36 @@ func IsCDIInstalled() bool {
 	return err == nil
 }
 
+// collectMinIODiagnostics prints actionable diagnostic information (describe output, Pod
+// status, and Pod logs) for a resource in the minio namespace. It is used to help debug
+// failures when a "kubectl wait" on that resource does not reach the expected condition.
+func collectMinIODiagnostics(resourceKind, resourceName, podLabelSelector string) {
+	_, _ = fmt.Fprintf(os.Stderr, "\n========== MinIO %s/%s DIAGNOSTIC INFO ==========\n", resourceKind, resourceName)
+
+	cmd := exec.Command("kubectl", "describe", resourceKind+"/"+resourceName, "-n", "minio")
+	if out, err := Run(cmd); err == nil {
+		_, _ = fmt.Fprintf(os.Stderr, "\n%s Describe:\n%s\n", resourceKind, out)
+	}
+
+	cmd = exec.Command("kubectl", "get", "pods", "-n", "minio", "-l", podLabelSelector, "-o", "wide")
+	if out, err := Run(cmd); err == nil {
+		_, _ = fmt.Fprintf(os.Stderr, "\nPods:\n%s\n", out)
+	}
+
+	cmd = exec.Command("kubectl", "describe", "pods", "-n", "minio", "-l", podLabelSelector)
+	if out, err := Run(cmd); err == nil {
+		_, _ = fmt.Fprintf(os.Stderr, "\nPods Describe:\n%s\n", out)
+	}
+
+	cmd = exec.Command("kubectl", "logs", "-n", "minio", "-l", podLabelSelector,
+		"--all-containers", "--tail=200", "--ignore-errors")
+	if out, err := Run(cmd); err == nil {
+		_, _ = fmt.Fprintf(os.Stderr, "\nPod Logs:\n%s\n", out)
+	}
+
+	_, _ = fmt.Fprintf(os.Stderr, "===============================================\n\n")
+}
+
 // InstallMinIO installs MinIO for backup storage in tests
 func InstallMinIO() error {
 	_, _ = fmt.Fprintf(os.Stderr, "Installing MinIO for backup storage...\n")
@@ -482,6 +515,20 @@ spec:
           value: "minio123"
         ports:
         - containerPort: 9000
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: 9000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /minio/health/live
+            port: 9000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 6
         volumeMounts:
         - name: storage
           mountPath: /storage
@@ -515,6 +562,7 @@ spec:
 		"--namespace", "minio",
 		"--timeout", "5m")
 	if _, err := Run(cmd); err != nil {
+		collectMinIODiagnostics("deployment", "minio", "app=minio")
 		return fmt.Errorf("failed waiting for MinIO: %w", err)
 	}
 
@@ -531,7 +579,7 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: mc
-        image: minio/mc:latest
+        image: ` + mcImage + `
         command:
         - /bin/sh
         - -c
@@ -546,12 +594,14 @@ spec:
 		return fmt.Errorf("failed to create bucket job: %w", err)
 	}
 
-	// Wait for job to complete
+	// Wait for job to complete. The timeout allows time for the mc image to be
+	// pulled and scheduled in addition to the bucket creation commands running.
 	cmd = exec.Command("kubectl", "wait", "job/create-bucket",
 		"--for", "condition=Complete",
 		"--namespace", "minio",
-		"--timeout", "2m")
+		"--timeout", "3m")
 	if _, err := Run(cmd); err != nil {
+		collectMinIODiagnostics("job", "create-bucket", "job-name=create-bucket")
 		return fmt.Errorf("failed waiting for bucket creation: %w", err)
 	}
 
