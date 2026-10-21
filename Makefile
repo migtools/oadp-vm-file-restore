@@ -100,6 +100,23 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -timeout 20m -tags=e2e ./test/e2e/ -v -ginkgo.v
 	$(MAKE) cleanup-test-e2e
 
+# Upstream MinIO no longer publishes prebuilt images, so the e2e MinIO image is built from
+# Bitnami's Dockerfile at a reviewed commit (same approach as velero-io/velero's kind e2e
+# workflow). Keep in sync with BITNAMI_CONTAINERS_COMMIT in .github/workflows/test-e2e.yml.
+# bitnami/containers: [bitnami/minio] Release 2026.7.17-debian-12-r0
+BITNAMI_CONTAINERS_COMMIT ?= 19fb570e551f15ab0c8264aafa93774266761b8d
+MINIO_IMAGE ?= bitnami/minio:local
+
+.PHONY: build-minio-image
+build-minio-image: ## Build the MinIO image used by the e2e tests from Bitnami's Dockerfile.
+	@rm -rf $(LOCALBIN)/bitnami-containers && mkdir -p $(LOCALBIN)/bitnami-containers
+	git -C $(LOCALBIN)/bitnami-containers init -q
+	git -C $(LOCALBIN)/bitnami-containers remote add origin https://github.com/bitnami/containers.git
+	git -C $(LOCALBIN)/bitnami-containers fetch --depth 1 origin $(BITNAMI_CONTAINERS_COMMIT)
+	git -C $(LOCALBIN)/bitnami-containers checkout -q $(BITNAMI_CONTAINERS_COMMIT)
+	$(CONTAINER_TOOL) build -t $(MINIO_IMAGE) $(LOCALBIN)/bitnami-containers/bitnami/minio/2026/debian-12
+	@rm -rf $(LOCALBIN)/bitnami-containers
+
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)

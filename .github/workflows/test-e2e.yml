@@ -1,8 +1,16 @@
 name: E2E Tests
 
 on:
+  workflow_dispatch:
   push:
   pull_request:
+
+env:
+  # Upstream MinIO no longer publishes prebuilt images, so the MinIO image is built from
+  # Bitnami's Dockerfile at a reviewed commit, as velero-io/velero's kind e2e workflow does.
+  # Bump deliberately after reviewing the upstream changes; keep in sync with the Makefile.
+  # bitnami/containers: [bitnami/minio] Release 2026.7.17-debian-12-r0
+  BITNAMI_CONTAINERS_COMMIT: 19fb570e551f15ab0c8264aafa93774266761b8d
 
 jobs:
   test-e2e:
@@ -25,6 +33,23 @@ jobs:
 
       - name: Verify kind installation
         run: kind version
+
+      - name: Restore MinIO image cache
+        uses: actions/cache@v4
+        id: minio-cache
+        with:
+          path: ./minio-image.tar
+          key: minio-bitnami-${{ env.BITNAMI_CONTAINERS_COMMIT }}
+
+      - name: Build MinIO image from Bitnami Dockerfile
+        if: steps.minio-cache.outputs.cache-hit != 'true'
+        run: |
+          make build-minio-image BITNAMI_CONTAINERS_COMMIT="${BITNAMI_CONTAINERS_COMMIT}"
+          docker save bitnami/minio:local -o ./minio-image.tar
+
+      - name: Load MinIO image
+        if: steps.minio-cache.outputs.cache-hit == 'true'
+        run: docker load -i ./minio-image.tar
 
       - name: Running Test e2e
         run: |
