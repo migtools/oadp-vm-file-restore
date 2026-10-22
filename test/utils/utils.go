@@ -49,11 +49,13 @@ const (
 	awsPluginImage       = "velero/velero-plugin-for-aws:v1.10.1"
 	resticHelperImage    = "velero/velero-restic-restore-helper:v1.14.1"
 
-	// MinIO for backup storage in tests
-	// Note: both images are pulled from quay.io because MinIO deprecated its Docker Hub
-	// images (minio/minio and minio/mc), which now fail to pull with "access denied".
-	minioImage = "quay.io/minio/minio:latest"
-	mcImage    = "quay.io/minio/mc:latest"
+	// MinIO for backup storage in tests.
+	// Upstream MinIO no longer publishes prebuilt images, so the image is built locally from
+	// Bitnami's Dockerfile at a pinned commit (see `make build-minio-image`, same approach as
+	// velero-io/velero's kind e2e workflow) and loaded into the Kind cluster by InstallMinIO.
+	// The Bitnami image also ships the mc client at minioClientBin.
+	minioImage     = "bitnami/minio:local"
+	minioClientBin = "/opt/bitnami/minio-client/bin/mc"
 
 	defaultKindBinary  = "kind"
 	defaultKindCluster = "kind"
@@ -470,6 +472,11 @@ func collectMinIODiagnostics(resourceKind, resourceName, podLabelSelector string
 func InstallMinIO() error {
 	_, _ = fmt.Fprintf(os.Stderr, "Installing MinIO for backup storage...\n")
 
+	// The image is built locally (make build-minio-image), not pulled from a registry.
+	if err := LoadImageToKindClusterWithName(minioImage); err != nil {
+		return fmt.Errorf("failed to load MinIO image %s into Kind (run `make build-minio-image` first): %w", minioImage, err)
+	}
+
 	minioYAML := `
 apiVersion: v1
 kind: Namespace
@@ -502,17 +509,19 @@ spec:
       labels:
         app: minio
     spec:
+      securityContext:
+        fsGroup: 1001
       containers:
       - name: minio
         image: ` + minioImage + `
-        args:
-        - server
-        - /storage
+        imagePullPolicy: IfNotPresent
         env:
-        - name: MINIO_ACCESS_KEY
+        - name: MINIO_ROOT_USER
           value: "minio"
-        - name: MINIO_SECRET_KEY
+        - name: MINIO_ROOT_PASSWORD
           value: "minio123"
+        - name: MINIO_DEFAULT_BUCKETS
+          value: "velero"
         ports:
         - containerPort: 9000
         readinessProbe:
@@ -531,7 +540,7 @@ spec:
           failureThreshold: 6
         volumeMounts:
         - name: storage
-          mountPath: /storage
+          mountPath: /bitnami/minio/data
       volumes:
       - name: storage
         persistentVolumeClaim:
@@ -579,14 +588,18 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: mc
-        image: ` + mcImage + `
+        image: ` + minioImage + `
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: HOME
+          value: /tmp
         command:
         - /bin/sh
         - -c
         - |
-          mc alias set myminio http://minio.minio.svc:9000 minio minio123
-          mc mb myminio/velero || true
-          mc version enable myminio/velero || true
+          ` + minioClientBin + ` alias set myminio http://minio.minio.svc:9000 minio minio123
+          ` + minioClientBin + ` mb myminio/velero || true
+          ` + minioClientBin + ` version enable myminio/velero || true
 `
 	cmd = exec.Command("kubectl", "apply", "-f", "-")
 	cmd.Stdin = StringReader(createBucketYAML)
@@ -594,8 +607,8 @@ spec:
 		return fmt.Errorf("failed to create bucket job: %w", err)
 	}
 
-	// Wait for job to complete. The timeout allows time for the mc image to be
-	// pulled and scheduled in addition to the bucket creation commands running.
+	// Wait for job to complete. The timeout allows time for the Job to be
+	// scheduled in addition to the bucket creation commands running.
 	cmd = exec.Command("kubectl", "wait", "job/create-bucket",
 		"--for", "condition=Complete",
 		"--namespace", "minio",
